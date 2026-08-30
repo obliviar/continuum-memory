@@ -23,6 +23,7 @@ if (-not (Test-Path -LiteralPath $workerBundle)) {
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("deskpet-v4-smoke-{0}" -f [guid]::NewGuid().ToString('N'))
 $dataPath = Join-Path $testRoot 'data'
 $logPath = Join-Path $testRoot 'boot.log'
+$runtimeReportPath = Join-Path $dataPath 'memory-v4-runtime-report.json'
 New-Item -ItemType Directory -Path $dataPath | Out-Null
 
 $items = @(
@@ -104,6 +105,20 @@ try {
     $observedOfficialReads = (Select-String -Path $logPath -Pattern 'Memory V4 (official read|worker) smoke').Line -join ' | '
     throw "Auto mode did not inject the accepted V4 fact through the official read controller. Observed: $observedOfficialReads"
   }
+  if (-not (Test-Path -LiteralPath $runtimeReportPath)) {
+    throw 'The first official V4 read did not persist its runtime observability report.'
+  }
+  $runtimeReport = Get-Content -LiteralPath $runtimeReportPath -Raw | ConvertFrom-Json
+  $runtimeReportComplete = $runtimeReport.version -eq 'memory-v4-runtime-report-v1' `
+    -and $runtimeReport.total.reads -ge 1 `
+    -and $runtimeReport.total.readSources.v4 -ge 1 `
+    -and $runtimeReport.total.v4EvidenceSufficientRate -eq 1 `
+    -and $runtimeReport.worker.completed -ge 1 `
+    -and $runtimeReport.memory.facts -eq 2 `
+    -and $runtimeReport.policy.policyId -eq 'deskpet-v4-retrieval-budget-625-v1'
+  if (-not $runtimeReportComplete) {
+    throw "The first runtime observability report is incomplete: $($runtimeReport | ConvertTo-Json -Depth 10 -Compress)"
+  }
   if (-not (Select-String -Path $logPath -Pattern 'Memory V4 internal candidate review enabled; review does not modify official read mode' -Quiet)) {
     throw 'The opt-in V4 internal candidate review controller was not initialized.'
   }
@@ -136,6 +151,46 @@ try {
     throw 'The restart did not preserve complete V3/V4 audit consistency.'
   }
 
+  $v3Path = Join-Path $dataPath 'memories.enc'
+  $v4Path = Join-Path $dataPath 'memory-v4.enc'
+  $recoverableV4Checkpoint = [IO.File]::ReadAllBytes($v4Path)
+  $v3HashBefore = Get-Sha256Hex $v3Path
+  Remove-Item Env:DESKPET_SMOKE_EXPECT_ROLLOUT_STAGE -ErrorAction SilentlyContinue
+  [IO.File]::WriteAllText($v4Path, '{corrupt-v4', [Text.UTF8Encoding]::new($false))
+  Invoke-SmokeLaunch
+  $v3HashAfter = Get-Sha256Hex $v3Path
+  if ($v3HashBefore -ne $v3HashAfter) {
+    throw 'V3 changed while the intentionally damaged V4 shadow was rejected.'
+  }
+  if (-not (Select-String -Path $logPath -Pattern 'Memory V4 shadow initialization failed' -Quiet)) {
+    throw 'The damaged V4 shadow did not enter the expected non-fatal fallback path.'
+  }
+  if (-not (Select-String -Path $logPath -Pattern 'Memory V4 official read smoke completed: mode auto, source v3' -Quiet)) {
+    throw 'Auto mode did not fall back to V3 after the V4 shadow was intentionally damaged.'
+  }
+  $fallbackRuntimeReport = Get-Content -LiteralPath $runtimeReportPath -Raw | ConvertFrom-Json
+  $fallbackReportComplete = $fallbackRuntimeReport.total.readSources.v3 -ge 1 `
+    -and $fallbackRuntimeReport.total.fallbacks.reasons.'v4-unavailable' -ge 1 `
+    -and $fallbackRuntimeReport.last.authoritativeReadSource -eq 'v3' `
+    -and $fallbackRuntimeReport.last.fallbackReason -eq 'v4-unavailable'
+  if (-not $fallbackReportComplete) {
+    throw "The runtime report did not retain the official V3 fallback reason: $($fallbackRuntimeReport | ConvertTo-Json -Depth 10 -Compress)"
+  }
+
+  [IO.File]::WriteAllBytes($v4Path, $recoverableV4Checkpoint)
+  Invoke-SmokeLaunch
+  $recoveredRuntimeReport = Get-Content -LiteralPath $runtimeReportPath -Raw | ConvertFrom-Json
+  $recoveryReportComplete = $recoveredRuntimeReport.last.authoritativeReadSource -eq 'v4' `
+    -and $null -eq $recoveredRuntimeReport.last.fallbackReason `
+    -and $recoveredRuntimeReport.total.recoveries.total -ge 1 `
+    -and $recoveredRuntimeReport.total.recoveries.fromReasons.'v4-unavailable' -ge 1
+  if (-not $recoveryReportComplete) {
+    throw "Auto mode did not return to V4 after restoring the V4 checkpoint: $($recoveredRuntimeReport | ConvertTo-Json -Depth 10 -Compress)"
+  }
+  if (-not (Select-String -Path $logPath -Pattern 'Memory V4 dual-write ready: 2/2 facts reconciled, 0 tombstoned' -Quiet)) {
+    throw 'The restored V4 checkpoint did not reconcile with the authoritative V3 state.'
+  }
+
   $env:DESKPET_SMOKE_PURGE_ID = 'smoke-manual-name'
   Invoke-SmokeLaunch
   Remove-Item Env:DESKPET_SMOKE_PURGE_ID -ErrorAction SilentlyContinue
@@ -155,22 +210,6 @@ try {
   }
   if (-not (Select-String -Path $logPath -Pattern 'Memory V4 diff audit: 100.0000% exact, 0 issues' -Quiet)) {
     throw 'The post-purge restart did not preserve V3/V4 audit consistency.'
-  }
-
-  $v3Path = Join-Path $dataPath 'memories.enc'
-  $v3HashBefore = Get-Sha256Hex $v3Path
-  Remove-Item Env:DESKPET_SMOKE_EXPECT_ROLLOUT_STAGE -ErrorAction SilentlyContinue
-  [IO.File]::WriteAllText((Join-Path $dataPath 'memory-v4.enc'), '{corrupt-v4', [Text.UTF8Encoding]::new($false))
-  Invoke-SmokeLaunch
-  $v3HashAfter = Get-Sha256Hex $v3Path
-  if ($v3HashBefore -ne $v3HashAfter) {
-    throw 'V3 changed while the intentionally damaged V4 shadow was rejected.'
-  }
-  if (-not (Select-String -Path $logPath -Pattern 'Memory V4 shadow initialization failed' -Quiet)) {
-    throw 'The damaged V4 shadow did not enter the expected non-fatal fallback path.'
-  }
-  if (-not (Select-String -Path $logPath -Pattern 'Memory V4 official read smoke completed: mode auto, source v3' -Quiet)) {
-    throw 'Auto mode did not fall back to V3 after the V4 shadow was intentionally damaged.'
   }
 
   [IO.File]::WriteAllText((Join-Path $dataPath 'memory-embeddings.enc'), '{corrupt-embedding-index', [Text.UTF8Encoding]::new($false))
@@ -216,14 +255,19 @@ try {
   if ($savedMemorySettings.semanticEnabled -ne $false) {
     throw 'The tampered semantic model remained enabled instead of falling back to local hash.'
   }
-  if ((Select-String -Path $logPath -Pattern 'renderer finished loading').Count -ne 7) {
-    throw 'The Electron renderer did not finish loading on all seven launches.'
+  if ((Select-String -Path $logPath -Pattern 'renderer finished loading').Count -ne 8) {
+    throw 'The Electron renderer did not finish loading on all eight launches.'
   }
-  if ((Select-String -Path $logPath -Pattern 'Memory V4 worker smoke completed').Count -lt 4) {
+  if ((Select-String -Path $logPath -Pattern 'Memory V4 worker smoke completed').Count -lt 5) {
     throw 'The isolated Memory V4 worker did not execute on every healthy shadow launch.'
   }
 
-  Write-Output 'Memory V4 Electron smoke test passed: default-auto official V4 read, per-request V3 fallback, isolated worker execution, migration, journal replay, 100% diff audit, strong-confirm zero-residual purge, post-purge restart, encrypted artifacts, renderer startup, and safe V4/embedding-index/model-integrity failure fallbacks.'
+  $finalRuntimeReport = Get-Content -LiteralPath $runtimeReportPath -Raw | ConvertFrom-Json
+  if ($finalRuntimeReport.launchCount -ne 8 -or $finalRuntimeReport.total.reads -ne 8 -or $finalRuntimeReport.days.Count -lt 1) {
+    throw "The runtime report did not survive and aggregate all eight launches: $($finalRuntimeReport | ConvertTo-Json -Depth 10 -Compress)"
+  }
+
+  Write-Output 'Memory V4 Electron smoke test passed: default-auto official V4 read, persistent runtime observability, V3 fallback followed by automatic V4 recovery, isolated worker execution, migration, journal replay, 100% diff audit, strong-confirm zero-residual purge, post-purge restart, encrypted artifacts, renderer startup, and safe V4/embedding-index/model-integrity degradation.'
 }
 finally {
   Remove-Item Env:DESKPET_USER_DATA_DIR,Env:DESKPET_BOOT_LOG,Env:DESKPET_SMOKE_TEST,Env:DESKPET_SMOKE_PURGE_ID,Env:DESKPET_SMOKE_EXPECT_ROLLOUT_STAGE,Env:DESKPET_MEMORY,Env:DESKPET_MEMORY_V4_INTERNAL_REVIEW,Env:DESKPET_MEMORY_V4_READ_MODE -ErrorAction SilentlyContinue

@@ -2,7 +2,7 @@
 
 DeskPet 是一个基于 Electron、Vue 3 和 TypeScript 的 Windows 桌面 AI 伙伴。项目采用 Monorepo 与 Port/Adapter 架构，将聊天模型、会话、长期记忆、工具和语音能力拆分为独立模块。
 
-> 当前版本：`0.3.9`。本版完成 V4 正式读、分层检索、365 天自动功能实验、只读策略搜索和 20k V4 Beta 默认切读：统一 EvidenceBundle、`v3` / `v4-beta` / `auto` 路由、逐请求 V3 回退、真实 hot/warm/cold/quarantine 候选路由、最小充分证据选择，以及可重放的一年生命周期/重启/重建/20k 门禁已经接通。默认模式为 `auto`；V4 Worker 就绪且证据充分时使用 V4，其他请求自动回退 V3。
+> 当前版本：`0.3.9`。本版完成 V4 正式读、分层检索、365 天自动功能实验、只读策略搜索、20k V4 Beta 默认切读、持久化运行观测和自动故障恢复门：统一 EvidenceBundle、`v3` / `v4-beta` / `auto` 路由、逐请求 V3 回退、真实 hot/warm/cold/quarantine 候选路由、最小充分证据选择，以及可重放的一年生命周期/重启/重建/20k 门禁已经接通。默认模式为 `auto`；V4 Worker 就绪且证据充分时使用 V4，其他请求自动回退 V3，Worker或持久层恢复后下一请求会重新尝试V4。每次正式读取还会旁路聚合权威读源、回退、恢复、延迟、候选/证据数量、Worker 和索引规模，重启后继续累计。
 
 ## 主要功能
 
@@ -62,6 +62,7 @@ DeskPet 同时保留短期会话和长期记忆：
 | V4 记忆 | 事实图、证据、版本、摘要、检索事件和冷热层级 | 双写审计、离线巩固、候选评估，以及在 Beta/Auto 模式下生成正式回答证据 | `memory-v4.enc` + `memory-v4.enc.journal` |
 | V4 学习语义索引 | 与精确正文哈希绑定的 BGE 事实/摘要向量 | 在隔离 Worker 中增强改写和同义表达召回 | `memory-v4-embeddings.enc` |
 | V4 Internal 反馈 | 查询哈希、查询意图、候选/来源 ID、分数和七类人工结论 | 建立可审计的本地冻结校准集；不保存查询、回答或记忆正文，不直接改变排序 | `memory-v4-internal-feedback.enc` |
+| V4 运行观测 | 正式读源、模式、回退与恢复原因、滚动 P50/P95/P99、候选/证据数、Worker 与容量快照 | 自动确认 Beta 真实使用及自愈情况并定位回退或性能退化；不改变回答路径 | `memory-v4-runtime-report.json` |
 
 ### 完整工作流程
 
@@ -116,6 +117,8 @@ Port 层仍保留固定 `recall(topK)`；调用方显式传入 `memoryTopK` 时�
 - 自适应召回分别记录已评估事实与实际注入事实，查询正文只保存 SHA-256 哈希。
 - 启动对账使用线性映射索引；5000 条模拟 V3 记录首次对账约 393 ms，未变化重启约 46 ms（测试机器结果，不是性能保证）。
 - V4 检索在独立 Worker 中运行；语义模型不可用时退回哈希/BM25，Worker 超时、忙碌、索引异常、空结果或证据不足时按请求退回 V3。默认 `auto` 会把通过证据门的 V4 EvidenceBundle 注入聊天提示词；可用 `v3` 强制 kill switch。
+- 正式读决策完成后，独立运行观测器按全局和最近 31 天聚合 V4/V3 读源、五类回退、端到端延迟、候选/选中证据、Worker 启停/失败/超时、索引和事实规模。原始状态与派生机器报告经防抖写入，报告损坏或写入失败不会影响记忆读取；`memory:status` 同时返回报告和落盘位置。
+- 自动恢复门连续执行 200 次正式读取和 40 次真实 V3→V4 增量对账写入，每 31 次请求强制 Worker 退出；故障请求必须回退 V3，下一请求必须用最新 revision 重建 Worker 并恢复 V4。真实 Electron smoke 还会损坏 V4 检查点、确认 V3 回退、恢复检查点并确认自动回到 V4，再验证派生索引损坏时继续使用本地哈希。
 - V4 tier-index 已成为真实候选路由：普通当前查询先检索 hot/warm，证据不足才以较小预算唤醒 cold；时间线、历史和全量概括直接启用受限 cold；quarantine 在任何排名路线之前排除。tier-index 缺失或失效时，权威 active 事实暂按 warm 处理，避免派生索引导致记忆消失。
 - 绝对证据门之后使用覆盖率、memoryKey/时间状态多样性、正文新颖度和边际收益选择最小充分事实；单值问题覆盖后立即停止，多事实/时间线问题保留必要的独立事实和冲突双边，不再简单截取 Top K。
 - P3 自动实验场使用固定场景合同和随机种子生成 365 天、1826 个事件；其中 1810 个自动 NOOP 也真实经过本地提取器和已知事实去重判定。在第 1/7/30/90/180/365 天执行日志回放、压实重启、派生视图删除/重建和 V3/V4/无摘要消融查询；当前固定场景的 71 个 V4 查询、写入判定、不变量、拒答和重启一致性门槛全部通过。该结果是仓库内确定性开发实验，不是外部盲测结论。
@@ -152,6 +155,7 @@ Port 层仍保留固定 `recall(topK)`；调用方显式传入 `memoryTopK` 时�
 | × | 反馈学习和可解释管理（3/4） | 已完成标签采集、显式确认、冻结分割、离线预门禁和版本化制品核心；尚未把任何制品接入在线排序，当前开发主线转向 V4 正式读路径和自动长期验证 |
 | × | 长周期可靠性与隐私 | 一年尺度确定性模拟已完成；备份恢复、文件锁、故障注入和隐私泄漏评测不属于本轮功能主线，尚未据此宣称完整完成 |
 | √ | V4 灰度切换与一年验收 | 默认 `auto` 已启用；连续三次全仓无缓存回归、20k/365 天门、production build，以及真实 Electron 健康 V4 读取与损坏后 V3 回退均通过 |
+| √ | V4 20k Beta 观测与自动恢复 | 跨重启报告、回退→恢复计数、200轮连续读写/Worker退出实验，以及八次真实 Electron V4损坏→V3回退→恢复后回V4闭环均已通过 |
 
 ### 事实提取
 
@@ -257,6 +261,8 @@ Windows 打包版主要数据位于：
 ├─ memory-v4-shadow-eval-key.json # 影子比较数据的 DPAPI 保护密钥
 ├─ memory-v4-internal-feedback.enc # 加密的 Internal 人工反馈（不含正文）
 ├─ memory-v4-internal-feedback-key.json # Internal 反馈的 DPAPI 保护密钥
+├─ memory-v4-runtime-observability.json # 有界运行观测聚合状态
+├─ memory-v4-runtime-report.json # V4/V3 读源、回退、P95、Worker 和容量机器报告
 ├─ memory-settings.json  # 提取、语义、OCR 和分享设置
 ├─ sessions.enc          # AES-256-GCM 加密短期聊天历史
 ├─ session-key.json      # DPAPI 保护后的会话主密钥
@@ -346,6 +352,8 @@ deskpet/
 - `apps/deskpet-electron/src/main/memory-v4-semantic-index.ts`：V4 加密语义索引、迁移和后台增量重建
 - `apps/deskpet-electron/src/main/memory-v4-shadow-worker.ts`：隔离 V4 影子召回 Worker
 - `apps/deskpet-electron/src/main/memory-v4-read-controller.ts`：正式读状态、来源和注入 Fact ID 审计
+- `apps/deskpet-electron/src/main/memory-v4-runtime-observability.ts`：跨重启运行指标聚合、最近 31 天窗口和机器报告
+- `apps/deskpet-electron/src/main/memory-v4-fault-recovery.test.ts`：连续对账写入、Worker退出、逐请求回退、revision重同步和自动回V4实验
 - `apps/deskpet-electron/src/main/memory-v4-internal-review.ts`：签发本地评审、短时关联查询与影子候选
 - `apps/deskpet-electron/src/main/memory-v4-internal-feedback.ts`：将临时候选裁剪为无正文的核心反馈记录
 - `apps/deskpet-electron/src/main/image-memory.ts`：显式图片 OCR
@@ -368,7 +376,7 @@ pnpm --filter @deskpet/memory test
 pnpm --filter @deskpet/electron exec tsc --noEmit -p tsconfig.node.json
 pnpm --filter @deskpet/electron exec vue-tsc --noEmit -p tsconfig.web.json
 
-# Electron 记忆冷迁移、双写对账、重启保留、损坏降级与渲染启动烟雾测试
+# Electron 记忆冷迁移、双写对账、重启保留、损坏回退、恢复回V4与渲染启动烟雾测试
 pnpm --filter @deskpet/electron test:smoke
 
 # 构建和生成 Windows ZIP
@@ -385,6 +393,7 @@ pnpm --filter @deskpet/electron package
 - 短期会话与长期记忆均已加密；DPAPI 密钥与数据文件必须一起备份。
 - 当前桌面端固定为一个本地用户和一个 Agent 作用域。
 - V4 20k Beta 已默认使用 `auto` 进入聊天提示词；连续三次完整回归、365 天实验、只读策略搜索和真实启动回退均已通过。V3 仍承担写入、逐请求回退和 kill switch。
+- 运行观测报告已经自动落盘并通过八次真实 Electron 启动验证跨重启累积及 V4损坏→V3回退→恢复后回V4；当前可从 `memory:status` 获取，但界面尚未单独展示报告。
 - 桌面界面仍只管理 `Shadow` 和 `Internal` 评审阶段；正式读模式可通过配置文件或 `DESKPET_MEMORY_V4_READ_MODE` 覆盖，尚未实现界面切换。
 - 本次代码回归未执行外部盲测；本机也没有 BGE 模型缓存，因此真实 BGE 开发集对比未执行，不能把合成集成绩视作上线质量证明。
 - 尚无多进程文件锁和自动周/月分层摘要。

@@ -94,6 +94,7 @@ import {
   resolveMemoryV4ReadMode,
   type MemoryV4ReadController,
 } from './memory-v4-read-controller'
+import { createMemoryV4RuntimeObservability } from './memory-v4-runtime-observability'
 
 // Some Windows systems cannot initialize Electron's GPU subprocess. Disable
 // hardware acceleration before app readiness so the packaged app still starts.
@@ -405,6 +406,8 @@ const memoryV4InternalFeedbackPath = join(userDataDir, 'memory-v4-internal-feedb
 const memoryV4InternalFeedbackKeyPath = join(userDataDir, 'memory-v4-internal-feedback-key.json')
 const memoryV4EmbeddingStoragePath = join(userDataDir, 'memory-v4-embeddings.enc')
 const memoryV4EmbeddingKeyPath = join(userDataDir, 'memory-v4-embedding-key.json')
+const memoryV4RuntimeReportPath = join(userDataDir, 'memory-v4-runtime-report.json')
+const memoryV4RuntimeObservability = createMemoryV4RuntimeObservability({ persistence: persist })
 let semanticModelProgress: SemanticModelProgress = { status: 'idle' }
 let semanticPreparationPromise: Promise<void> | undefined
 let imageMemoryProgress: { status: string; progress?: number } = { status: 'idle' }
@@ -1087,6 +1090,25 @@ function memoryForRemoteRuntime() {
       && !!worker
       && !worker.status().active,
     onDecision: (decision, { query, scope }) => {
+      const workerStatus = worker?.status()
+      const snapshot = memoryV4Repository?.snapshot()
+      memoryV4RuntimeObservability.record(decision, {
+        workerEpoch: memoryV4ShadowGeneration,
+        workerAvailable: !!workerStatus,
+        memoryAvailable: !!snapshot,
+        ...(workerStatus ? { worker: workerStatus } : {}),
+        ...(workerStatus?.lastIndex ? { index: workerStatus.lastIndex } : {}),
+        ...(snapshot
+          ? {
+              memory: {
+                revision: snapshot.revision,
+                facts: snapshot.facts.length,
+                factVersions: snapshot.factVersions.length,
+                derivedArtifacts: snapshot.derivedArtifacts.length,
+              },
+            }
+          : {}),
+      })
       memoryV4Shadow?.enqueueRetrieval({
         query,
         scope,
@@ -1460,6 +1482,10 @@ function setupIPC() {
         authoritativeAnswerSource: memoryV4ReadController?.status().last?.authoritativeReadSource ?? 'v3',
         configuredReadMode: config.memoryV4ReadMode,
         officialRead: memoryV4ReadController?.status(),
+        runtimeObservability: {
+          reportPath: memoryV4RuntimeReportPath,
+          report: memoryV4RuntimeObservability.status(),
+        },
         rolloutStage: effectiveMemoryV4RolloutStage(),
         requestedRolloutStage: memorySettings.v4RolloutStage,
         rolloutStageLocked: memoryV4InternalReviewEnvironmentOverride !== undefined,
@@ -1517,6 +1543,10 @@ function setupIPC() {
         authoritativeAnswerSource: memoryV4ReadController?.status().last?.authoritativeReadSource ?? 'v3',
         configuredReadMode: config.memoryV4ReadMode,
         officialRead: memoryV4ReadController?.status(),
+        runtimeObservability: {
+          reportPath: memoryV4RuntimeReportPath,
+          report: memoryV4RuntimeObservability.status(),
+        },
         rolloutStage: effectiveMemoryV4RolloutStage(),
         requestedRolloutStage: memorySettings.v4RolloutStage,
         rolloutStageLocked: memoryV4InternalReviewEnvironmentOverride !== undefined,

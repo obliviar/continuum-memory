@@ -81,7 +81,6 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
   const maxToolRounds = 5
 
   async function runLLMRound(
-    sessionId: string,
     messages: ChatMessage[],
     model: string,
     ctx: ChatStreamEventContext,
@@ -141,7 +140,6 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
   async function executeToolCalls(
     sessionId: string,
     toolCalls: ToolCall[],
-    ctx: ChatStreamEventContext,
   ): Promise<ChatMessage[]> {
     if (!deps.tools || toolCalls.length === 0)
       return []
@@ -278,7 +276,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
       let currentMessages = messages
 
       while (round <= maxToolRounds) {
-        result = await runLLMRound(sessionId, currentMessages, model, ctx)
+        result = await runLLMRound(currentMessages, model, ctx)
 
         if (result.toolCalls.length === 0)
           break
@@ -292,7 +290,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
             toolCalls: result.toolCalls,
           },
         ]
-        const toolResults = await executeToolCalls(sessionId, result.toolCalls, ctx)
+        const toolResults = await executeToolCalls(sessionId, result.toolCalls)
         currentMessages = [...currentMessages, ...toolResults]
         round++
       }

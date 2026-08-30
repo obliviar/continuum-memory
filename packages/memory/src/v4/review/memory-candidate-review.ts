@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { MemoryCapture, MemoryScope } from '@deskpet/contracts'
-import type { MemoryCandidate } from '../../long-term/memory-extractor'
 import type { MemoryCalibrationExample } from '../../long-term/confidence-calibration'
 import type { MemoryCandidateEvaluation, MemoryCandidateVerifier, MemoryWriteMatches } from '../../long-term/memory-write-policy'
 import { MEMORY_NORMALIZER_VERSION, normalizeMemoryCandidate } from '../../long-term/memory-normalizer'

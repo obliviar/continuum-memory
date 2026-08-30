@@ -1,8 +1,9 @@
 ﻿{
   "$schema": "https://turborepo.com/schema.json",
   "tasks": {
-    "build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
-    "typecheck": { "dependsOn": ["^build"] },
-    "test": { "dependsOn": ["^build"] }
+    "build": { "dependsOn": ["^build"], "outputs": [] },
+    "@deskpet/electron#build": { "dependsOn": ["^build"], "outputs": ["dist/**"] },
+    "typecheck": {},
+    "test": {}
   }
 }

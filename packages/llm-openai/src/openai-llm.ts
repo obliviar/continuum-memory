@@ -1,4 +1,4 @@
-import type { AgentLLMPort, ChatMessage, StreamEvent, StreamOptions } from '@deskpet/contracts'
+import type { AgentLLMPort, ChatMessage, StreamEvent } from '@deskpet/contracts'
 import OpenAI from 'openai'
 import type { ProviderConfig } from './providers'
 import { resolveProvider } from './providers'

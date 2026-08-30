@@ -1,8 +1,7 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import type {
   JsonValue,
   MemoryDomainEventTypeV4,
-  MemoryFactStatusV4,
   MemoryFactV4,
   MemoryV4Scope,
   MemoryV4Snapshot,

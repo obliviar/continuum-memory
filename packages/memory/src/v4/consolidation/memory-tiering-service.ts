@@ -487,13 +487,6 @@ function ownerLevelScope(scope: { ownerId: string; agentId?: string }): MemoryV4
   return { ownerId: scope.ownerId, agentId: scope.agentId ?? 'deskpet' }
 }
 
-function factScopeFor(snapshot: MemoryV4Snapshot, factId: string): MemoryV4Scope {
-  const fact = snapshot.facts.find(item => item.id === factId)
-  if (!fact)
-    throw new Error(`Memory V4 fact ${factId} disappeared before archival`)
-  return fact.scope
-}
-
 function matchesScope(scope: MemoryV4Scope, filter: { ownerId: string; agentId?: string }): boolean {
   return scope.ownerId === filter.ownerId
     && (filter.agentId === undefined || scope.agentId === filter.agentId)

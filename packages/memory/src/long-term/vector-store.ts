@@ -87,8 +87,6 @@ export interface VectorStoreOptions {
   onCommitObserverError?: (error: unknown, commit: V3MemoryCommit) => void
 }
 
-type MemoryCardinality = 'single' | 'multiple'
-
 export type V3MemoryCommitReason = 'recall' | 'expiry' | 'remember' | 'forget'
   | 'update' | 'restore' | 'unlink-sources' | 'clear' | 'purge'
 

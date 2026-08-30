@@ -8,8 +8,7 @@
     "type":  "module",
     "version":  "0.1.0",
     "dependencies":  {
-                         "@deskpet/contracts":  "workspace:*",
-                         "zod":  "^3.23.8"
+                         "@deskpet/contracts":  "workspace:*"
                      },
     "name":  "@deskpet/tools",
     "private":  true,

@@ -1,4 +1,4 @@
-import type { AgentToolPort, ToolDefinition, ToolExecutionContext, ToolHandler, ToolResult } from '@deskpet/contracts'
+import type { AgentToolPort, ToolDefinition, ToolHandler, ToolResult } from '@deskpet/contracts'
 
 /**
  * Tool registry implementing AgentToolPort.

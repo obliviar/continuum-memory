@@ -19,7 +19,7 @@ export function startChatRepl(runtime: AgentRuntime, sessionId: string) {
     }
 
     if (trimmed.startsWith('/')) {
-      await handleCommand(trimmed, runtime, sessionId)
+      handleCommand(trimmed)
       rl.prompt()
       return
     }
@@ -42,8 +42,8 @@ export function startChatRepl(runtime: AgentRuntime, sessionId: string) {
   })
 }
 
-async function handleCommand(cmd: string, runtime: AgentRuntime, sessionId: string) {
-  const [name, ...args] = cmd.slice(1).split(' ')
+function handleCommand(cmd: string) {
+  const [name] = cmd.slice(1).split(' ')
 
   switch (name) {
     case 'help':

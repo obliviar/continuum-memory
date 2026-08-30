@@ -1,4 +1,4 @@
-import type { ToolHandler, ToolExecutionContext } from '@deskpet/contracts'
+import type { ToolHandler } from '@deskpet/contracts'
 
 /**
  * Tool call executor with retry and timeout support.

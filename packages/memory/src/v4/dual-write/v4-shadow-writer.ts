@@ -260,7 +260,7 @@ function applyOperation(
     return
   }
   if (operation.type === 'retrieval-feedback') {
-    recordRetrievalFeedback(draft, indexes, operation.value, fallbackNow)
+    recordRetrievalFeedback(draft, indexes, operation.value)
     return
   }
   if (operation.type === 'source-unlink') {
@@ -813,7 +813,6 @@ function recordRetrievalFeedback(
   draft: MemoryV4Snapshot,
   indexes: ShadowIndexes,
   feedback: V4ShadowRetrievalFeedback,
-  fallbackNow: number,
 ): void {
   if (!feedback.query)
     return

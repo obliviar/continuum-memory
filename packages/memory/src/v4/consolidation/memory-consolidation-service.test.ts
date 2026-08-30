@@ -274,7 +274,6 @@ describe('idle consolidation runner', () => {
   })
 
   it('runs a forced pass immediately and reports failures through onError', async () => {
-    const repository = await seedTwoSessions()
     const failing = {
       consolidate: async () => {
         throw new Error('consolidation offline')

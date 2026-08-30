@@ -1,4 +1,4 @@
-import type { AgentSessionPort, ChatHistoryItem } from '@deskpet/contracts'
+import type { AgentSessionPort } from '@deskpet/contracts'
 import { createInMemorySession } from './in-memory-session'
 
 /**

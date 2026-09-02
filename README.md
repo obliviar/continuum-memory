@@ -1,6 +1,6 @@
-# DeskPet
+# Continuum Memory
 
-DeskPet 是一个基于 Electron、Vue 3 和 TypeScript 的 Windows 桌面 AI 伙伴。项目采用 Monorepo 与 Port/Adapter 架构，将聊天模型、会话、长期记忆、工具和语音能力拆分为独立模块。
+Continuum Memory 是一个基于 Electron、Vue 3 和 TypeScript 的 Windows 桌面 AI 伙伴。项目采用 Monorepo 与 Port/Adapter 架构，将聊天模型、会话、长期记忆、工具和语音能力拆分为独立模块。
 
 > 当前版本：`0.3.9`。本版完成 V4 正式读、分层检索、365 天自动功能实验、只读策略搜索、20k V4 Beta 默认切读、持久化运行观测和自动故障恢复门：统一 EvidenceBundle、`v3` / `v4-beta` / `auto` 路由、逐请求 V3 回退、真实 hot/warm/cold/quarantine 候选路由、最小充分证据选择，以及可重放的一年生命周期/重启/重建/20k 门禁已经接通。默认模式为 `auto`；V4 Worker 就绪且证据充分时使用 V4，其他请求自动回退 V3，Worker或持久层恢复后下一请求会重新尝试V4。每次正式读取还会旁路聚合权威读源、回退、恢复、延迟、候选/证据数量、Worker 和索引规模，重启后继续累计。
 
@@ -21,8 +21,8 @@ DeskPet 是一个基于 Electron、Vue 3 和 TypeScript 的 Windows 桌面 AI �
 
 ### Windows 打包版
 
-1. 下载并完整解压 `DeskPet-0.3.9-win.zip`。
-2. 启动 `DeskPet.exe`，不要直接在 ZIP 内运行。
+1. 下载并完整解压 `Continuum-Memory-0.3.9-win.zip`。
+2. 启动 `Continuum Memory.exe`，不要直接在 ZIP 内运行。
 3. 首次进入时设置助手名称。
 4. 点击右上角“API”，填写 API Key、Base URL 和模型名称。
 5. 点击“🧠 记忆”查看或调整方案 A。
@@ -30,7 +30,7 @@ DeskPet 是一个基于 Electron、Vue 3 和 TypeScript 的 Windows 桌面 AI �
 打包版默认使用便携数据目录：
 
 ```text
-<DeskPet.exe 所在目录>\DeskPetData\
+<Continuum Memory.exe 所在目录>\ContinuumMemoryData\
 ```
 
 因此新版本不会默认把聊天、模型和长期记忆写到 C 盘的 AppData。移动整个解压目录时，应用数据也会随之移动。
@@ -40,18 +40,18 @@ DeskPet 是一个基于 Electron、Vue 3 和 TypeScript 的 Windows 桌面 AI �
 要求 Node.js 和 pnpm 9：
 
 ```powershell
-git clone https://github.com/obliviar/deskpet.git
-cd deskpet
+git clone https://github.com/obliviar/continuum-memory.git
+cd continuum-memory
 corepack enable
 pnpm install
 pnpm dev:electron
 ```
 
-开发模式仍采用 Electron 的开发数据目录。可设置 `DESKPET_USER_DATA_DIR` 指向独立测试目录，避免读写真实数据。
+开发模式采用 Electron 的开发数据目录；如果新的目录尚不存在但检测到 `%APPDATA%\@deskpet\electron`，会继续使用旧目录以保留既有聊天和记忆。也可设置 `CONTINUUM_MEMORY_USER_DATA_DIR` 指向独立测试目录；旧的 `DESKPET_USER_DATA_DIR` 仍兼容。
 
 ## 记忆模块：方案 A
 
-DeskPet 同时保留短期会话和长期记忆：
+Continuum Memory 同时保留短期会话和长期记忆：
 
 > V3 继续承担正式写入和回滚；每次 V3 成功提交后，V4 旁路同步 Episode、Candidate、Fact、EvidenceLink、FactVersion 和 RetrievalEvent。默认读模式为 `auto`，也可显式强制 `v3` 或 `v4-beta`。V4 使用 tier-index 分配候选预算，再由 BM25、结构化字段、摘要下钻、本地哈希和可选的已校验 BGE 向量生成 EvidenceBundle；Worker 忙碌、异常、空结果或证据门拒答时，该请求立即回退 V3。
 
@@ -181,7 +181,7 @@ Port 层仍保留固定 `recall(topK)`；调用方显式传入 `memoryTopK` 时�
 
 结果还会做近重复抑制，避免相似内容占满前 5 条。
 
-在“🧠 记忆”中点击“下载并启用”，可以安装固定 revision 的 `Xenova/bge-small-zh-v1.5` q8 ONNX 模型。模型下载到 `DeskPetData\models\memory`，不随 Git 仓库或安装 ZIP 分发。安装后必须通过逐文件 SHA-256 清单、运行时身份、512 维归一化和重复探针校验；不通过则关闭学习语义路径并继续使用本地哈希。
+在“🧠 记忆”中点击“下载并启用”，可以安装固定 revision 的 `Xenova/bge-small-zh-v1.5` q8 ONNX 模型。模型下载到 `ContinuumMemoryData\models\memory`，不随 Git 仓库或安装 ZIP 分发。安装后必须通过逐文件 SHA-256 清单、运行时身份、512 维归一化和重复探针校验；不通过则关闭学习语义路径并继续使用本地哈希。
 
 V3 会先在后台补齐旧记忆的 BGE 向量，再切换正式 V3 语义检索。V4 使用自己的 `memory-v4-embeddings.enc`：启动时复用内容一致的 V3 向量，随后以小批次补齐 V4 事实和摘要；事实 revision 与语义 revision 分开同步给隔离 Worker。Worker 只接受模型指纹、维度、正文哈希和快照 revision 全部匹配的向量。当前 20,000 条、512 维精确索引压力门禁在测试机上的 P95 为约 11.18 ms（不是所有设备的性能保证）。
 
@@ -199,7 +199,7 @@ V3 会先在后台补齐旧记忆的 BGE 向量，再切换正式 V3 语义检�
 
 姓名、生日、所在地等可以带稳定 `memoryKey` 和 `single` 基数。置信度不低于 0.8 的新值会关闭旧事实的有效区间并将其标记为 `superseded`；“以前、曾经、2024 年”等查询仍可召回对应历史版本。置信度不足时，新事实进入 `conflicted`，等待用户在管理窗口决定。
 
-自动记忆记录来源消息 ID。使用聊天回退功能删除消息时，DeskPet 会同步解除来源关联；失去全部来源的自动/图片记忆会变为 `orphaned`，不会再被召回。手动添加的记忆不受聊天删除影响。用户可以恢复失效记忆或永久删除。
+自动记忆记录来源消息 ID。使用聊天回退功能删除消息时，Continuum Memory 会同步解除来源关联；失去全部来源的自动/图片记忆会变为 `orphaned`，不会再被召回。手动添加的记忆不受聊天删除影响。用户可以恢复失效记忆或永久删除。
 
 ### 图片记忆
 
@@ -209,7 +209,7 @@ V3 会先在后台补齐旧记忆的 BGE 向量，再切换正式 V3 语义检�
 2. 用户明确说“记住图片/截图/照片”等同义表达；
 3. “显式图片记忆”开关已启用。
 
-OCR 使用 Tesseract.js 的简体中文和英文模型，在本机执行。只保存提取后的文字与附件哈希，不保存原始图片。首次使用可能需要下载语言数据到 `DeskPetData\models\ocr`。图片记忆默认标为 `private + local-only`。
+OCR 使用 Tesseract.js 的简体中文和英文模型，在本机执行。只保存提取后的文字与附件哈希，不保存原始图片。首次使用可能需要下载语言数据到 `ContinuumMemoryData\models\ocr`。图片记忆默认标为 `private + local-only`。
 
 ### 隐私与远程分享
 
@@ -248,7 +248,7 @@ OCR 使用 Tesseract.js 的简体中文和英文模型，在本机执行。只�
 Windows 打包版主要数据位于：
 
 ```text
-<DeskPet.exe 所在目录>\DeskPetData\
+<Continuum Memory.exe 所在目录>\ContinuumMemoryData\
 ├─ memories.enc          # AES-256-GCM 加密长期记忆 v3 快照
 ├─ memories.enc.journal  # 独立认证加密的增量操作日志
 ├─ memories.enc.pre-v3.backup # 首次 V3 迁移前的加密备份
@@ -271,6 +271,10 @@ Windows 打包版主要数据位于：
 └─ models\               # 可选语义模型、OCR 和语音资源
 ```
 
+新安装使用 `ContinuumMemoryData`。如果可执行文件旁只有旧版 `DeskPetData`，应用会继续使用旧目录，而不是创建空目录隐藏已有聊天和记忆；需要迁移目录名时，应在应用完全退出后整体改名。
+
+项目更名只改变产品品牌、工作区包名和新安装路径。已有持久化数据中的 `agentId: "deskpet"`、`deskpet-memory-v4*` schema、策略 ID 和冻结数据集版本继续作为兼容协议标识保留；它们不会显示为产品名称，也不应在没有正式数据迁移的情况下直接替换。
+
 升级时若同一数据目录存在旧版 `memories.json` 且尚无 `memories.enc`，程序会：
 
 1. 读取旧 v1 JSON；
@@ -285,17 +289,19 @@ Windows 打包版主要数据位于：
 
 | 变量 | 作用 |
 | --- | --- |
-| `OPENAI_API_KEY` | 聊天模型 API Key |
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 |
-| `DESKPET_MODEL` | 聊天模型名称 |
-| `DESKPET_MEMORY=false` | 关闭长期记忆 |
-| `DESKPET_MEMORY_V4_SHADOW=false` | 紧急关闭整个 V4 影子运行时 |
-| `DESKPET_MEMORY_V4_INTERNAL_REVIEW=true/false` | 强制并锁定 Internal/Shadow，优先于界面持久化设置 |
-| `DESKPET_MEMORY_V4_READ_MODE=v3/v4-beta/auto` | 选择正式记忆读路由；默认 `auto`，显式 `v3` 是 kill switch，所有 V4 模式均保留逐请求 V3 回退 |
-| `DESKPET_USER_DATA_DIR` | 覆盖应用数据目录，测试时推荐使用 |
-| `DESKPET_BOOT_LOG` | 将启动诊断写入指定文件 |
+| `CONTINUUM_MEMORY_API_KEY` / `OPENAI_API_KEY` | 聊天模型 API Key |
+| `CONTINUUM_MEMORY_BASE_URL` / `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 |
+| `CONTINUUM_MEMORY_MODEL` | 聊天模型名称 |
+| `CONTINUUM_MEMORY_ENABLED=false` | 关闭长期记忆 |
+| `CONTINUUM_MEMORY_V4_SHADOW=false` | 紧急关闭整个 V4 影子运行时 |
+| `CONTINUUM_MEMORY_V4_INTERNAL_REVIEW=true/false` | 强制并锁定 Internal/Shadow，优先于界面持久化设置 |
+| `CONTINUUM_MEMORY_V4_READ_MODE=v3/v4-beta/auto` | 选择正式记忆读路由；默认 `auto`，显式 `v3` 是 kill switch，所有 V4 模式均保留逐请求 V3 回退 |
+| `CONTINUUM_MEMORY_USER_DATA_DIR` | 覆盖应用数据目录，测试时推荐使用 |
+| `CONTINUUM_MEMORY_BOOT_LOG` | 将启动诊断写入指定文件 |
 
-也可以在 `DeskPet.exe` 同目录或开发目录放置不会提交到 Git 的 `config.json`：
+相应的旧 `DESKPET_*` 变量仍可读取，但新变量优先，便于已有脚本平滑迁移。
+
+也可以在 `Continuum Memory.exe` 同目录或开发目录放置不会提交到 Git 的 `config.json`：
 
 ```json
 {
@@ -306,13 +312,13 @@ Windows 打包版主要数据位于：
 }
 ```
 
-不要把真实 API Key 写入 README、脚本、示例配置、备份 ZIP 或 Git。仓库已忽略 `apps/deskpet-electron/config.json`。
+不要把真实 API Key 写入 README、脚本、示例配置、备份 ZIP 或 Git。仓库已忽略 `apps/continuum-memory-electron/config.json`。
 
 ## 项目结构与关键文件
 
 ```text
-deskpet/
-├─ apps/deskpet-electron/              # Electron + Vue 桌面应用
+continuum-memory/
+├─ apps/continuum-memory-electron/              # Electron + Vue 桌面应用
 ├─ apps/cli/                           # CLI 入口
 ├─ apps/server/                        # 服务端入口
 ├─ packages/contracts/                 # Port 接口与共享类型
@@ -348,17 +354,17 @@ deskpet/
 - `packages/memory/src/v4/policy/memory-v4-policy-artifact.ts`：只读策略制品、完整性和来源复验
 - `evals/memory/v4-retrieval-policy-v1.json`：P4 当前选中策略制品
 - `packages/core/src/runtime/agent-runtime.ts`：召回、附件和来源 ID
-- `apps/deskpet-electron/src/main/semantic-memory.ts`：本地中文语义模型
-- `apps/deskpet-electron/src/main/memory-v4-semantic-index.ts`：V4 加密语义索引、迁移和后台增量重建
-- `apps/deskpet-electron/src/main/memory-v4-shadow-worker.ts`：隔离 V4 影子召回 Worker
-- `apps/deskpet-electron/src/main/memory-v4-read-controller.ts`：正式读状态、来源和注入 Fact ID 审计
-- `apps/deskpet-electron/src/main/memory-v4-runtime-observability.ts`：跨重启运行指标聚合、最近 31 天窗口和机器报告
-- `apps/deskpet-electron/src/main/memory-v4-fault-recovery.test.ts`：连续对账写入、Worker退出、逐请求回退、revision重同步和自动回V4实验
-- `apps/deskpet-electron/src/main/memory-v4-internal-review.ts`：签发本地评审、短时关联查询与影子候选
-- `apps/deskpet-electron/src/main/memory-v4-internal-feedback.ts`：将临时候选裁剪为无正文的核心反馈记录
-- `apps/deskpet-electron/src/main/image-memory.ts`：显式图片 OCR
-- `apps/deskpet-electron/src/main/index.ts`：加密初始化、隐私过滤和 IPC
-- `apps/deskpet-electron/src/renderer/src/App.vue`：记忆管理界面
+- `apps/continuum-memory-electron/src/main/semantic-memory.ts`：本地中文语义模型
+- `apps/continuum-memory-electron/src/main/memory-v4-semantic-index.ts`：V4 加密语义索引、迁移和后台增量重建
+- `apps/continuum-memory-electron/src/main/memory-v4-shadow-worker.ts`：隔离 V4 影子召回 Worker
+- `apps/continuum-memory-electron/src/main/memory-v4-read-controller.ts`：正式读状态、来源和注入 Fact ID 审计
+- `apps/continuum-memory-electron/src/main/memory-v4-runtime-observability.ts`：跨重启运行指标聚合、最近 31 天窗口和机器报告
+- `apps/continuum-memory-electron/src/main/memory-v4-fault-recovery.test.ts`：连续对账写入、Worker退出、逐请求回退、revision重同步和自动回V4实验
+- `apps/continuum-memory-electron/src/main/memory-v4-internal-review.ts`：签发本地评审、短时关联查询与影子候选
+- `apps/continuum-memory-electron/src/main/memory-v4-internal-feedback.ts`：将临时候选裁剪为无正文的核心反馈记录
+- `apps/continuum-memory-electron/src/main/image-memory.ts`：显式图片 OCR
+- `apps/continuum-memory-electron/src/main/index.ts`：加密初始化、隐私过滤和 IPC
+- `apps/continuum-memory-electron/src/renderer/src/App.vue`：记忆管理界面
 
 ## 开发与验证
 
@@ -370,21 +376,21 @@ pnpm build
 pnpm test
 
 # 记忆模块测试
-pnpm --filter @deskpet/memory test
+pnpm --filter @continuum-memory/memory test
 
 # Electron 主进程和 Vue 类型检查
-pnpm --filter @deskpet/electron exec tsc --noEmit -p tsconfig.node.json
-pnpm --filter @deskpet/electron exec vue-tsc --noEmit -p tsconfig.web.json
+pnpm --filter @continuum-memory/electron exec tsc --noEmit -p tsconfig.node.json
+pnpm --filter @continuum-memory/electron exec vue-tsc --noEmit -p tsconfig.web.json
 
 # Electron 记忆冷迁移、双写对账、重启保留、损坏回退、恢复回V4与渲染启动烟雾测试
-pnpm --filter @deskpet/electron test:smoke
+pnpm --filter @continuum-memory/electron test:smoke
 
 # 构建和生成 Windows ZIP
-pnpm --filter @deskpet/electron build
-pnpm --filter @deskpet/electron package
+pnpm --filter @continuum-memory/electron build
+pnpm --filter @continuum-memory/electron package
 ```
 
-输出目录：`apps\deskpet-electron\release\`。
+输出目录：`apps\continuum-memory-electron\release\`。
 
 ## 当前限制
 
@@ -394,7 +400,7 @@ pnpm --filter @deskpet/electron package
 - 当前桌面端固定为一个本地用户和一个 Agent 作用域。
 - V4 20k Beta 已默认使用 `auto` 进入聊天提示词；连续三次完整回归、365 天实验、只读策略搜索和真实启动回退均已通过。V3 仍承担写入、逐请求回退和 kill switch。
 - 运行观测报告已经自动落盘并通过八次真实 Electron 启动验证跨重启累积及 V4损坏→V3回退→恢复后回V4；当前可从 `memory:status` 获取，但界面尚未单独展示报告。
-- 桌面界面仍只管理 `Shadow` 和 `Internal` 评审阶段；正式读模式可通过配置文件或 `DESKPET_MEMORY_V4_READ_MODE` 覆盖，尚未实现界面切换。
+- 桌面界面仍只管理 `Shadow` 和 `Internal` 评审阶段；正式读模式可通过配置文件或 `CONTINUUM_MEMORY_V4_READ_MODE` 覆盖，尚未实现界面切换。
 - 本次代码回归未执行外部盲测；本机也没有 BGE 模型缓存，因此真实 BGE 开发集对比未执行，不能把合成集成绩视作上线质量证明。
 - 尚无多进程文件锁和自动周/月分层摘要。
 - OCR 只保留可识别文字，无法完整理解没有文字的图片语义。

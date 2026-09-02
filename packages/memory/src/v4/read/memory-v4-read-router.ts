@@ -2,7 +2,7 @@ import type {
   AdaptiveMemoryRecallOptions,
   AdaptiveMemoryRecallResult,
   MemoryScope,
-} from '@deskpet/contracts'
+} from '@continuum-memory/contracts'
 import type {
   MemoryV4ShadowRecallOptions,
   MemoryV4ShadowRecallResult,

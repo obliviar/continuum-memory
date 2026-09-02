@@ -55,7 +55,7 @@ describe('Memory V4 365-day functional laboratory', () => {
     const json = serializeMemoryV4YearReport(report)
     const markdown = renderMemoryV4YearMarkdown(report)
     expect(JSON.parse(json)).toMatchObject({ version: report.version, passed: true })
-    expect(markdown).toContain('# DeskPet Memory V4 365 天功能实验报告')
+    expect(markdown).toContain('# Continuum Memory V4 365 天功能实验报告')
     expect(markdown).toContain('V3 / V4 / 消融对照')
     expect(markdown).toContain('可定位失败')
   }, 120_000)

@@ -1,4 +1,4 @@
-import type { AgentSessionPort } from '@deskpet/contracts'
+import type { AgentSessionPort } from '@continuum-memory/contracts'
 import { createInMemorySession } from './in-memory-session'
 
 /**

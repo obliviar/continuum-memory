@@ -1,4 +1,4 @@
-import type { ToolHandler } from '@deskpet/contracts'
+import type { ToolHandler } from '@continuum-memory/contracts'
 
 /**
  * HTTP fetch tool: sends a GET/POST request and returns the response body.
@@ -27,7 +27,7 @@ export const httpFetchTool: ToolHandler = {
         method,
         body,
         headers: {
-          'User-Agent': 'deskpet-agent/0.1',
+          'User-Agent': 'continuum-memory/0.1',
           ...(args.headers as Record<string, string> ?? {}),
         },
       })

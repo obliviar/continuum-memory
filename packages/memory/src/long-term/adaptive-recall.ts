@@ -2,7 +2,7 @@ import type {
   AdaptiveMemoryRecallOptions,
   AdaptiveMemoryRecallStopReason,
   MemoryFragment,
-} from '@deskpet/contracts'
+} from '@continuum-memory/contracts'
 import { localSemanticConcepts } from './local-embedding'
 
 export interface AdaptiveRankedMemory {

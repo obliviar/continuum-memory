@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { MemoryTemporalMode } from '@deskpet/contracts'
+import type { MemoryTemporalMode } from '@continuum-memory/contracts'
 
 export const MEMORY_V4_YEAR_SCENARIO_SCHEMA_VERSION = 1 as const
 export const MEMORY_V4_YEAR_SCENARIO_GENERATOR_VERSION = 'memory-v4-year-scenario-generator-v1'

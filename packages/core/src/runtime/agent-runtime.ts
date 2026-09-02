@@ -16,7 +16,7 @@ import type {
   StreamEvent,
   StreamingAssistantMessage,
   ToolCall,
-} from '@deskpet/contracts'
+} from '@continuum-memory/contracts'
 
 import { createChatHooks } from './hooks'
 import { buildSystemPrompt } from '../prompt/system-prompt'
@@ -131,7 +131,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
         break
       }
       case 'error': {
-        console.error('[deskpet] stream error:', event.error)
+        console.error('[continuum-memory] stream error:', event.error)
         throw event.error instanceof Error ? event.error : new Error(String(event.error))
       }
     }
@@ -220,7 +220,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
         }
       }
       catch (err) {
-        console.error('[deskpet] memory recall failed:', err)
+        console.error('[continuum-memory] memory recall failed:', err)
       }
     }
 
@@ -239,7 +239,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
             inputType: ctx.input?.type ?? 'text',
           },
         }, memoryScope).catch((err) => {
-          console.error('[deskpet] memory write failed:', err)
+          console.error('[continuum-memory] memory write failed:', err)
           return 0
         })
       : Promise.resolve(0)
@@ -349,7 +349,7 @@ async function reportMemoryRecallFeedback(
     await memory.reportRecallFeedback({ query, scope, outcomes, answerModel: model })
   }
   catch (err) {
-    console.error('[deskpet] memory recall feedback failed:', err)
+    console.error('[continuum-memory] memory recall feedback failed:', err)
   }
 }
 
@@ -448,7 +448,7 @@ function feedbackTokens(value: string): Set<string> {
   return tokens
 }
 
-function buildMemoryCaptureContext(history: ChatHistoryItem[]): NonNullable<import('@deskpet/contracts').MemoryCapture['context']> {
+function buildMemoryCaptureContext(history: ChatHistoryItem[]): NonNullable<import('@continuum-memory/contracts').MemoryCapture['context']> {
   const messages = history
     .filter((item): item is ChatHistoryItem & { role: 'user' | 'assistant' } =>
       item.role === 'user' || item.role === 'assistant')

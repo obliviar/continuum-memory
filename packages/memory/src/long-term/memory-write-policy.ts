@@ -1,4 +1,4 @@
-import type { MemoryCapture, MemoryScope } from '@deskpet/contracts'
+import type { MemoryCapture, MemoryScope } from '@continuum-memory/contracts'
 import type { MemoryCandidate } from './memory-extractor'
 import { isSafeMemoryContent } from './memory-extractor'
 import type { V3MemoryRecord } from './vector-store'

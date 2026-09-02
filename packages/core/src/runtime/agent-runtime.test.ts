@@ -5,7 +5,7 @@ import type {
   MemoryCapture,
   MemoryScope,
   StreamEvent,
-} from '@deskpet/contracts'
+} from '@continuum-memory/contracts'
 import { describe, expect, it } from 'vitest'
 import { createSessionManager } from '../session/session-manager'
 import { createAgentRuntime } from './agent-runtime'

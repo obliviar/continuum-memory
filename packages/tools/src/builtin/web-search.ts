@@ -1,4 +1,4 @@
-import type { ToolHandler } from '@deskpet/contracts'
+import type { ToolHandler } from '@continuum-memory/contracts'
 
 /**
  * Web search tool using a configurable search API.
@@ -24,7 +24,7 @@ export const webSearchTool: ToolHandler = {
     try {
       const url = `https://html.duckduckgo.com/html/?q=${query}`
       const res = await fetch(url, {
-        headers: { 'User-Agent': 'deskpet-agent/0.1' },
+        headers: { 'User-Agent': 'continuum-memory/0.1' },
       })
       const html = await res.text()
 

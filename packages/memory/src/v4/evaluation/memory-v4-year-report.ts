@@ -15,7 +15,7 @@ export function serializeMemoryV4YearReport(report: MemoryV4YearSimulationReport
 export function renderMemoryV4YearMarkdown(report: MemoryV4YearSimulationReport): string {
   const v4 = report.strategyMetrics.find(item => item.strategy === 'v4')
   const lines = [
-    '# DeskPet Memory V4 365 天功能实验报告',
+    '# Continuum Memory V4 365 天功能实验报告',
     '',
     `- 报告版本：${MEMORY_V4_YEAR_REPORT_VERSION}`,
     `- 模拟器：${report.version}`,

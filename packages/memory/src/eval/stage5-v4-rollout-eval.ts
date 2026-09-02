@@ -4,7 +4,7 @@ import type {
   MemorySensitivity,
   MemorySharePolicy,
   MemoryTemporalMode,
-} from '@deskpet/contracts'
+} from '@continuum-memory/contracts'
 import { createHash } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 

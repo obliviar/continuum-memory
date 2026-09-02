@@ -12,7 +12,7 @@ import type {
   MemoryStatus,
   MemoryTemporalMode,
   MemoryUpdate,
-} from '@deskpet/contracts'
+} from '@continuum-memory/contracts'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import OpenAI from 'openai'

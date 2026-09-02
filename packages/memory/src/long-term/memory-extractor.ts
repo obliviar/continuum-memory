@@ -1,4 +1,4 @@
-import type { MemoryCapture, MemorySensitivity, MemorySharePolicy } from '@deskpet/contracts'
+import type { MemoryCapture, MemorySensitivity, MemorySharePolicy } from '@continuum-memory/contracts'
 import { normalizeMemoryCandidate } from './memory-normalizer'
 
 export interface MemoryCandidate {

@@ -1,4 +1,4 @@
-import type { AdaptiveMemoryRecallResult } from '@deskpet/contracts'
+import type { AdaptiveMemoryRecallResult } from '@continuum-memory/contracts'
 import { describe, expect, it, vi } from 'vitest'
 import type { MemoryV4ShadowRecallResult } from '../retrieval/memory-v4-shadow-retriever'
 import { createMemoryV4ReadRouter } from './memory-v4-read-router'

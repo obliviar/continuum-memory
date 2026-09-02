@@ -8,10 +8,10 @@
     "type":  "module",
     "version":  "0.1.0",
     "dependencies":  {
-                         "@deskpet/contracts":  "workspace:*",
+                         "@continuum-memory/contracts":  "workspace:*",
                          "openai":  "^4.73.0"
                      },
-    "name":  "@deskpet/voice",
+    "name":  "@continuum-memory/voice",
     "private":  true,
     "exports":  {
                     ".":  "./src/index.ts"

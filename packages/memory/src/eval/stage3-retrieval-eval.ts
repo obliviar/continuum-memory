@@ -1,4 +1,4 @@
-import type { MemoryFragment, MemoryRecallOptions } from '@deskpet/contracts'
+import type { MemoryFragment, MemoryRecallOptions } from '@continuum-memory/contracts'
 import { performance } from 'node:perf_hooks'
 
 export const MEMORY_STAGE3_RETRIEVAL_EVAL_VERSION = 'memory-stage3-retrieval-eval-v1'

@@ -1,4 +1,4 @@
-import type { ChatHistoryItem } from '@deskpet/contracts'
+import type { ChatHistoryItem } from '@continuum-memory/contracts'
 
 /**
  * Default in-memory session store.

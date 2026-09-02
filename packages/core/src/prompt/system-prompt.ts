@@ -1,4 +1,4 @@
-import type { ContextMessage, MemoryEvidencePackEntry, MemoryFragment } from '@deskpet/contracts'
+import type { ContextMessage, MemoryEvidencePackEntry, MemoryFragment } from '@continuum-memory/contracts'
 
 /** Character/system prompt configuration assembled at send time. */
 export interface SystemPromptInput {

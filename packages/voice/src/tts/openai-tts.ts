@@ -1,4 +1,4 @@
-import type { TextToSpeechPort } from '@deskpet/contracts'
+import type { TextToSpeechPort } from '@continuum-memory/contracts'
 import OpenAI from 'openai'
 
 /**

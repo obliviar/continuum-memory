@@ -5,7 +5,7 @@ import type {
   MemoryFragment,
   MemoryOrigin,
   MemoryStatus,
-} from '@deskpet/contracts'
+} from '@continuum-memory/contracts'
 import type {
   MemoryV4ShadowRecallHit,
   MemoryV4ShadowRecallResult,

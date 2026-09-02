@@ -1,4 +1,4 @@
-import type { MemoryTemporalMode } from '@deskpet/contracts'
+import type { MemoryTemporalMode } from '@continuum-memory/contracts'
 import type { MemoryQueryIntent } from '../../long-term/memory-query-planner'
 import type { MemoryDerivedArtifactV4, MemoryFactStatusV4, MemoryV4Snapshot } from '../domain/types'
 import type { MemoryTier, TierAssignmentView } from '../consolidation/memory-tiering-service'

@@ -4,7 +4,7 @@ import type {
   MemoryRecallFeedbackReport,
   MemoryScope,
   MemorySourceSyncResult,
-} from '@deskpet/contracts'
+} from '@continuum-memory/contracts'
 import type { V3MemoryRecord, VectorStore } from './vector-store'
 import { extractMemoryCandidates, isSafeMemoryContent } from './memory-extractor'
 import type { MemoryCandidate, MemoryExtractor } from './memory-extractor'

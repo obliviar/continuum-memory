@@ -1,4 +1,4 @@
-import type { AdaptiveMemoryRecallOptions, MemoryTemporalMode } from '@deskpet/contracts'
+import type { AdaptiveMemoryRecallOptions, MemoryTemporalMode } from '@continuum-memory/contracts'
 import { localSemanticConcepts } from './local-embedding'
 import { isBroadPersonalMemoryQuery } from './adaptive-recall'
 import { planTemporalQuery, type TemporalQueryRange } from './temporal-query'

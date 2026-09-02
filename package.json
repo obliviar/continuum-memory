@@ -1,15 +1,15 @@
 {
-  "name": "deskpet",
+  "name": "continuum-memory",
   "type": "module",
   "version": "0.3.9",
   "private": true,
-  "description": "A modular AI agent built with the Port pattern",
+  "description": "An evidence-driven local long-term memory platform",
   "license": "MIT",
   "scripts": {
     "build": "turbo run build",
-    "dev": "pnpm -F @deskpet/cli dev",
-    "dev:server": "pnpm -F @deskpet/server dev",
-    "dev:electron": "pnpm -F @deskpet/electron dev",
+    "dev": "pnpm -F @continuum-memory/cli dev",
+    "dev:server": "pnpm -F @continuum-memory/server dev",
+    "dev:electron": "pnpm -F @continuum-memory/electron dev",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test"
   },

@@ -1,5 +1,5 @@
 {
-  "name": "@deskpet/memory",
+  "name": "@continuum-memory/memory",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -17,7 +17,7 @@
     "test:stage3-bge": "vitest run src/eval/stage3-bge-comparison.test.ts --reporter=verbose"
   },
   "dependencies": {
-    "@deskpet/contracts": "workspace:*",
+    "@continuum-memory/contracts": "workspace:*",
     "openai": "^4.73.0"
   },
   "devDependencies": {

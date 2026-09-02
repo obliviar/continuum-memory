@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { MemoryCapture } from '@deskpet/contracts'
+import type { MemoryCapture } from '@continuum-memory/contracts'
 
 export const MEMORY_CAPTURE_PLANNER_VERSION = 'capture-segment-planner-v1'
 export const DEFAULT_MEMORY_SEGMENT_CHARACTERS = 1800

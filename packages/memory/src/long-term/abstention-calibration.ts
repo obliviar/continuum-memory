@@ -1,4 +1,4 @@
-import type { MemoryRecallAbstention } from '@deskpet/contracts'
+import type { MemoryRecallAbstention } from '@continuum-memory/contracts'
 
 export const MEMORY_ABSTENTION_CALIBRATION_VERSION = 'abstention-threshold-calibration-v2'
 

@@ -1,4 +1,4 @@
-import type { ToolHandler } from '@deskpet/contracts'
+import type { ToolHandler } from '@continuum-memory/contracts'
 import { readFile, access } from 'node:fs/promises'
 import { resolve } from 'node:path'
 

@@ -4,10 +4,10 @@
                     "typecheck":  "tsc --noEmit",
                     "test":  "echo \"no tests\""
                 },
-    "description":  "Port interfaces and shared types for the deskpet agent",
+    "description":  "Port interfaces and shared types for Continuum Memory",
     "type":  "module",
     "version":  "0.1.0",
-    "name":  "@deskpet/contracts",
+    "name":  "@continuum-memory/contracts",
     "private":  true,
     "exports":  {
                     "./types/*":  "./src/types/*.ts",

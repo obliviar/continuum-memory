@@ -1,4 +1,4 @@
-import type { MemoryRecallOptions, MemoryTemporalMode } from '@deskpet/contracts'
+import type { MemoryRecallOptions, MemoryTemporalMode } from '@continuum-memory/contracts'
 
 /** Half-open real-world validity window [from, to). */
 export interface TemporalQueryRange {

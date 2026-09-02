@@ -17,16 +17,16 @@ importers:
 
   apps/cli:
     dependencies:
-      '@deskpet/core':
+      '@continuum-memory/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@deskpet/llm-openai':
+      '@continuum-memory/llm-openai':
         specifier: workspace:*
         version: link:../../packages/llm-openai
-      '@deskpet/memory':
+      '@continuum-memory/memory':
         specifier: workspace:*
         version: link:../../packages/memory
-      '@deskpet/tools':
+      '@continuum-memory/tools':
         specifier: workspace:*
         version: link:../../packages/tools
     devDependencies:
@@ -40,18 +40,18 @@ importers:
         specifier: ^5.6.3
         version: 5.9.3
 
-  apps/deskpet-electron:
+  apps/continuum-memory-electron:
     dependencies:
-      '@deskpet/core':
+      '@continuum-memory/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@deskpet/llm-openai':
+      '@continuum-memory/llm-openai':
         specifier: workspace:*
         version: link:../../packages/llm-openai
-      '@deskpet/memory':
+      '@continuum-memory/memory':
         specifier: workspace:*
         version: link:../../packages/memory
-      '@deskpet/tools':
+      '@continuum-memory/tools':
         specifier: workspace:*
         version: link:../../packages/tools
       '@huggingface/transformers':
@@ -94,16 +94,16 @@ importers:
 
   apps/server:
     dependencies:
-      '@deskpet/core':
+      '@continuum-memory/core':
         specifier: workspace:*
         version: link:../../packages/core
-      '@deskpet/llm-openai':
+      '@continuum-memory/llm-openai':
         specifier: workspace:*
         version: link:../../packages/llm-openai
-      '@deskpet/memory':
+      '@continuum-memory/memory':
         specifier: workspace:*
         version: link:../../packages/memory
-      '@deskpet/tools':
+      '@continuum-memory/tools':
         specifier: workspace:*
         version: link:../../packages/tools
       '@hono/node-server':
@@ -131,7 +131,7 @@ importers:
 
   packages/core:
     dependencies:
-      '@deskpet/contracts':
+      '@continuum-memory/contracts':
         specifier: workspace:*
         version: link:../contracts
     devDependencies:
@@ -144,7 +144,7 @@ importers:
 
   packages/llm-openai:
     dependencies:
-      '@deskpet/contracts':
+      '@continuum-memory/contracts':
         specifier: workspace:*
         version: link:../contracts
       openai:
@@ -160,7 +160,7 @@ importers:
 
   packages/memory:
     dependencies:
-      '@deskpet/contracts':
+      '@continuum-memory/contracts':
         specifier: workspace:*
         version: link:../contracts
       openai:
@@ -179,7 +179,7 @@ importers:
 
   packages/tools:
     dependencies:
-      '@deskpet/contracts':
+      '@continuum-memory/contracts':
         specifier: workspace:*
         version: link:../contracts
     devDependencies:
@@ -192,7 +192,7 @@ importers:
 
   packages/voice:
     dependencies:
-      '@deskpet/contracts':
+      '@continuum-memory/contracts':
         specifier: workspace:*
         version: link:../contracts
       openai:

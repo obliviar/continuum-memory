@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { MemoryRecallAbstention, MemorySensitivity, MemorySharePolicy, MemoryTemporalMode } from '@deskpet/contracts'
+import type { MemoryRecallAbstention, MemorySensitivity, MemorySharePolicy, MemoryTemporalMode } from '@continuum-memory/contracts'
 import {
   calibrateRecallAbstention,
   type RecallAbstentionCalibrationModel,

@@ -1,4 +1,4 @@
-import type { ChatHookRegistry, ChatStreamEventContext, HookUnsubscribe, StreamingAssistantMessage } from '@deskpet/contracts'
+import type { ChatHookRegistry, ChatStreamEventContext, HookUnsubscribe, StreamingAssistantMessage } from '@continuum-memory/contracts'
 
 type AsyncCb<T> = (arg: T, ctx: ChatStreamEventContext) => Promise<void>
 
@@ -32,7 +32,7 @@ export function createChatHooks(): ChatHookRegistry {
         await cb(arg, ctx)
       }
       catch (err) {
-        console.error('[deskpet] hook error:', err)
+        console.error('[continuum-memory] hook error:', err)
       }
     }
   }
@@ -40,14 +40,14 @@ export function createChatHooks(): ChatHookRegistry {
   async function runCtx(list: ((ctx: ChatStreamEventContext) => Promise<void>)[], ctx: ChatStreamEventContext): Promise<void> {
     for (const cb of list) {
       try { await cb(ctx) }
-      catch (err) { console.error('[deskpet] hook error:', err) }
+      catch (err) { console.error('[continuum-memory] hook error:', err) }
     }
   }
 
   async function runMsg(list: ((msg: StreamingAssistantMessage, text: string, ctx: ChatStreamEventContext) => Promise<void>)[], msg: StreamingAssistantMessage, text: string, ctx: ChatStreamEventContext): Promise<void> {
     for (const cb of list) {
       try { await cb(msg, text, ctx) }
-      catch (err) { console.error('[deskpet] hook error:', err) }
+      catch (err) { console.error('[continuum-memory] hook error:', err) }
     }
   }
 

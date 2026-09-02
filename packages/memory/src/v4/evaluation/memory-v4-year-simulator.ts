@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
-import type { MemoryScope } from '@deskpet/contracts'
+import type { MemoryScope } from '@continuum-memory/contracts'
 import { extractMemoryCandidates, type MemoryCandidate } from '../../long-term/memory-extractor'
 import { createVectorStore, type V3MemoryCommit, type V3MemoryRecord } from '../../long-term/vector-store'
 import { createMemoryConsolidationService } from '../consolidation/memory-consolidation-service'

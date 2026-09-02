@@ -1,4 +1,4 @@
-import type { MemoryCapture, MemoryScope } from '@deskpet/contracts'
+import type { MemoryCapture, MemoryScope } from '@continuum-memory/contracts'
 import type { MemoryCandidate, MemoryExtractor } from '../long-term/memory-extractor'
 import { extractMemoryCandidates } from '../long-term/memory-extractor'
 import type { MemoryCandidateEvaluation, MemoryCandidateVerifier } from '../long-term/memory-write-policy'

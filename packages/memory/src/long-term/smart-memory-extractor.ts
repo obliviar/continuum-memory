@@ -1,4 +1,4 @@
-import type { MemoryCapture, MemorySensitivity, MemorySharePolicy } from '@deskpet/contracts'
+import type { MemoryCapture, MemorySensitivity, MemorySharePolicy } from '@continuum-memory/contracts'
 import OpenAI from 'openai'
 import { inferMemoryPrivacy, isSafeMemoryContent } from './memory-extractor'
 import type { MemoryCandidate, MemoryExtractor } from './memory-extractor'

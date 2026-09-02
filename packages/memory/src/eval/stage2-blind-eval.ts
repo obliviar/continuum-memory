@@ -1,4 +1,4 @@
-import type { MemoryCapture } from '@deskpet/contracts'
+import type { MemoryCapture } from '@continuum-memory/contracts'
 import {
   BLIND_PACK_SCHEMA_VERSION,
   fingerprintJson,

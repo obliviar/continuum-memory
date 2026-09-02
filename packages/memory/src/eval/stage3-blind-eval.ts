@@ -1,4 +1,4 @@
-import type { MemoryRecallOptions } from '@deskpet/contracts'
+import type { MemoryRecallOptions } from '@continuum-memory/contracts'
 import {
   BLIND_PACK_SCHEMA_VERSION,
   fingerprintJson,

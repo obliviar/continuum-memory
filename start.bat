@@ -1,5 +1,6 @@
 @echo off
 chcp 65001 >nul
+title Continuum Memory
 cd /d "%~dp0"
 
 rem API configuration is loaded from the ignored local config.json or the

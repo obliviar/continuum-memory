@@ -1,4 +1,4 @@
-import type { MemoryCapture } from '@deskpet/contracts'
+import type { MemoryCapture } from '@continuum-memory/contracts'
 import type { MemoryCandidate } from './memory-extractor'
 
 export const MEMORY_NORMALIZER_VERSION = 'structured-normalizer-v1'

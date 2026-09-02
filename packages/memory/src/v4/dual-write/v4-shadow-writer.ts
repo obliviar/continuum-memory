@@ -3,7 +3,7 @@ import type {
   AdaptiveMemoryRecallResult,
   MemoryCapture,
   MemoryScope,
-} from '@deskpet/contracts'
+} from '@continuum-memory/contracts'
 import type { MemoryCandidate } from '../../long-term/memory-extractor'
 import type { MemoryCandidateEvaluation } from '../../long-term/memory-write-policy'
 import type { MemorySourceUnlinkCommit } from '../../long-term/memory-writer'

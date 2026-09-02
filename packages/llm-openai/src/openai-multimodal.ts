@@ -1,4 +1,4 @@
-import type { ChatMessage } from '@deskpet/contracts'
+import type { ChatMessage } from '@continuum-memory/contracts'
 
 /**
  * Multimodal attachment helpers for OpenAI messages.

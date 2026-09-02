@@ -1,4 +1,4 @@
-import type { MemoryFragment } from '@deskpet/contracts'
+import type { MemoryFragment } from '@continuum-memory/contracts'
 import { describe, expect, it } from 'vitest'
 import type { AdaptiveRankedMemory } from './adaptive-recall'
 import { isBroadPersonalMemoryQuery, selectAdaptiveRecall } from './adaptive-recall'

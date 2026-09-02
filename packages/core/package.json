@@ -8,9 +8,9 @@
     "type":  "module",
     "version":  "0.1.0",
     "dependencies":  {
-                         "@deskpet/contracts":  "workspace:*"
+                         "@continuum-memory/contracts":  "workspace:*"
                      },
-    "name":  "@deskpet/core",
+    "name":  "@continuum-memory/core",
     "private":  true,
     "exports":  {
                     ".":  "./src/index.ts"

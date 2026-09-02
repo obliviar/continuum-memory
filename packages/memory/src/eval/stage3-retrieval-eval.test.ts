@@ -1,4 +1,4 @@
-import type { MemoryRecallOptions, MemoryTemporalMode } from '@deskpet/contracts'
+import type { MemoryRecallOptions, MemoryTemporalMode } from '@continuum-memory/contracts'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * DeskPet 阶段 3 冻结盲测数据集生成器
+ * Continuum Memory 阶段 3 冻结盲测数据集生成器
  *
  * 输出：
  * 这是仓库可见的合成开发/压力数据生成器，不是外部盲测标注器。
@@ -1048,7 +1048,7 @@ function main() {
   const labelHash = createHash('sha256').update(JSON.stringify(labelPack, null, 2) + '\n', 'utf-8').digest('hex')
 
   // 汇总
-  console.log('=== DeskPet 阶段 3 合成开发数据集生成完成（不可用于外部盲测认证）===')
+  console.log('=== Continuum Memory 阶段 3 合成开发数据集生成完成（不可用于外部盲测认证）===')
   console.log(`数据集版本：${datasetVersion}`)
   console.log(`冻结时间：${frozenAt}`)
   console.log(`标注者：${adjudicator}`)
@@ -1072,7 +1072,7 @@ function main() {
   console.log(`$env:DESKPET_MEMORY_STAGE3_BLIND_LABELS='${labelPath}'`)
   console.log(`$env:DESKPET_MEMORY_STAGE3_BLIND_CASE_SHA256='${caseHash}'`)
   console.log(`$env:DESKPET_MEMORY_STAGE3_BLIND_LABEL_SHA256='${labelHash}'`)
-  console.log(`pnpm.cmd -F @deskpet/memory test:stage3-blind`)
+  console.log(`pnpm.cmd -F @continuum-memory/memory test:stage3-blind`)
 }
 
 main()

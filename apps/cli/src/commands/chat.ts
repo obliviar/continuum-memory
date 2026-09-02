@@ -1,4 +1,4 @@
-import type { AgentRuntime } from '@deskpet/core'
+import type { AgentRuntime } from '@continuum-memory/core'
 import { createInterface } from 'node:readline'
 
 export function startChatRepl(runtime: AgentRuntime, sessionId: string) {
@@ -8,7 +8,7 @@ export function startChatRepl(runtime: AgentRuntime, sessionId: string) {
     prompt: '\n> ',
   })
 
-  console.log(`[deskpet] Session: ${sessionId}`)
+  console.log(`[continuum-memory] Session: ${sessionId}`)
   rl.prompt()
 
   rl.on('line', async (line) => {
@@ -31,13 +31,13 @@ export function startChatRepl(runtime: AgentRuntime, sessionId: string) {
       }
     }
     catch (err) {
-      console.error('[deskpet] error:', err instanceof Error ? err.message : err)
+      console.error('[continuum-memory] error:', err instanceof Error ? err.message : err)
     }
     rl.prompt()
   })
 
   rl.on('close', () => {
-    console.log('\n[deskpet] goodbye!')
+    console.log('\n[continuum-memory] goodbye!')
     process.exit(0)
   })
 }
@@ -55,10 +55,10 @@ function handleCommand(cmd: string) {
       break
     case 'new':
     case 'clear':
-      console.log('[deskpet] starting new session...')
+      console.log('[continuum-memory] starting new session...')
       break
     case 'hooks':
-      console.log('[deskpet] hooks are active: token output, stream end')
+      console.log('[continuum-memory] hooks are active: token output, stream end')
       break
     default:
       console.log(`Unknown command: /${name}`)

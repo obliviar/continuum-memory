@@ -13,3 +13,4 @@ apps/continuum-memory-electron/config.json
 apps/server/data/
 evals/memory/private/
 evals/memory/reports/private/
+/tmp/

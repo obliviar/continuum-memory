@@ -1,0 +1,1404 @@
+{
+  "evalVersion": "memory-multi-baseline-eval-v1",
+  "datasetVersion": "deskpet-stage3-retrieval-dev-v1",
+  "datasetFingerprint": "aebdb66769862ced8278908eeeb012b9513ffb01fc31ff1fe2183d8f2b2bcd0a",
+  "evaluatedAt": 1788393600000,
+  "note": "Repository-visible development set; retrieval-only and not an external blind result.",
+  "topK": 5,
+  "caseCount": 29,
+  "factCount": 22,
+  "noiseCount": 250,
+  "corpusItemCount": 272,
+  "strategies": {
+    "no-memory": {
+      "evalVersion": "memory-stage3-retrieval-eval-v1",
+      "datasetVersion": "deskpet-stage3-retrieval-dev-v1",
+      "topK": 5,
+      "caseCount": 29,
+      "answerableCases": 23,
+      "abstentionCases": 6,
+      "recallAtK": 0,
+      "hitRateAtK": 0,
+      "top1Accuracy": 0,
+      "mrrAtK": 0,
+      "ndcgAtK": 0,
+      "abstentionAccuracy": 1,
+      "meanLatencyMilliseconds": 0.001569,
+      "p95LatencyMilliseconds": 0.0103,
+      "maxLatencyMilliseconds": 0.0137,
+      "byCategory": {
+        "abstention": {
+          "answerableCases": 0,
+          "abstentionCases": 5,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 1,
+          "meanLatencyMilliseconds": 0.00086,
+          "p95LatencyMilliseconds": 0.0017,
+          "maxLatencyMilliseconds": 0.0017
+        },
+        "long-range": {
+          "answerableCases": 3,
+          "abstentionCases": 0,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.001,
+          "p95LatencyMilliseconds": 0.002,
+          "maxLatencyMilliseconds": 0.002
+        },
+        "multi-fact": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.00048,
+          "p95LatencyMilliseconds": 0.0007,
+          "maxLatencyMilliseconds": 0.0007
+        },
+        "paraphrase": {
+          "answerableCases": 10,
+          "abstentionCases": 0,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.00223,
+          "p95LatencyMilliseconds": 0.0137,
+          "maxLatencyMilliseconds": 0.0137
+        },
+        "selective-forgetting": {
+          "answerableCases": 0,
+          "abstentionCases": 1,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 1,
+          "meanLatencyMilliseconds": 0.0103,
+          "p95LatencyMilliseconds": 0.0103,
+          "maxLatencyMilliseconds": 0.0103
+        },
+        "temporal": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.00064,
+          "p95LatencyMilliseconds": 0.0009,
+          "maxLatencyMilliseconds": 0.0009
+        }
+      },
+      "failures": [
+        {
+          "id": "p01",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "identity.name"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "p02",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "location.current"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "p03",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "occupation"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "p04",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "project.current"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "p05",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "partner"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "p06",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "allergy"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "p07",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "education"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "p08",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "tech-stack"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "p09",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "birthday"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "p10",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "color"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "t01",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2023"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "t02",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2024"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "t03",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.current"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "t04",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2023",
+            "location.2024"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "t05",
+          "category": "temporal",
+          "relevantKeys": [
+            "project.2023",
+            "project.2024",
+            "project.current"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "m01",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "occupation",
+            "project.current"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "m02",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "location.current",
+            "partner"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "m03",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "allergy",
+            "dislike.food"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "m04",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "education",
+            "tech-stack"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "m05",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "worktime",
+            "exercise"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "l01",
+          "category": "long-range",
+          "relevantKeys": [
+            "pet"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "l02",
+          "category": "long-range",
+          "relevantKeys": [
+            "music"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "l03",
+          "category": "long-range",
+          "relevantKeys": [
+            "goal"
+          ],
+          "retrievedKeys": []
+        }
+      ],
+      "top1Failures": [
+        {
+          "id": "p01",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "identity.name"
+          ]
+        },
+        {
+          "id": "p02",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "location.current"
+          ]
+        },
+        {
+          "id": "p03",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "occupation"
+          ]
+        },
+        {
+          "id": "p04",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "project.current"
+          ]
+        },
+        {
+          "id": "p05",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "partner"
+          ]
+        },
+        {
+          "id": "p06",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "allergy"
+          ]
+        },
+        {
+          "id": "p07",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "education"
+          ]
+        },
+        {
+          "id": "p08",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "tech-stack"
+          ]
+        },
+        {
+          "id": "p09",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "birthday"
+          ]
+        },
+        {
+          "id": "p10",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "color"
+          ]
+        },
+        {
+          "id": "t01",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2023"
+          ]
+        },
+        {
+          "id": "t02",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2024"
+          ]
+        },
+        {
+          "id": "t03",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.current"
+          ]
+        },
+        {
+          "id": "t04",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2023",
+            "location.2024"
+          ]
+        },
+        {
+          "id": "t05",
+          "category": "temporal",
+          "relevantKeys": [
+            "project.2023",
+            "project.2024",
+            "project.current"
+          ]
+        },
+        {
+          "id": "m01",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "occupation",
+            "project.current"
+          ]
+        },
+        {
+          "id": "m02",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "location.current",
+            "partner"
+          ]
+        },
+        {
+          "id": "m03",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "allergy",
+            "dislike.food"
+          ]
+        },
+        {
+          "id": "m04",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "education",
+            "tech-stack"
+          ]
+        },
+        {
+          "id": "m05",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "worktime",
+            "exercise"
+          ]
+        },
+        {
+          "id": "l01",
+          "category": "long-range",
+          "relevantKeys": [
+            "pet"
+          ]
+        },
+        {
+          "id": "l02",
+          "category": "long-range",
+          "relevantKeys": [
+            "music"
+          ]
+        },
+        {
+          "id": "l03",
+          "category": "long-range",
+          "relevantKeys": [
+            "goal"
+          ]
+        }
+      ]
+    },
+    "bm25": {
+      "evalVersion": "memory-stage3-retrieval-eval-v1",
+      "datasetVersion": "deskpet-stage3-retrieval-dev-v1",
+      "topK": 5,
+      "caseCount": 29,
+      "answerableCases": 23,
+      "abstentionCases": 6,
+      "recallAtK": 0.73913,
+      "hitRateAtK": 0.782609,
+      "top1Accuracy": 0.652174,
+      "mrrAtK": 0.717391,
+      "ndcgAtK": 0.706264,
+      "abstentionAccuracy": 0.666667,
+      "meanLatencyMilliseconds": 0.274479,
+      "p95LatencyMilliseconds": 1.2293,
+      "maxLatencyMilliseconds": 5.1716,
+      "byCategory": {
+        "abstention": {
+          "answerableCases": 0,
+          "abstentionCases": 5,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 0.8,
+          "meanLatencyMilliseconds": 0.0105,
+          "p95LatencyMilliseconds": 0.0161,
+          "maxLatencyMilliseconds": 0.0161
+        },
+        "long-range": {
+          "answerableCases": 3,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.022733,
+          "p95LatencyMilliseconds": 0.0272,
+          "maxLatencyMilliseconds": 0.0272
+        },
+        "multi-fact": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 0.8,
+          "hitRateAtK": 1,
+          "top1Accuracy": 0.6,
+          "mrrAtK": 0.8,
+          "ndcgAtK": 0.722629,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.12026,
+          "p95LatencyMilliseconds": 0.3561,
+          "maxLatencyMilliseconds": 0.3561
+        },
+        "paraphrase": {
+          "answerableCases": 10,
+          "abstentionCases": 0,
+          "recallAtK": 0.5,
+          "hitRateAtK": 0.5,
+          "top1Accuracy": 0.4,
+          "mrrAtK": 0.45,
+          "ndcgAtK": 0.463093,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.68354,
+          "p95LatencyMilliseconds": 5.1716,
+          "maxLatencyMilliseconds": 5.1716
+        },
+        "selective-forgetting": {
+          "answerableCases": 0,
+          "abstentionCases": 1,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.0769,
+          "p95LatencyMilliseconds": 0.0769,
+          "maxLatencyMilliseconds": 0.0769
+        },
+        "temporal": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.06512,
+          "p95LatencyMilliseconds": 0.1677,
+          "maxLatencyMilliseconds": 0.1677
+        }
+      },
+      "failures": [
+        {
+          "id": "p01",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "identity.name"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "p03",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "occupation"
+          ],
+          "retrievedKeys": [
+            "worktime",
+            "allergy",
+            "birthday"
+          ]
+        },
+        {
+          "id": "p04",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "project.current"
+          ],
+          "retrievedKeys": [
+            "tech-stack",
+            "location.current"
+          ]
+        },
+        {
+          "id": "p05",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "partner"
+          ],
+          "retrievedKeys": [
+            "pet"
+          ]
+        },
+        {
+          "id": "p06",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "allergy"
+          ],
+          "retrievedKeys": [
+            "dislike.food",
+            "color"
+          ]
+        },
+        {
+          "id": "s01",
+          "category": "selective-forgetting",
+          "relevantKeys": [],
+          "retrievedKeys": [
+            "drink",
+            "exercise",
+            "tech-stack",
+            "pet",
+            "birthday"
+          ]
+        },
+        {
+          "id": "a05",
+          "category": "abstention",
+          "relevantKeys": [],
+          "retrievedKeys": [
+            "dislike.food",
+            "education"
+          ]
+        }
+      ],
+      "top1Failures": [
+        {
+          "id": "p01",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "identity.name"
+          ]
+        },
+        {
+          "id": "p03",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "occupation"
+          ],
+          "retrievedKey": "worktime"
+        },
+        {
+          "id": "p04",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "project.current"
+          ],
+          "retrievedKey": "tech-stack"
+        },
+        {
+          "id": "p05",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "partner"
+          ],
+          "retrievedKey": "pet"
+        },
+        {
+          "id": "p06",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "allergy"
+          ],
+          "retrievedKey": "dislike.food"
+        },
+        {
+          "id": "p09",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "birthday"
+          ],
+          "retrievedKey": "allergy"
+        },
+        {
+          "id": "m02",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "location.current",
+            "partner"
+          ],
+          "retrievedKey": "pet"
+        },
+        {
+          "id": "m05",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "worktime",
+            "exercise"
+          ],
+          "retrievedKey": "dislike.food"
+        }
+      ]
+    },
+    "dense-local-hash": {
+      "evalVersion": "memory-stage3-retrieval-eval-v1",
+      "datasetVersion": "deskpet-stage3-retrieval-dev-v1",
+      "topK": 5,
+      "caseCount": 29,
+      "answerableCases": 23,
+      "abstentionCases": 6,
+      "recallAtK": 1,
+      "hitRateAtK": 1,
+      "top1Accuracy": 1,
+      "mrrAtK": 1,
+      "ndcgAtK": 0.99651,
+      "abstentionAccuracy": 1,
+      "meanLatencyMilliseconds": 0.303328,
+      "p95LatencyMilliseconds": 1.9198,
+      "maxLatencyMilliseconds": 2.6371,
+      "byCategory": {
+        "abstention": {
+          "answerableCases": 0,
+          "abstentionCases": 5,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 1,
+          "meanLatencyMilliseconds": 0.02566,
+          "p95LatencyMilliseconds": 0.0974,
+          "maxLatencyMilliseconds": 0.0974
+        },
+        "long-range": {
+          "answerableCases": 3,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.1025,
+          "p95LatencyMilliseconds": 0.1053,
+          "maxLatencyMilliseconds": 0.1053
+        },
+        "multi-fact": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 0.983944,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.11016,
+          "p95LatencyMilliseconds": 0.1152,
+          "maxLatencyMilliseconds": 0.1152
+        },
+        "paraphrase": {
+          "answerableCases": 10,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.71423,
+          "p95LatencyMilliseconds": 2.6371,
+          "maxLatencyMilliseconds": 2.6371
+        },
+        "selective-forgetting": {
+          "answerableCases": 0,
+          "abstentionCases": 1,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 1,
+          "meanLatencyMilliseconds": 0.1001,
+          "p95LatencyMilliseconds": 0.1001,
+          "maxLatencyMilliseconds": 0.1001
+        },
+        "temporal": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.1135,
+          "p95LatencyMilliseconds": 0.1394,
+          "maxLatencyMilliseconds": 0.1394
+        }
+      },
+      "failures": [],
+      "top1Failures": []
+    },
+    "v3-hybrid-rrf": {
+      "evalVersion": "memory-stage3-retrieval-eval-v1",
+      "datasetVersion": "deskpet-stage3-retrieval-dev-v1",
+      "topK": 5,
+      "caseCount": 29,
+      "answerableCases": 23,
+      "abstentionCases": 6,
+      "recallAtK": 1,
+      "hitRateAtK": 1,
+      "top1Accuracy": 1,
+      "mrrAtK": 1,
+      "ndcgAtK": 0.994662,
+      "abstentionAccuracy": 1,
+      "meanLatencyMilliseconds": 2.312541,
+      "p95LatencyMilliseconds": 3.8681,
+      "maxLatencyMilliseconds": 4.7414,
+      "byCategory": {
+        "abstention": {
+          "answerableCases": 0,
+          "abstentionCases": 5,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 1,
+          "meanLatencyMilliseconds": 0.22192,
+          "p95LatencyMilliseconds": 0.9712,
+          "maxLatencyMilliseconds": 0.9712
+        },
+        "long-range": {
+          "answerableCases": 3,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 2.565867,
+          "p95LatencyMilliseconds": 2.6423,
+          "maxLatencyMilliseconds": 2.6423
+        },
+        "multi-fact": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 0.975443,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 3.1816,
+          "p95LatencyMilliseconds": 3.8681,
+          "maxLatencyMilliseconds": 3.8681
+        },
+        "paraphrase": {
+          "answerableCases": 10,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 2.78908,
+          "p95LatencyMilliseconds": 4.7414,
+          "maxLatencyMilliseconds": 4.7414
+        },
+        "selective-forgetting": {
+          "answerableCases": 0,
+          "abstentionCases": 1,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 1,
+          "meanLatencyMilliseconds": 1.291,
+          "p95LatencyMilliseconds": 1.291,
+          "maxLatencyMilliseconds": 1.291
+        },
+        "temporal": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 2.63334,
+          "p95LatencyMilliseconds": 2.9849,
+          "maxLatencyMilliseconds": 2.9849
+        }
+      },
+      "failures": [],
+      "top1Failures": []
+    },
+    "v4-hierarchical": {
+      "evalVersion": "memory-stage3-retrieval-eval-v1",
+      "datasetVersion": "deskpet-stage3-retrieval-dev-v1",
+      "topK": 5,
+      "caseCount": 29,
+      "answerableCases": 23,
+      "abstentionCases": 6,
+      "recallAtK": 0.673913,
+      "hitRateAtK": 0.695652,
+      "top1Accuracy": 0.695652,
+      "mrrAtK": 0.695652,
+      "ndcgAtK": 0.678832,
+      "abstentionAccuracy": 1,
+      "meanLatencyMilliseconds": 7.682607,
+      "p95LatencyMilliseconds": 8.7087,
+      "maxLatencyMilliseconds": 29.8162,
+      "byCategory": {
+        "abstention": {
+          "answerableCases": 0,
+          "abstentionCases": 5,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 1,
+          "meanLatencyMilliseconds": 6.80366,
+          "p95LatencyMilliseconds": 8.4493,
+          "maxLatencyMilliseconds": 8.4493
+        },
+        "long-range": {
+          "answerableCases": 3,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 6.641267,
+          "p95LatencyMilliseconds": 7.0394,
+          "maxLatencyMilliseconds": 7.0394
+        },
+        "multi-fact": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 0.7,
+          "hitRateAtK": 0.8,
+          "top1Accuracy": 0.8,
+          "mrrAtK": 0.8,
+          "ndcgAtK": 0.722629,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 7.01736,
+          "p95LatencyMilliseconds": 8.5892,
+          "maxLatencyMilliseconds": 8.5892
+        },
+        "paraphrase": {
+          "answerableCases": 10,
+          "abstentionCases": 0,
+          "recallAtK": 0.8,
+          "hitRateAtK": 0.8,
+          "top1Accuracy": 0.8,
+          "mrrAtK": 0.8,
+          "ndcgAtK": 0.8,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 9.38549,
+          "p95LatencyMilliseconds": 29.8162,
+          "maxLatencyMilliseconds": 29.8162
+        },
+        "selective-forgetting": {
+          "answerableCases": 0,
+          "abstentionCases": 1,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 1,
+          "meanLatencyMilliseconds": 6.1465,
+          "p95LatencyMilliseconds": 6.1465,
+          "maxLatencyMilliseconds": 6.1465
+        },
+        "temporal": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 0.2,
+          "hitRateAtK": 0.2,
+          "top1Accuracy": 0.2,
+          "mrrAtK": 0.2,
+          "ndcgAtK": 0.2,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 6.75306,
+          "p95LatencyMilliseconds": 8.7087,
+          "maxLatencyMilliseconds": 8.7087
+        }
+      },
+      "failures": [
+        {
+          "id": "p02",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "location.current"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "p05",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "partner"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "t01",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2023"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "t02",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2024"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "t03",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.current"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "t04",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2023",
+            "location.2024"
+          ],
+          "retrievedKeys": []
+        },
+        {
+          "id": "m02",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "location.current",
+            "partner"
+          ],
+          "retrievedKeys": []
+        }
+      ],
+      "top1Failures": [
+        {
+          "id": "p02",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "location.current"
+          ]
+        },
+        {
+          "id": "p05",
+          "category": "paraphrase",
+          "relevantKeys": [
+            "partner"
+          ]
+        },
+        {
+          "id": "t01",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2023"
+          ]
+        },
+        {
+          "id": "t02",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2024"
+          ]
+        },
+        {
+          "id": "t03",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.current"
+          ]
+        },
+        {
+          "id": "t04",
+          "category": "temporal",
+          "relevantKeys": [
+            "location.2023",
+            "location.2024"
+          ]
+        },
+        {
+          "id": "m02",
+          "category": "multi-fact",
+          "relevantKeys": [
+            "location.current",
+            "partner"
+          ]
+        }
+      ]
+    },
+    "oracle": {
+      "evalVersion": "memory-stage3-retrieval-eval-v1",
+      "datasetVersion": "deskpet-stage3-retrieval-dev-v1",
+      "topK": 5,
+      "caseCount": 29,
+      "answerableCases": 23,
+      "abstentionCases": 6,
+      "recallAtK": 1,
+      "hitRateAtK": 1,
+      "top1Accuracy": 1,
+      "mrrAtK": 1,
+      "ndcgAtK": 1,
+      "abstentionAccuracy": 1,
+      "meanLatencyMilliseconds": 0.00529,
+      "p95LatencyMilliseconds": 0.0131,
+      "maxLatencyMilliseconds": 0.0979,
+      "byCategory": {
+        "abstention": {
+          "answerableCases": 0,
+          "abstentionCases": 5,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 1,
+          "meanLatencyMilliseconds": 0.00074,
+          "p95LatencyMilliseconds": 0.0016,
+          "maxLatencyMilliseconds": 0.0016
+        },
+        "long-range": {
+          "answerableCases": 3,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.000733,
+          "p95LatencyMilliseconds": 0.0008,
+          "maxLatencyMilliseconds": 0.0008
+        },
+        "multi-fact": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.00106,
+          "p95LatencyMilliseconds": 0.0015,
+          "maxLatencyMilliseconds": 0.0015
+        },
+        "paraphrase": {
+          "answerableCases": 10,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.01309,
+          "p95LatencyMilliseconds": 0.0979,
+          "maxLatencyMilliseconds": 0.0979
+        },
+        "selective-forgetting": {
+          "answerableCases": 0,
+          "abstentionCases": 1,
+          "recallAtK": 0,
+          "hitRateAtK": 0,
+          "top1Accuracy": 0,
+          "mrrAtK": 0,
+          "ndcgAtK": 0,
+          "abstentionAccuracy": 1,
+          "meanLatencyMilliseconds": 0.0011,
+          "p95LatencyMilliseconds": 0.0011,
+          "maxLatencyMilliseconds": 0.0011
+        },
+        "temporal": {
+          "answerableCases": 5,
+          "abstentionCases": 0,
+          "recallAtK": 1,
+          "hitRateAtK": 1,
+          "top1Accuracy": 1,
+          "mrrAtK": 1,
+          "ndcgAtK": 1,
+          "abstentionAccuracy": 0,
+          "meanLatencyMilliseconds": 0.00204,
+          "p95LatencyMilliseconds": 0.0036,
+          "maxLatencyMilliseconds": 0.0036
+        }
+      },
+      "failures": [],
+      "top1Failures": []
+    }
+  },
+  "qualityGates": {
+    "no-memory": {
+      "version": "memory-multi-baseline-gate-v1",
+      "passed": false,
+      "checks": [
+        {
+          "metric": "recallAtK",
+          "actual": 0,
+          "minimum": 0.9,
+          "passed": false
+        },
+        {
+          "metric": "top1Accuracy",
+          "actual": 0,
+          "minimum": 0.85,
+          "passed": false
+        },
+        {
+          "metric": "ndcgAtK",
+          "actual": 0,
+          "minimum": 0.85,
+          "passed": false
+        },
+        {
+          "metric": "abstentionAccuracy",
+          "actual": 1,
+          "minimum": 0.95,
+          "passed": true
+        }
+      ]
+    },
+    "bm25": {
+      "version": "memory-multi-baseline-gate-v1",
+      "passed": false,
+      "checks": [
+        {
+          "metric": "recallAtK",
+          "actual": 0.73913,
+          "minimum": 0.9,
+          "passed": false
+        },
+        {
+          "metric": "top1Accuracy",
+          "actual": 0.652174,
+          "minimum": 0.85,
+          "passed": false
+        },
+        {
+          "metric": "ndcgAtK",
+          "actual": 0.706264,
+          "minimum": 0.85,
+          "passed": false
+        },
+        {
+          "metric": "abstentionAccuracy",
+          "actual": 0.666667,
+          "minimum": 0.95,
+          "passed": false
+        }
+      ]
+    },
+    "dense-local-hash": {
+      "version": "memory-multi-baseline-gate-v1",
+      "passed": true,
+      "checks": [
+        {
+          "metric": "recallAtK",
+          "actual": 1,
+          "minimum": 0.9,
+          "passed": true
+        },
+        {
+          "metric": "top1Accuracy",
+          "actual": 1,
+          "minimum": 0.85,
+          "passed": true
+        },
+        {
+          "metric": "ndcgAtK",
+          "actual": 0.99651,
+          "minimum": 0.85,
+          "passed": true
+        },
+        {
+          "metric": "abstentionAccuracy",
+          "actual": 1,
+          "minimum": 0.95,
+          "passed": true
+        }
+      ]
+    },
+    "v3-hybrid-rrf": {
+      "version": "memory-multi-baseline-gate-v1",
+      "passed": true,
+      "checks": [
+        {
+          "metric": "recallAtK",
+          "actual": 1,
+          "minimum": 0.9,
+          "passed": true
+        },
+        {
+          "metric": "top1Accuracy",
+          "actual": 1,
+          "minimum": 0.85,
+          "passed": true
+        },
+        {
+          "metric": "ndcgAtK",
+          "actual": 0.994662,
+          "minimum": 0.85,
+          "passed": true
+        },
+        {
+          "metric": "abstentionAccuracy",
+          "actual": 1,
+          "minimum": 0.95,
+          "passed": true
+        }
+      ]
+    },
+    "v4-hierarchical": {
+      "version": "memory-multi-baseline-gate-v1",
+      "passed": false,
+      "checks": [
+        {
+          "metric": "recallAtK",
+          "actual": 0.673913,
+          "minimum": 0.9,
+          "passed": false
+        },
+        {
+          "metric": "top1Accuracy",
+          "actual": 0.695652,
+          "minimum": 0.85,
+          "passed": false
+        },
+        {
+          "metric": "ndcgAtK",
+          "actual": 0.678832,
+          "minimum": 0.85,
+          "passed": false
+        },
+        {
+          "metric": "abstentionAccuracy",
+          "actual": 1,
+          "minimum": 0.95,
+          "passed": true
+        }
+      ]
+    },
+    "oracle": {
+      "version": "memory-multi-baseline-gate-v1",
+      "passed": true,
+      "checks": [
+        {
+          "metric": "recallAtK",
+          "actual": 1,
+          "minimum": 0.9,
+          "passed": true
+        },
+        {
+          "metric": "top1Accuracy",
+          "actual": 1,
+          "minimum": 0.85,
+          "passed": true
+        },
+        {
+          "metric": "ndcgAtK",
+          "actual": 1,
+          "minimum": 0.85,
+          "passed": true
+        },
+        {
+          "metric": "abstentionAccuracy",
+          "actual": 1,
+          "minimum": 0.95,
+          "passed": true
+        }
+      ]
+    }
+  }
+}

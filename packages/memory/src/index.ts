@@ -148,6 +148,24 @@ export type {
   MemoryStage3RetrievalMetrics,
 } from './eval/stage3-retrieval-eval'
 export {
+  MEMORY_MULTI_BASELINE_EVAL_VERSION,
+  MEMORY_MULTI_BASELINE_GATE_VERSION,
+  MEMORY_MULTI_BASELINE_STRATEGIES,
+  evaluateMemoryMultiBaselineGate,
+  fingerprintMemoryMultiBaselineFixture,
+  runMemoryMultiBaselineEval,
+} from './eval/memory-multi-baseline-eval'
+export type {
+  MemoryMultiBaselineCase,
+  MemoryMultiBaselineEvalOptions,
+  MemoryMultiBaselineEvalReport,
+  MemoryMultiBaselineFact,
+  MemoryMultiBaselineFixture,
+  MemoryMultiBaselineGateCheck,
+  MemoryMultiBaselineGateResult,
+  MemoryMultiBaselineStrategy,
+} from './eval/memory-multi-baseline-eval'
+export {
   DEFAULT_MEMORY_V4_ROLLOUT_GATE_POLICY,
   MEMORY_STAGE5_V4_ROLLOUT_DATASET_SCHEMA_VERSION,
   MEMORY_STAGE5_V4_ROLLOUT_EVAL_VERSION,

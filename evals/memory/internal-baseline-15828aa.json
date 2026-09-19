@@ -1,0 +1,135 @@
+{
+  "reportVersion": "continuum-memory-internal-baseline-v1",
+  "generatedAt": "2026-09-03T14:40:56+08:00",
+  "commit": "15828aa2847701a32df17500a72e939633e1e13e",
+  "branch": "experiment",
+  "environment": {
+    "os": "Microsoft Windows NT 10.0.26200.0",
+    "cpu": "Intel(R) Core(TM) Ultra 7 255HX",
+    "node": "v26.4.0",
+    "pnpm": "9.12.0"
+  },
+  "scope": {
+    "externalBlind": false,
+    "humanReview": false,
+    "privacyAndSecurityCertification": false,
+    "publicBenchmark": null,
+    "evidenceClass": "repository-visible deterministic regression and synthetic truth"
+  },
+  "testExecution": {
+    "testFilesPassed": 14,
+    "testsPassed": 26,
+    "testsFailed": 0
+  },
+  "writeEvaluation": {
+    "datasetVersion": "deskpet-stage2-write-frozen-v1",
+    "caseCount": 24,
+    "precision": 1,
+    "recall": 1,
+    "f1": 1,
+    "outcomeAccuracy": 1,
+    "operationAccuracy": 1,
+    "unsupportedActiveRate": 0,
+    "precisionLower95": 0.89869,
+    "recallLower95": 0.89869,
+    "pointTargetsPassed": true,
+    "confidenceBoundTargetsPassed": false
+  },
+  "retrievalEvaluation": {
+    "datasetVersion": "deskpet-stage3-retrieval-dev-v1",
+    "caseCount": 29,
+    "answerableCases": 23,
+    "abstentionCases": 6,
+    "rrf": {
+      "recallAt5": 1,
+      "top1Accuracy": 1,
+      "mrrAt5": 1,
+      "ndcgAt5": 0.994662,
+      "abstentionAccuracy": 1,
+      "p95LatencyMs": 0.6066
+    },
+    "weightedLinear": {
+      "recallAt5": 1,
+      "top1Accuracy": 1,
+      "mrrAt5": 1,
+      "ndcgAt5": 0.991171,
+      "abstentionAccuracy": 1,
+      "p95LatencyMs": 0.478
+    }
+  },
+  "localCalibration": {
+    "datasetVersion": "deskpet-v4-local-synthetic-calibration-v2",
+    "calibrationSamples": 700,
+    "validationSamples": 1120,
+    "validationPrecision": 1,
+    "validationRecall": 1,
+    "validationSpecificity": 1,
+    "validationFalsePositiveRate": 0,
+    "abstentionAccuracy": 1
+  },
+  "yearSimulation": {
+    "eventCount": 1826,
+    "passed": true,
+    "failureCount": 0,
+    "v4RecallAt5": 1,
+    "v4Top1Accuracy": 1,
+    "v4AbstentionAccuracy": 1,
+    "scaleFactCount": 20000,
+    "scaleTop1Accuracy": 1,
+    "scaleP95LatencyMs": 84.5793
+  },
+  "scaleEvaluations": {
+    "v4Sparse20k": {
+      "queryCount": 12,
+      "maximumCandidates": 10,
+      "p95LatencyMs": 40.0977,
+      "targetP95LatencyMs": 100,
+      "targetMet": true
+    },
+    "adaptiveRecall20k": {
+      "queryCount": 12,
+      "candidateCount": 80,
+      "evaluatedCount": 16,
+      "injectedCount": 10,
+      "p95LatencyMs": 73,
+      "targetP95LatencyMs": 100,
+      "targetMet": true
+    },
+    "denseCandidate20k512d": {
+      "queryCount": 12,
+      "p95LatencyMs": 10.4407,
+      "targetP95LatencyMs": 200,
+      "targetMet": true
+    }
+  },
+  "migrationAndReconciliation": {
+    "migrationItems": 2000,
+    "migrationMs": 93,
+    "migrationValidationMs": 41,
+    "reconciliationItems": 5000,
+    "firstReconciliationMs": 315,
+    "unchangedRestartMs": 59
+  },
+  "faultRecovery": {
+    "iterations": 200,
+    "visibleWrites": 40,
+    "workerFailures": 6,
+    "v3Fallbacks": 6,
+    "v4Recoveries": 6,
+    "snapshotSyncs": 43,
+    "p95LatencyMs": 2.69,
+    "passed": true
+  },
+  "selectedPolicy": {
+    "policyId": "deskpet-v4-retrieval-budget-625-v1",
+    "fingerprint": "341998c8631a501299571e0b552a9b902a4e0f00318d2d89ccc608fe73bc0e99",
+    "maximumCandidates": 10,
+    "hardGatesPassed": true,
+    "nonRegressionPassed": true
+  },
+  "decision": {
+    "internalFunctionalBaselinePassed": true,
+    "externalComparabilityEstablished": false,
+    "nextStep": "add a fixed multi-baseline harness and run LongMemEval-S cleaned retrieval evaluation"
+  }
+}

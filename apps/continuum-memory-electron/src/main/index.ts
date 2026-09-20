@@ -35,7 +35,7 @@ import {
   freezeMemoryV4InternalFeedbackDataset,
   inferMemoryPrivacy,
   isSafeMemoryContent,
-  LOCAL_EMBEDDING_MODEL,
+  LOCAL_HASH_EMBEDDING_MODEL,
   migrateV3SourceIntoV4,
 } from '@continuum-memory/memory'
 import type {
@@ -162,7 +162,7 @@ const config = {
   ),
   embeddingApiKey: environmentValue('CONTINUUM_MEMORY_EMBEDDING_API_KEY', 'DESKPET_EMBEDDING_API_KEY') || fileConfig.embeddingApiKey || process.env.CONTINUUM_MEMORY_API_KEY || process.env.OPENAI_API_KEY || fileConfig.apiKey || '',
   embeddingBaseURL: environmentValue('CONTINUUM_MEMORY_EMBEDDING_BASE_URL', 'DESKPET_EMBEDDING_BASE_URL') || fileConfig.embeddingBaseURL || process.env.CONTINUUM_MEMORY_BASE_URL || process.env.OPENAI_BASE_URL || fileConfig.baseURL || undefined,
-  embeddingModel: environmentValue('CONTINUUM_MEMORY_EMBEDDING_MODEL', 'DESKPET_EMBEDDING_MODEL') || fileConfig.embeddingModel || LOCAL_EMBEDDING_MODEL,
+  embeddingModel: environmentValue('CONTINUUM_MEMORY_EMBEDDING_MODEL', 'DESKPET_EMBEDDING_MODEL') || fileConfig.embeddingModel || LOCAL_HASH_EMBEDDING_MODEL,
 }
 
 // ── Persistence ─────────────────────────────────────────
@@ -650,7 +650,7 @@ function initializeMemory(): void {
     memoryEmbeddingIndex = embeddingIndex
     const probeStore = createVectorStore({
       persistence,
-      embeddingModel: LOCAL_EMBEDDING_MODEL,
+      embeddingModel: LOCAL_HASH_EMBEDDING_MODEL,
       ...(embeddingIndex ? { embeddingIndex } : {}),
     })
     const semanticRequested = memorySettings.semanticEnabled
@@ -677,8 +677,8 @@ function initializeMemory(): void {
       persistence,
       embeddingModel: semanticActive
         ? SEMANTIC_MEMORY_FINGERPRINT
-        : LOCAL_EMBEDDING_MODEL,
-      ...(semanticActive ? { embedder: semanticMemory.embed } : {}),
+        : LOCAL_HASH_EMBEDDING_MODEL,
+      ...(semanticActive ? { embedder: semanticMemory } : {}),
       ...(embeddingIndex ? { embeddingIndex } : {}),
       foregroundEmbeddingUpgrade: !semanticActive,
       onCommittedChange: commit => memoryV4Shadow?.enqueueCommit(commit),

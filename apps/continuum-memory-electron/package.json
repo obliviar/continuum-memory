@@ -43,6 +43,7 @@
   },
   "dependencies": {
     "@continuum-memory/core": "workspace:*",
+    "@continuum-memory/embedding-onnx": "workspace:*",
     "@continuum-memory/llm-openai": "workspace:*",
     "@continuum-memory/memory": "workspace:*",
     "@continuum-memory/tools": "workspace:*",

@@ -1,406 +1,316 @@
 # Continuum Memory
 
-Continuum Memory 是一个基于 Electron、Vue 3 和 TypeScript 的 Windows 桌面 AI 伙伴。项目采用 Monorepo 与 Port/Adapter 架构，将聊天模型、会话、长期记忆、工具和语音能力拆分为独立模块。
+Continuum Memory 是一个面向 AI Agent 的本地长期记忆项目。它希望把记忆从单次对话和单个模型中分离出来，形成可独立运行、可审计、可跨会话共享的记忆模块，并通过 HTTP、SDK 或 MCP 等适配层接入 Codex 一类 Agent。
 
-> 当前版本：`0.3.9`。本版完成 V4 正式读、分层检索、365 天自动功能实验、只读策略搜索、20k V4 Beta 默认切读、持久化运行观测和自动故障恢复门：统一 EvidenceBundle、`v3` / `v4-beta` / `auto` 路由、逐请求 V3 回退、真实 hot/warm/cold/quarantine 候选路由、最小充分证据选择，以及可重放的一年生命周期/重启/重建/20k 门禁已经接通。默认模式为 `auto`；V4 Worker 就绪且证据充分时使用 V4，其他请求自动回退 V3，Worker或持久层恢复后下一请求会重新尝试V4。每次正式读取还会旁路聚合权威读源、回退、恢复、延迟、候选/证据数量、Worker 和索引规模，重启后继续累计。
+仓库当前同时包含 Windows 桌面应用、CLI、HTTP 服务和可复用的 TypeScript 包。现有代码已经实现事实提取、混合检索、时间与冲突状态、证据追踪、加密持久化、V4 影子写入和正式读取回退；知识图谱和大规模增量仓储属于下一步架构方向。
 
-## 主要功能
+## 项目目标
 
-- 桌面聊天窗口、流式回复和对话历史
-- 在应用内填写 API Key、Base URL 和模型名称
-- 自定义助手名称与五套界面主题
-- 记忆 v2：规则/智能事实提取、混合检索、冲突和过期管理、来源同步
-- AES-256-GCM 加密长期记忆，主密钥由 Electron `safeStorage`/Windows DPAPI 保护
-- 可选中文本地语义模型 `Xenova/bge-small-zh-v1.5`
-- 明确请求时才执行的本地图片 OCR 记忆
-- 逐条控制记忆的重要度、敏感级别和远程分享策略
-- 识屏提问、本地中文语音识别和工具调用框架
-- 禁用硬件加速，规避部分 Windows 设备上的 Electron 黑屏
+Continuum Memory 不是简单保存聊天全文，也不依赖模型无限增长的上下文窗口。目标是建立一个独立的记忆基础设施：
+
+- 从对话、工具结果和文件中提取值得长期保存的事实与事件；
+- 保存原始来源、事实版本、有效时间、冲突、隐私和作用域；
+- 在不同会话和不同 Agent 之间按权限共享记忆；
+- 结合关键词、语义、结构化字段、时间和图关系召回证据；
+- 让最终注入模型的内容能够回溯到具体事实和原始来源；
+- 将索引、摘要、向量和知识图谱作为可重建投影，避免污染权威事实；
+- 支持本地优先部署，并允许上层 Agent 更换模型或服务商。
+
+## 当前能力
+
+### 桌面应用
+
+- Electron + Vue 3 Windows 客户端；
+- OpenAI 兼容 API 配置和流式聊天；
+- 加密保存聊天、API 配置和长期记忆；
+- 记忆查看、编辑、恢复、删除及隐私设置；
+- 可选本地中文语义模型和图片 OCR；
+- V3/V4 自动读路由、Worker 隔离和故障回退。
+
+### 长期记忆
+
+- 本地规则或聊天模型驱动的事实提取；
+- 指令注入、密钥和敏感内容过滤；
+- `ownerId`、`agentId`、`sessionId` 作用域隔离；
+- BM25、本地哈希向量、可选 BGE 向量和结构化字段检索；
+- 当前、历史和时间点查询；
+- 事实替代、冲突、过期、孤立、抑制和删除状态；
+- 自适应候选选择、证据预算和低置信度拒答；
+- 聊天消息删除后的来源解除与孤立记忆处理。
+
+### V4 事实与证据模型
+
+V4 已定义并使用以下主要对象：
+
+| 对象 | 作用 |
+| --- | --- |
+| `MemoryEpisodeV4` | 保存消息、人工声明、图片观察等原始来源 |
+| `MemoryCandidateV4` | 保存尚待策略判断或人工审核的候选事实 |
+| `MemoryFactV4` | 保存结构化事实、时间、状态、置信度和隐私字段 |
+| `EvidenceLinkV4` | 将事实连接到其来源 Episode |
+| `MemoryFactVersionV4` | 保存事实修改及事务时间历史 |
+| `MemoryDerivedArtifactV4` | 保存可重建的摘要、索引和图边等派生数据 |
+| `MemoryDomainEventV4` | 保存事实生命周期审计事件 |
+| `RetrievalEventV4` | 区分被检索、被注入、被采用或被纠正的事实 |
+
+当前桌面端仍以 V3 承担正式写入，并在提交成功后旁路同步 V4。默认读取模式为 `auto`：V4 Worker 就绪且证据充分时使用 V4，异常、超时、空结果或证据不足时按请求回退 V3。
+
+## 当前架构
+
+```mermaid
+flowchart LR
+    UI[Electron / CLI / HTTP] --> RT[Agent Runtime]
+    RT --> LLM[OpenAI 兼容模型适配器]
+    RT --> MP[AgentMemoryPort]
+    RT --> TL[Tool Registry]
+
+    MP --> V3[V3 正式记忆]
+    V3 --> EX[提取、规范化与写入策略]
+    V3 --> RR[混合检索与自适应选择]
+    V3 -->|提交后双写| V4[V4 事实与证据仓储]
+
+    V4 --> WK[V4 检索 Worker]
+    WK --> EB[EvidenceBundle]
+    EB --> ROUTER[自动读路由]
+    RR --> ROUTER
+    ROUTER --> RT
+```
+
+主要包及职责：
+
+```text
+continuum-memory/
+├─ apps/continuum-memory-electron/  Electron + Vue 桌面应用
+├─ apps/cli/                        命令行聊天入口
+├─ apps/server/                     Hono HTTP 服务入口
+├─ packages/contracts/              Port 接口和共享类型
+├─ packages/core/                   Agent 运行时、会话与提示词组装
+├─ packages/llm-openai/             OpenAI 兼容模型适配器
+├─ packages/memory/                 提取、存储、检索、V4 和评估代码
+├─ packages/tools/                  工具注册与内置工具
+└─ packages/voice/                  STT、TTS 和音频处理
+```
+
+记忆代码主要位于：
+
+- `packages/contracts/src/ports/memory-port.ts`：上层 Agent 使用的记忆接口；
+- `packages/memory/src/long-term/`：V3 提取、写入、向量、BM25、时间与召回；
+- `packages/memory/src/v4/domain/`：V4 类型和一致性校验；
+- `packages/memory/src/v4/dual-write/`：V3 提交后的 V4 影子同步；
+- `packages/memory/src/v4/repository/`：V4 快照、加密和 Journal 持久化；
+- `packages/memory/src/v4/retrieval/`：多路召回、分层路由与证据选择；
+- `packages/memory/src/v4/consolidation/`：摘要、去重与冷热分层；
+- `packages/memory/src/v4/evaluation/`：长期模拟、反馈、校准和策略评估；
+- `apps/continuum-memory-electron/src/main/`：桌面端持久化、Worker、语义模型和故障恢复。
 
 ## 快速开始
 
-### Windows 打包版
-
-1. 下载并完整解压 `Continuum-Memory-0.3.9-win.zip`。
-2. 启动 `Continuum Memory.exe`，不要直接在 ZIP 内运行。
-3. 首次进入时设置助手名称。
-4. 点击右上角“API”，填写 API Key、Base URL 和模型名称。
-5. 点击“🧠 记忆”查看或调整方案 A。
-
-打包版默认使用便携数据目录：
-
-```text
-<Continuum Memory.exe 所在目录>\ContinuumMemoryData\
-```
-
-因此新版本不会默认把聊天、模型和长期记忆写到 C 盘的 AppData。移动整个解压目录时，应用数据也会随之移动。
-
-### 从源码运行
-
-要求 Node.js 和 pnpm 9：
+要求：Node.js 20 或更高版本、pnpm 9。桌面端主要面向 Windows。
 
 ```powershell
 git clone https://github.com/obliviar/continuum-memory.git
 cd continuum-memory
 corepack enable
 pnpm install
+```
+
+### 运行桌面端
+
+```powershell
 pnpm dev:electron
 ```
 
-开发模式采用 Electron 的开发数据目录；如果新的目录尚不存在但检测到 `%APPDATA%\@deskpet\electron`，会继续使用旧目录以保留既有聊天和记忆。也可设置 `CONTINUUM_MEMORY_USER_DATA_DIR` 指向独立测试目录；旧的 `DESKPET_USER_DATA_DIR` 仍兼容。
+首次启动后，在界面中配置 API Key、Base URL 和模型。也可以在 `apps/continuum-memory-electron/config.json` 中使用与 `config.example.json` 相同的结构；该文件不应提交到 Git。
 
-## 记忆模块：方案 A
+测试时可以指定独立数据目录：
 
-Continuum Memory 同时保留短期会话和长期记忆：
-
-> V3 继续承担正式写入和回滚；每次 V3 成功提交后，V4 旁路同步 Episode、Candidate、Fact、EvidenceLink、FactVersion 和 RetrievalEvent。默认读模式为 `auto`，也可显式强制 `v3` 或 `v4-beta`。V4 使用 tier-index 分配候选预算，再由 BM25、结构化字段、摘要下钻、本地哈希和可选的已校验 BGE 向量生成 EvidenceBundle；Worker 忙碌、异常、空结果或证据门拒答时，该请求立即回退 V3。
-
-| 类型 | 保存内容 | 用途 | 文件 |
-| --- | --- | --- | --- |
-| 短期会话 | 用户和助手的原始消息 | 保持当前对话连续性，默认最多 200 条 | `sessions.enc` |
-| 长期记忆 v3 | 原子事实、时间版本、来源、向量和隐私字段 | 跨会话及历史时间召回，默认最多 20,000 条 | `memories.enc` + `memories.enc.journal` |
-| V4 记忆 | 事实图、证据、版本、摘要、检索事件和冷热层级 | 双写审计、离线巩固、候选评估，以及在 Beta/Auto 模式下生成正式回答证据 | `memory-v4.enc` + `memory-v4.enc.journal` |
-| V4 学习语义索引 | 与精确正文哈希绑定的 BGE 事实/摘要向量 | 在隔离 Worker 中增强改写和同义表达召回 | `memory-v4-embeddings.enc` |
-| V4 Internal 反馈 | 查询哈希、查询意图、候选/来源 ID、分数和七类人工结论 | 建立可审计的本地冻结校准集；不保存查询、回答或记忆正文，不直接改变排序 | `memory-v4-internal-feedback.enc` |
-| V4 运行观测 | 正式读源、模式、回退与恢复原因、滚动 P50/P95/P99、候选/证据数、Worker 与容量快照 | 自动确认 Beta 真实使用及自愈情况并定位回退或性能退化；不改变回答路径 | `memory-v4-runtime-report.json` |
-
-### 完整工作流程
-
-```mermaid
-flowchart TD
-    A[用户消息与可选图片] --> B[写入 sessions.enc]
-    A --> C[查询长期记忆]
-    C --> D[单次生成最多 20 条候选排名]
-    D --> D2[语义 40% + BM25 20%]
-    D2 --> E[重要度 14% + 时间衰减 8% + 频率 4% + 时间意图 14%]
-    E --> F[状态/有效期/分享策略过滤]
-    F --> F2[首批 4 条评估覆盖度/新颖度/分数差]
-    F2 --> F3{需要继续召回?}
-    F3 -->|是| F4[继续评估下一批 4 条]
-    F4 --> F3
-    F3 -->|否| G[仅选中记忆进入系统提示词]
-    B --> G
-    G --> H[聊天模型回复]
-    H --> I[保存助手消息]
-    I --> J{提取模式}
-    J -->|本地规则| K[规则候选]
-    J -->|智能提取| L[当前聊天模型抽取 JSON]
-    L -->|失败| K
-    A -->|明确说记住图片| M[本地 OCR]
-    K --> N[安全检查/去重/冲突判断]
-    L --> N
-    M --> N
-    N --> O[增量写入加密日志并周期生成快照]
-    O --> P[V3 成功提交后旁路写入 V4]
-    A --> Q[安全用户原话写入 V4 Episode]
-    Q --> P
-    F3 --> R[记录候选与实际注入的 RetrievalEvent]
-    R --> P
+```powershell
+$env:CONTINUUM_MEMORY_USER_DATA_DIR = "D:\Temp\continuum-memory-dev"
+pnpm dev:electron
 ```
 
-召回或写入失败不会中断主对话。初始化或解密失败时，程序不会创建空文件覆盖旧数据，而是关闭长期记忆并在管理窗口显示错误。
+打包 Windows 目录和 ZIP：
 
-### 自适应召回
+```powershell
+pnpm -F @continuum-memory/electron package
+```
 
-桌面聊天默认不再固定注入 Top 5。检索器只生成一次候选排名，然后先评估前 4 条；如果问题涉及多个主题、历史变化、全部偏好或个人信息总结，则继续评估后续批次。单值问题在目标字段已经覆盖后立即停止。
-
-默认策略为候选池最多 20 条、每批 4 条、最多 3 批、最多注入 10 条，并使用约 2400 个规范化正文字符的软预算。停止依据包括目标字段覆盖、排名分数骤降、后续批次信息增益、重复度、注入数量和正文预算。隐私与时间过滤发生在候选排名之前；只有最终进入提示词的记忆会增加召回次数，被评估但未注入的候选不会影响未来排名。
-
-Port 层仍保留固定 `recall(topK)`；调用方显式传入 `memoryTopK` 时使用旧的固定数量行为，未传入时使用自适应召回。
-
-### V4 安全双写与回滚边界
-
-- V3 持久化成功后才通知 V4；V4 回调、事务或加密文件失败不会让 V3 操作失败。
-- V4 将新增、重复合并、替代、冲突、来源解除、过期、手动更新、恢复、删除和清空保存为事实状态及版本历史。
-- 删除在 V4 中使用 `deleted` 墓碑并停用证据，不再参与未来召回，同时保留审计链。
-- 捕获到原始用户消息时，候选事实会连接到原生 Episode 和直接 Evidence；整段消息必须通过密钥/指令安全检查，并独立执行隐私推断。
-- 自适应召回分别记录已评估事实与实际注入事实，查询正文只保存 SHA-256 哈希。
-- 启动对账使用线性映射索引；5000 条模拟 V3 记录首次对账约 393 ms，未变化重启约 46 ms（测试机器结果，不是性能保证）。
-- V4 检索在独立 Worker 中运行；语义模型不可用时退回哈希/BM25，Worker 超时、忙碌、索引异常、空结果或证据不足时按请求退回 V3。默认 `auto` 会把通过证据门的 V4 EvidenceBundle 注入聊天提示词；可用 `v3` 强制 kill switch。
-- 正式读决策完成后，独立运行观测器按全局和最近 31 天聚合 V4/V3 读源、五类回退、端到端延迟、候选/选中证据、Worker 启停/失败/超时、索引和事实规模。原始状态与派生机器报告经防抖写入，报告损坏或写入失败不会影响记忆读取；`memory:status` 同时返回报告和落盘位置。
-- 自动恢复门连续执行 200 次正式读取和 40 次真实 V3→V4 增量对账写入，每 31 次请求强制 Worker 退出；故障请求必须回退 V3，下一请求必须用最新 revision 重建 Worker 并恢复 V4。真实 Electron smoke 还会损坏 V4 检查点、确认 V3 回退、恢复检查点并确认自动回到 V4，再验证派生索引损坏时继续使用本地哈希。
-- V4 tier-index 已成为真实候选路由：普通当前查询先检索 hot/warm，证据不足才以较小预算唤醒 cold；时间线、历史和全量概括直接启用受限 cold；quarantine 在任何排名路线之前排除。tier-index 缺失或失效时，权威 active 事实暂按 warm 处理，避免派生索引导致记忆消失。
-- 绝对证据门之后使用覆盖率、memoryKey/时间状态多样性、正文新颖度和边际收益选择最小充分事实；单值问题覆盖后立即停止，多事实/时间线问题保留必要的独立事实和冲突双边，不再简单截取 Top K。
-- P3 自动实验场使用固定场景合同和随机种子生成 365 天、1826 个事件；其中 1810 个自动 NOOP 也真实经过本地提取器和已知事实去重判定。在第 1/7/30/90/180/365 天执行日志回放、压实重启、派生视图删除/重建和 V3/V4/无摘要消融查询；当前固定场景的 71 个 V4 查询、写入判定、不变量、拒答和重启一致性门槛全部通过。该结果是仓库内确定性开发实验，不是外部盲测结论。
-- 记忆管理界面可以在 `Shadow` 与 `Internal` 之间切换。`Internal` 只把 V4 候选附在本地回复下方供检查，不会修改提示词；退出或运行时失败会立即清理挂起评审并回到 `Shadow`。
-- 每轮实际签发的评审可标注候选级“正确、不应使用、事实错误、已过期、隐私不当”，以及查询级“遗漏、无需记忆”。查询级正负结论使拒答校准不再只有正例；候选反馈必须绑定该轮真实候选，无法通过 IPC 伪造候选。数据经独立 AES-256-GCM 文件保存，彻底清除事实时同步移除 V4/V3 ID 引用。
-- 当前反馈仅用于形成后续冻结校准集，不会在线自学习或直接提高/降低记忆分数，避免少量误标立即污染正式回答。
-- 冻结器使用查询哈希和共享事实身份建立连通分组，再确定性分配到校准/验证集，避免同一问题或事实跨集泄漏；输出只含哈希化样本 ID、意图、分数与相关性标签。重复矛盾、未知意图和不完整评审会被审计或隔离。
-- 离线预门禁默认要求至少 500 条校准样本、1000 条验证样本，并检查正负样本数量、验证集 Top-1 置信下界、遗漏率置信上界、标注冲突率和零隐私红线。通过只表示“可离线拟合”，不会解锁 1% 灰度；正式灰度仍受独立 Stage 5 质量与安全门禁控制。
-
-### 长期优化计划表
-
-状态只在实现完成并通过对应测试后更新。`√` 表示已完成，`×` 表示未完成：
-
-| 状态 | 阶段 | 优化成果 / 验收门槛 |
-| --- | --- | --- |
-| √ | 基线与 V3 基础能力 | 加密、增量日志、来源同步、生命周期、冲突、隐私和记忆管理已上线 |
-| √ | V4 第一阶段数据底座 | 独立模型、事务 Repository、严格校验、加密快照和只读 V3→V4 迁移已完成 |
-| √ | 自适应分批召回 | 动态批次、覆盖/增益/分数停止、数量和字符预算已上线 |
-| √ | V4 第二阶段安全双写 | 提交后双写、原始证据、版本历史、删除墓碑、召回事件、启动对账和故障隔离已完成；V3 继续承担正式写入 |
-| √ | 双写差异审计 | 已逐项核对计数、正文、状态、作用域、有效时间、来源、隐私和版本头；隔离应用测试达到 100.0000% exact、0 issues |
-| √ | V4 隔离召回基础 | 独立 Worker、多路 RRF、BM25、结构化查询、摘要导航、绝对证据门槛、拒答和持久化对比已完成 |
-| √ | V4 正式读 MVP | EvidenceBundle、`v3` / `v4-beta` / `auto` 路由、提示词注入、来源/Fact ID/策略指纹记录，以及 Worker 异常、忙碌、空结果和拒答时的逐请求 V3 回退已完成；默认为 `auto` |
-| √ | V4 分层路由与最小充分证据 | tier-index 候选预算、普通查询 cold 按需唤醒、历史/概括 cold 主动导航、quarantine 前置排除、覆盖与边际收益选择，以及写入→版本→摘要→重建→召回→归档/恢复时间线测试已完成 |
-| √ | V4 365 天自动功能实验 | 固定种子生成 1826 个事件，六个检查点覆盖重启/日志压实/派生重建，比较 V3、V4 和无摘要消融；固定场景 V4 Recall@5、Top-1、时间正确率和拒答均为 100%，20k P95 门槛通过 |
-| √ | V4 只读策略制品与自动搜索 | 候选预算、RRF、证据阈值、tier 配额和停止条件已收口；固定 365 天 replay 选出带 SHA-256 指纹的 `budget-625`，功能硬门不退化且 20k 最大候选窗口 16→10 |
-| √ | V4 学习语义旁路 | 固定指纹 BGE、SHA-256 模型清单、启动探针、V3 向量复用、独立加密索引、后台增量补齐、内容哈希校验和哈希降级已完成 |
-| √ | V4 Internal 内部评审 | 阶段持久化、运行时启停、界面控制、环境锁、Worker 前置校验和挂起任务清理已完成；内部评审本身不改变正式读路由 |
-| √ | V4 Internal 人工反馈采集 | 七类绑定式结论、候选防伪、查询级正负例、独立加密存储、明文最小化、删除联动和状态统计已完成；反馈不直接修改在线排序 |
-| √ | V4 反馈冻结集与离线制品核心 | 显式确认、查询/事实组隔离、确定性冻结指纹、旧数据兼容、质量预门禁，以及版本化制品的完整性校验、批准和撤销核心已完成；制品不自动激活或改变正式读路由 |
-| × | 高质量写入门控（3/8） | 已上线双通道候选、本地证据 verifier 和七类写入决策；低证据/冲突候选不进入 V3 正式召回并在 V4 隔离，完整上下文、归一化、审核和重处理仍待完成 |
-| × | 时间与冲突演化 | 完整处理补充、纠正、替代、冲突和历史时间查询 |
-| × | 分层巩固与遗忘 | 已完成摘要下钻、容量 tier、真实分层检索和可恢复冷归档；自动周/月摘要、稳定事实与事件层仍待完成 |
-| × | 大规模多层检索（4/5） | 已有冷热分层、精确密集向量、BM25、哈希、时间/字段检索和摘要下钻；待真实 BGE 冻结集校准后才能成为正式召回 |
-| × | 反馈学习和可解释管理（3/4） | 已完成标签采集、显式确认、冻结分割、离线预门禁和版本化制品核心；尚未把任何制品接入在线排序，当前开发主线转向 V4 正式读路径和自动长期验证 |
-| × | 长周期可靠性与隐私 | 一年尺度确定性模拟已完成；备份恢复、文件锁、故障注入和隐私泄漏评测不属于本轮功能主线，尚未据此宣称完整完成 |
-| √ | V4 灰度切换与一年验收 | 默认 `auto` 已启用；连续三次全仓无缓存回归、20k/365 天门、production build，以及真实 Electron 健康 V4 读取与损坏后 V3 回退均通过 |
-| √ | V4 20k Beta 观测与自动恢复 | 跨重启报告、回退→恢复计数、200轮连续读写/Worker退出实验，以及八次真实 Electron V4损坏→V3回退→恢复后回V4闭环均已通过 |
-
-### 事实提取
-
-管理窗口可选择两种模式：
-
-- **本地规则**：识别姓名、称呼、生日、偏好、厌恶、当前项目和“请记住……”等中英文表达。无需额外 API 调用，稳定且可预测。
-- **智能提取**：使用当前配置的聊天模型，把本轮用户原话转换为严格 JSON。只把明确陈述、未来仍有用的事实作为候选；不把助手回复当作证据。接口失败、返回格式错误或未配置 API 时自动退回本地规则。
-
-所有候选还会经过指令注入、密钥、密码和令牌检查。智能提取会向当前配置的模型服务发送本轮用户原话；如果不希望发生这项额外请求，请使用“本地规则”。
-
-### 混合检索与本地语义模型
-
-默认检索器是无需下载的 `local-hash-v3`。它对拉丁词、中文单字/双字和本地语义字段别名进行确定性特征哈希，并由 BM25 词语检索配合相关性门控，综合六项分数：
-
-| 信号 | 权重 |
-| --- | ---: |
-| 本地向量相似度 | 40% |
-| BM25 词语匹配 | 20% |
-| 用户设定的重要度 | 14% |
-| 最近更新时间 | 8% |
-| 历史召回频率 | 4% |
-| 当前/历史时间意图匹配 | 14% |
-
-结果还会做近重复抑制，避免相似内容占满前 5 条。
-
-在“🧠 记忆”中点击“下载并启用”，可以安装固定 revision 的 `Xenova/bge-small-zh-v1.5` q8 ONNX 模型。模型下载到 `ContinuumMemoryData\models\memory`，不随 Git 仓库或安装 ZIP 分发。安装后必须通过逐文件 SHA-256 清单、运行时身份、512 维归一化和重复探针校验；不通过则关闭学习语义路径并继续使用本地哈希。
-
-V3 会先在后台补齐旧记忆的 BGE 向量，再切换正式 V3 语义检索。V4 使用自己的 `memory-v4-embeddings.enc`：启动时复用内容一致的 V3 向量，随后以小批次补齐 V4 事实和摘要；事实 revision 与语义 revision 分开同步给隔离 Worker。Worker 只接受模型指纹、维度、正文哈希和快照 revision 全部匹配的向量。当前 20,000 条、512 维精确索引压力门禁在测试机上的 P95 为约 11.18 ms（不是所有设备的性能保证）。
-
-### 生命周期、冲突与聊天来源
-
-每条 v3 记忆都有状态，并可使用 `validFrom`、`validTo` 表示事实在现实中的有效区间：
-
-| 状态 | 含义 | 是否参与召回 |
-| --- | --- | --- |
-| `active` | 当前有效 | 是 |
-| `superseded` | 被更可信的新单值事实替代 | 仅历史查询 |
-| `expired` | 已超过有效期 | 否 |
-| `conflicted` | 新旧事实冲突但置信度不足 | 否 |
-| `orphaned` | 自动记忆的最后一条聊天证据已删除 | 否 |
-
-姓名、生日、所在地等可以带稳定 `memoryKey` 和 `single` 基数。置信度不低于 0.8 的新值会关闭旧事实的有效区间并将其标记为 `superseded`；“以前、曾经、2024 年”等查询仍可召回对应历史版本。置信度不足时，新事实进入 `conflicted`，等待用户在管理窗口决定。
-
-自动记忆记录来源消息 ID。使用聊天回退功能删除消息时，Continuum Memory 会同步解除来源关联；失去全部来源的自动/图片记忆会变为 `orphaned`，不会再被召回。手动添加的记忆不受聊天删除影响。用户可以恢复失效记忆或永久删除。
-
-### 图片记忆
-
-图片不会因为普通识屏提问自动进入长期记忆。只有同时满足以下条件才会运行 OCR：
-
-1. 本轮带有图片或截图；
-2. 用户明确说“记住图片/截图/照片”等同义表达；
-3. “显式图片记忆”开关已启用。
-
-OCR 使用 Tesseract.js 的简体中文和英文模型，在本机执行。只保存提取后的文字与附件哈希，不保存原始图片。首次使用可能需要下载语言数据到 `ContinuumMemoryData\models\ocr`。图片记忆默认标为 `private + local-only`。
-
-### 隐私与远程分享
-
-长期记忆正文在静态存储时使用 AES-256-GCM 加密。`memory-key.json` 只保存经过 Windows DPAPI 保护的随机主密钥；若系统安全存储不可用，长期记忆会拒绝启动，不会降级成明文。
-
-每条记忆有两组控制：
-
-- 敏感级别：`normal`、`private`、`secret`
-- 分享策略：`allow-remote`、`local-only`、`ask`
-
-全局远程策略可选：
-
-- **仅普通且允许分享**：默认设置，只发送 `normal + allow-remote`。
-- **允许已授权的隐私记忆**：还可发送用户明确设为 `allow-remote` 的 `private` 记忆。
-- **完全不发送长期记忆**：仍在本机提取和管理，但本轮聊天提示词不附带任何长期记忆。
-
-`secret` 永远不会随聊天请求发送；`local-only` 和 `ask` 也不会发送。这里的“本地向量/OCR”只表示检索和 OCR 在本机运行，不代表聊天本身不访问用户配置的模型服务。
-
-### 可视化管理
-
-“🧠 记忆”窗口支持：
-
-- 查看有效、替代、过期、冲突和来源失效的全部记录；
-- 查看类型、更新时间和召回次数；
-- 手动添加、安全校验、二次确认永久删除和清空；
-- 调整每条记忆的重要度、敏感级别和分享策略；
-- 恢复失效记录；
-- 切换提取、远程分享、图片 OCR 和语义模型；
-- 在 Shadow 与 Internal 之间安全切换，并在回复下方查看不参与回答的 V4 候选；
-- 查看实际加密文件位置。
-
-记忆正文可以在管理界面中编辑并保存；正文变化后会重新计算向量并持久化更新。
-
-## 数据文件与迁移
-
-Windows 打包版主要数据位于：
+打包版默认把数据保存在：
 
 ```text
 <Continuum Memory.exe 所在目录>\ContinuumMemoryData\
-├─ memories.enc          # AES-256-GCM 加密长期记忆 v3 快照
-├─ memories.enc.journal  # 独立认证加密的增量操作日志
-├─ memories.enc.pre-v3.backup # 首次 V3 迁移前的加密备份
-├─ memory-key.json       # DPAPI 保护后的随机主密钥
-├─ memory-v4.enc         # 第二阶段双写、证据与召回审计的 V4 加密影子快照
-├─ memory-v4-key.json    # V4 独立的 DPAPI 保护密钥
-├─ memory-v4-embeddings.enc # V4 事实/摘要的加密 BGE 派生索引
-├─ memory-v4-embedding-key.json # V4 语义索引的 DPAPI 保护密钥
-├─ memory-v4-shadow-eval.enc # 加密的 V3/V4 影子比较指标
-├─ memory-v4-shadow-eval-key.json # 影子比较数据的 DPAPI 保护密钥
-├─ memory-v4-internal-feedback.enc # 加密的 Internal 人工反馈（不含正文）
-├─ memory-v4-internal-feedback-key.json # Internal 反馈的 DPAPI 保护密钥
-├─ memory-v4-runtime-observability.json # 有界运行观测聚合状态
-├─ memory-v4-runtime-report.json # V4/V3 读源、回退、P95、Worker 和容量机器报告
-├─ memory-settings.json  # 提取、语义、OCR 和分享设置
-├─ sessions.enc          # AES-256-GCM 加密短期聊天历史
-├─ session-key.json      # DPAPI 保护后的会话主密钥
-├─ settings.json         # 名称、首次运行与主题
-├─ api-config.json       # API 地址、模型和受系统保护的 API Key
-└─ models\               # 可选语义模型、OCR 和语音资源
 ```
 
-新安装使用 `ContinuumMemoryData`。如果可执行文件旁只有旧版 `DeskPetData`，应用会继续使用旧目录，而不是创建空目录隐藏已有聊天和记忆；需要迁移目录名时，应在应用完全退出后整体改名。
+### 运行 CLI
 
-项目更名只改变产品品牌、工作区包名和新安装路径。已有持久化数据中的 `agentId: "deskpet"`、`deskpet-memory-v4*` schema、策略 ID 和冻结数据集版本继续作为兼容协议标识保留；它们不会显示为产品名称，也不应在没有正式数据迁移的情况下直接替换。
+```powershell
+$env:CONTINUUM_MEMORY_API_KEY = "YOUR_API_KEY"
+$env:CONTINUUM_MEMORY_MODEL = "gpt-4o-mini"
+pnpm dev
+```
 
-升级时若同一数据目录存在旧版 `memories.json` 且尚无 `memories.enc`，程序会：
+如使用其他 OpenAI 兼容服务：
 
-1. 读取旧 v1 JSON；
-2. 使用新随机主密钥加密；
-3. 立即解密并逐字节校验；
-4. 将索引迁移为 v3，并补充时间版本字段；
-5. 仅在验证成功后删除旧明文文件。
+```powershell
+$env:CONTINUUM_MEMORY_BASE_URL = "https://example.com/v1"
+$env:CONTINUUM_MEMORY_API_KEY = "YOUR_API_KEY"
+$env:CONTINUUM_MEMORY_MODEL = "your-model"
+pnpm dev
+```
 
-从已有加密 V1/V2 索引升级时，程序会先生成 `memories.enc.pre-v3.backup`，备份仍为密文；随后才写入 V3。正常写入只追加 `memories.enc.journal`，达到 500 条操作或约 16 MB 后自动压缩回新快照。无法解密时不要删除 `memory-key.json`，否则快照、日志和迁移备份都无法恢复。
+CLI 默认将记忆保存到 `~/.continuum-memory/memories.json`。输入 `/help` 可查看命令。
 
-可用环境变量：
+### 运行 HTTP 服务
 
-| 变量 | 作用 |
-| --- | --- |
-| `CONTINUUM_MEMORY_API_KEY` / `OPENAI_API_KEY` | 聊天模型 API Key |
-| `CONTINUUM_MEMORY_BASE_URL` / `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 |
-| `CONTINUUM_MEMORY_MODEL` | 聊天模型名称 |
-| `CONTINUUM_MEMORY_ENABLED=false` | 关闭长期记忆 |
-| `CONTINUUM_MEMORY_V4_SHADOW=false` | 紧急关闭整个 V4 影子运行时 |
-| `CONTINUUM_MEMORY_V4_INTERNAL_REVIEW=true/false` | 强制并锁定 Internal/Shadow，优先于界面持久化设置 |
-| `CONTINUUM_MEMORY_V4_READ_MODE=v3/v4-beta/auto` | 选择正式记忆读路由；默认 `auto`，显式 `v3` 是 kill switch，所有 V4 模式均保留逐请求 V3 回退 |
-| `CONTINUUM_MEMORY_USER_DATA_DIR` | 覆盖应用数据目录，测试时推荐使用 |
-| `CONTINUUM_MEMORY_BOOT_LOG` | 将启动诊断写入指定文件 |
+```powershell
+$env:CONTINUUM_MEMORY_API_KEY = "YOUR_API_KEY"
+$env:PORT = "3000"
+pnpm dev:server
+```
 
-相应的旧 `DESKPET_*` 变量仍可读取，但新变量优先，便于已有脚本平滑迁移。
+健康检查：
 
-也可以在 `Continuum Memory.exe` 同目录或开发目录放置不会提交到 Git 的 `config.json`：
+```http
+GET /health
+```
 
-```json
+发送消息：
+
+```http
+POST /chat
+Content-Type: application/json
+
 {
-  "apiKey": "YOUR_API_KEY",
-  "baseURL": "https://api.openai.com/v1",
-  "model": "gpt-4o-mini",
-  "memoryEnabled": true
+  "sessionId": "demo-user",
+  "message": "请记住我正在开发 Continuum Memory",
+  "model": "gpt-4o-mini"
 }
 ```
 
-不要把真实 API Key 写入 README、脚本、示例配置、备份 ZIP 或 Git。仓库已忽略 `apps/continuum-memory-electron/config.json`。
+当前 HTTP 服务没有身份认证，并使用 `sessionId` 作为 owner 边界，只适合本地开发和受控环境，不应直接暴露到公网。
 
-## 项目结构与关键文件
+### 在代码中使用记忆包
 
-```text
-continuum-memory/
-├─ apps/continuum-memory-electron/              # Electron + Vue 桌面应用
-├─ apps/cli/                           # CLI 入口
-├─ apps/server/                        # 服务端入口
-├─ packages/contracts/                 # Port 接口与共享类型
-├─ packages/core/                      # Agent 运行时、会话、提示词
-├─ packages/llm-openai/                # OpenAI 兼容模型适配器
-├─ packages/memory/                    # 长期记忆方案 A
-├─ packages/tools/                     # 工具注册与实现
-└─ packages/voice/                     # 语音模块
+仓库内部可以直接使用 `@continuum-memory/memory`：
+
+```ts
+import { createMemoryWriter, createVectorStore } from '@continuum-memory/memory'
+
+const store = createVectorStore({
+  storagePath: './data/memories.json',
+  embeddingModel: 'local-hash-v3',
+})
+
+const memory = createMemoryWriter({ store })
+const scope = { ownerId: 'local-user', agentId: 'assistant' }
+
+await memory.remember('用户正在开发 Continuum Memory', scope)
+
+const result = await memory.recallAdaptive?.(
+  '我最近在开发什么？',
+  scope,
+  { maxInjected: 5 },
+)
+
+console.log(result?.memories)
 ```
 
-记忆链路的关键文件：
+更换存储或接入其他 Agent 时，优先依赖 `AgentMemoryPort`，避免让上层代码直接依赖具体的向量库或 V4 内部结构。
 
-- `packages/contracts/src/ports/memory-port.ts`：记忆 v2 接口、生命周期和来源同步
-- `packages/memory/src/long-term/memory-extractor.ts`：本地规则与安全过滤
-- `packages/memory/src/long-term/smart-memory-extractor.ts`：结构化智能提取与回退
-- `packages/memory/src/long-term/local-embedding.ts`：本地哈希向量
-- `packages/memory/src/long-term/dense-vector-candidate-index.ts`：BGE 密集向量精确候选索引
-- `packages/memory/src/long-term/vector-store.ts`：混合排序、冲突、生命周期与迁移
-- `packages/memory/src/long-term/encrypted-persistence.ts`：AES-256-GCM 文件适配器
-- `packages/memory/src/v4/dual-write/v4-shadow-writer.ts`：V3 提交后双写、证据连接、版本和召回审计
-- `packages/memory/src/v4/retrieval/memory-v4-shadow-retriever.ts`：V4 多路召回、学习语义、融合和拒答
-- `packages/memory/src/v4/retrieval/memory-v4-tier-router.ts`：将 tier-index 转换为候选预算、quarantine 排除和 cold 唤醒策略
-- `packages/memory/src/v4/retrieval/memory-v4-evidence-selector.ts`：通过覆盖、多样性和边际收益生成最小充分证据
-- `packages/memory/src/v4/read/memory-v4-evidence-bundle.ts`：将通过证据门的 V4 Fact 转换为可引用的正式回答证据
-- `packages/memory/src/v4/read/memory-v4-read-router.ts`：正式读模式选择和逐请求 V3 回退
-- `packages/memory/src/v4/evaluation/memory-v4-internal-feedback.ts`：绑定式七类反馈、最小化持久化、统计和删除联动
-- `packages/memory/src/v4/evaluation/memory-v4-feedback-calibration.ts`：泄漏安全冻结分割、一致性审计、置信区间和离线拟合预门禁
-- `packages/memory/src/v4/evaluation/memory-v4-year-scenario.ts`：365 天场景合同、校验、固定种子生成和自动变换
-- `packages/memory/src/v4/evaluation/memory-v4-year-simulator.ts`：生命周期回放、重启/重建不变量、V3/V4/消融对照和 20k 门禁
-- `packages/memory/src/v4/evaluation/memory-v4-year-report.ts`：机器可读 JSON 与 Markdown 实验报告
-- `packages/memory/src/v4/policy/memory-v4-retrieval-policy.ts`：不可变检索参数、边界校验和稳定指纹
-- `packages/memory/src/v4/policy/memory-v4-policy-search.ts`：固定 replay 上的非退化门和 Pareto 搜索
-- `packages/memory/src/v4/policy/memory-v4-policy-artifact.ts`：只读策略制品、完整性和来源复验
-- `evals/memory/v4-retrieval-policy-v1.json`：P4 当前选中策略制品
-- `packages/core/src/runtime/agent-runtime.ts`：召回、附件和来源 ID
-- `apps/continuum-memory-electron/src/main/semantic-memory.ts`：本地中文语义模型
-- `apps/continuum-memory-electron/src/main/memory-v4-semantic-index.ts`：V4 加密语义索引、迁移和后台增量重建
-- `apps/continuum-memory-electron/src/main/memory-v4-shadow-worker.ts`：隔离 V4 影子召回 Worker
-- `apps/continuum-memory-electron/src/main/memory-v4-read-controller.ts`：正式读状态、来源和注入 Fact ID 审计
-- `apps/continuum-memory-electron/src/main/memory-v4-runtime-observability.ts`：跨重启运行指标聚合、最近 31 天窗口和机器报告
-- `apps/continuum-memory-electron/src/main/memory-v4-fault-recovery.test.ts`：连续对账写入、Worker退出、逐请求回退、revision重同步和自动回V4实验
-- `apps/continuum-memory-electron/src/main/memory-v4-internal-review.ts`：签发本地评审、短时关联查询与影子候选
-- `apps/continuum-memory-electron/src/main/memory-v4-internal-feedback.ts`：将临时候选裁剪为无正文的核心反馈记录
-- `apps/continuum-memory-electron/src/main/image-memory.ts`：显式图片 OCR
-- `apps/continuum-memory-electron/src/main/index.ts`：加密初始化、隐私过滤和 IPC
-- `apps/continuum-memory-electron/src/renderer/src/App.vue`：记忆管理界面
+## 常用配置
+
+| 环境变量 | 作用 |
+| --- | --- |
+| `CONTINUUM_MEMORY_API_KEY` | OpenAI 兼容 API Key |
+| `CONTINUUM_MEMORY_BASE_URL` | OpenAI 兼容 API 地址 |
+| `CONTINUUM_MEMORY_MODEL` | 聊天模型名称 |
+| `CONTINUUM_MEMORY_ENABLED=false` | 关闭长期记忆 |
+| `CONTINUUM_MEMORY_PATH` | CLI 或服务端记忆文件路径 |
+| `CONTINUUM_MEMORY_OWNER` | CLI 使用的 owner ID |
+| `CONTINUUM_MEMORY_EMBEDDING_MODEL` | 向量模型，默认 `local-hash-v3` |
+| `CONTINUUM_MEMORY_V4_READ_MODE` | `v3`、`v4-beta` 或 `auto` |
+| `CONTINUUM_MEMORY_V4_SHADOW=false` | 禁用 V4 影子运行时 |
+| `CONTINUUM_MEMORY_USER_DATA_DIR` | 覆盖桌面端数据目录 |
+| `CONTINUUM_MEMORY_BOOT_LOG` | 指定桌面端启动日志路径 |
+
+旧的 `DESKPET_*` 变量仍可读取，新变量优先。
+
+## 数据与安全
+
+桌面端使用 AES-256-GCM 加密会话和记忆文件，随机主密钥由 Electron `safeStorage` 在 Windows 上通过 DPAPI 保护。数据文件与对应的 `*-key.json` 必须一起备份；丢失密钥后无法恢复密文。
+
+CLI 和 HTTP 服务当前默认使用 JSON 记忆文件，并不具备桌面端相同的文件加密保护。处理真实私人数据时，应限制文件权限并使用本地受控目录。
+
+记忆具有 `normal`、`private`、`secret` 敏感级别，以及 `allow-remote`、`local-only`、`ask` 分享策略。被召回不代表一定会发送给远程模型；正式注入前还会执行作用域、状态、时间和分享策略检查。
+
+## 目标实现方向
+
+现有 V4 使用单一 `MemoryV4Snapshot`：事务会克隆完整快照，提交时对完整对象执行校验和 `JSON.stringify()`，Journal 帧也包含完整 payload。该方案便于验证一致性，但随着记忆增长会产生明显的内存、序列化和写放大，因此不会作为最终的大规模存储结构。
+
+目标结构是“权威仓储 + 增量变更日志 + 独立投影”：
+
+```mermaid
+flowchart LR
+    AG[Agent / Desktop / API] --> CMD[Memory Command]
+    CMD --> AUTH[权威事务仓储]
+    AUTH --> CORE[Episode / Fact / Version / Evidence]
+    AUTH --> OUT[Projection Outbox]
+    OUT --> GRAPH[时态知识图谱]
+    OUT --> TEXT[全文索引]
+    OUT --> VECTOR[向量索引]
+    OUT --> SUMMARY[摘要与冷热层]
+    GRAPH --> RECALL[混合召回]
+    TEXT --> RECALL
+    VECTOR --> RECALL
+    RECALL --> CHECK[回查权威事实与证据]
+    CHECK --> AG
+```
+
+大致实现原则：
+
+1. 使用记录级事务仓储代替运行时完整 Snapshot，Snapshot 只用于迁移、导出、备份和测试；
+2. 使用 SQLite 一类嵌入式事务数据库保存权威事实、证据和版本，利用数据库 WAL 完成增量持久化；
+3. 在同一权威事务中写入轻量 Outbox，由投影工作器按 revision 增量更新图、全文和向量索引；
+4. 将 Entity、Fact、Episode 和 Event 建成时态知识图谱，保留 `EVIDENCED_BY`、`SUPERSEDES`、`CONFLICTS_WITH` 等可解释关系；
+5. 区分事实边、推断边和导航边，语义相似、共现和访问反馈只帮助找候选，不直接改变事实真值；
+6. 投影返回的 Fact ID 必须回查权威仓储，再执行作用域、时间、状态、隐私和证据检查；
+7. 通过 HTTP、SDK 和 MCP 适配器向 Agent 提供 `remember`、`recall`、`forget`、`feedback` 和状态查询；
+8. 多会话通过 owner、workspace、project、agent 和 session 等作用域共享或隔离记忆。
+
+知识图谱首先作为可重建的检索投影实现。是否采用独立图数据库，由节点规模、查询深度、并发和实测延迟决定；图数据库本身不替代证据、版本和权限模型。
+
+相关研究笔记位于 `docs/research/`。
 
 ## 开发与验证
 
 ```powershell
-# 全仓库类型检查/构建
-pnpm build
+# 全仓类型检查
+pnpm typecheck
 
-# 全仓库测试
+# 全仓测试
 pnpm test
 
-# 记忆模块测试
-pnpm --filter @continuum-memory/memory test
+# 构建检查
+pnpm build
 
-# Electron 主进程和 Vue 类型检查
-pnpm --filter @continuum-memory/electron exec tsc --noEmit -p tsconfig.node.json
-pnpm --filter @continuum-memory/electron exec vue-tsc --noEmit -p tsconfig.web.json
+# 只测试记忆包
+pnpm -F @continuum-memory/memory test
 
-# Electron 记忆冷迁移、双写对账、重启保留、损坏回退、恢复回V4与渲染启动烟雾测试
-pnpm --filter @continuum-memory/electron test:smoke
-
-# 构建和生成 Windows ZIP
-pnpm --filter @continuum-memory/electron build
-pnpm --filter @continuum-memory/electron package
+# 桌面端主进程测试
+pnpm -F @continuum-memory/electron test
 ```
 
-输出目录：`apps\continuum-memory-electron\release\`。
+仓库包含事实提取、冲突处理、召回、持久化、迁移、故障恢复、20k 规模检索和一年生命周期模拟等测试。合成与确定性测试用于发现回归，不应等同于真实用户环境下的最终质量结论。
 
-## 当前限制
+## 当前边界
 
-- 智能提取的质量取决于当前聊天模型及其 JSON 输出能力；异常时会回退规则。
-- 本地语义模型和 OCR 语言数据需要首次联网下载，未内置到安装 ZIP。
-- 短期会话与长期记忆均已加密；DPAPI 密钥与数据文件必须一起备份。
-- 当前桌面端固定为一个本地用户和一个 Agent 作用域。
-- V4 20k Beta 已默认使用 `auto` 进入聊天提示词；连续三次完整回归、365 天实验、只读策略搜索和真实启动回退均已通过。V3 仍承担写入、逐请求回退和 kill switch。
-- 运行观测报告已经自动落盘并通过八次真实 Electron 启动验证跨重启累积及 V4损坏→V3回退→恢复后回V4；当前可从 `memory:status` 获取，但界面尚未单独展示报告。
-- 桌面界面仍只管理 `Shadow` 和 `Internal` 评审阶段；正式读模式可通过配置文件或 `CONTINUUM_MEMORY_V4_READ_MODE` 覆盖，尚未实现界面切换。
-- 本次代码回归未执行外部盲测；本机也没有 BGE 模型缓存，因此真实 BGE 开发集对比未执行，不能把合成集成绩视作上线质量证明。
-- 尚无多进程文件锁和自动周/月分层摘要。
-- OCR 只保留可识别文字，无法完整理解没有文字的图片语义。
+- 正式写入仍以 V3 为主，V4 通过双写逐步承接读取和证据模型；
+- V4 权威仓储目前仍是完整快照持久化，尚未迁移到记录级事务数据库；
+- 时态知识图谱、图遍历召回和 MCP 适配器尚未成为正式运行路径；
+- CLI 和 HTTP 服务的能力、加密与管理界面少于桌面端；
+- 智能提取质量依赖所配置模型，本地规则只能覆盖有限表达；
+- 可选 BGE、OCR 和语音资源首次使用时可能需要联网下载。
+
+## License
+
+MIT

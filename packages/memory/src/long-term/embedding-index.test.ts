@@ -46,6 +46,27 @@ describe('memory embedding side index', () => {
     expect(index.hasMemory('orphan')).toBe(false)
   })
 
+  it('removes only the requested model and keeps the memory lookup consistent', () => {
+    const storagePath = temporaryFile()
+    const first = createMemoryEmbeddingIndex({ persistence: createFilePersistence(storagePath) })
+    first.putBatch([
+      { memoryId: 'memory-a', model: 'bge-v1', content: '内容 A', vector: [1, 0] },
+      { memoryId: 'memory-a', model: 'bge-v2', content: '内容 A', vector: [0, 1] },
+      { memoryId: 'memory-b', model: 'bge-v1', content: '内容 B', vector: [1, 0] },
+    ])
+
+    expect(first.removeByModel('bge-v1')).toBe(2)
+    expect(first.get('memory-a', 'bge-v1', '内容 A')).toBeUndefined()
+    expect(first.get('memory-a', 'bge-v2', '内容 A')).toEqual([0, 1])
+    expect(first.hasMemory('memory-a')).toBe(true)
+    expect(first.hasMemory('memory-b')).toBe(false)
+    expect(first.removeByModel('missing-model')).toBe(0)
+
+    const second = createMemoryEmbeddingIndex({ persistence: createFilePersistence(storagePath) })
+    expect(second.get('memory-a', 'bge-v2', '内容 A')).toEqual([0, 1])
+    expect(second.hasMemory('memory-b')).toBe(false)
+  })
+
   it('uses the authenticated encrypted journal without leaking memory text', () => {
     const directory = temporaryDirectory()
     const encryptedPath = join(directory, 'memory-embeddings.enc')
@@ -86,6 +107,8 @@ describe('memory embedding side index', () => {
     fail = true
     expect(() => index.removeMemoryIds(['memory-a'])).toThrow('simulated disk failure')
     expect(index.hasMemory('memory-a')).toBe(true)
+    expect(() => index.removeByModel('bge-v1')).toThrow('simulated disk failure')
+    expect(index.get('memory-a', 'bge-v1', '内容')).toEqual([1])
   })
 })
 

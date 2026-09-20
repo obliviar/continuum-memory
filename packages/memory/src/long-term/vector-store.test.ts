@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import type { Embedder } from '@continuum-memory/contracts'
 import { createFilePersistence, createVectorStore } from './vector-store'
 import { createMemoryEmbeddingIndex } from './embedding-index'
 import type { MemoryPersistenceDelta, V3MemoryCommit } from './vector-store'
@@ -34,11 +35,11 @@ describe('persistent vector store', () => {
     let rejectEdit = false
     const store = createVectorStore({
       minScore: 0,
-      embedder: async (text) => {
+      embedder: createTestEmbedder('edit-failure-test', 2, async (text) => {
         if (rejectEdit && text.includes('新内容'))
           throw new Error('simulated embedding failure')
         return text.includes('旧内容') ? [1, 0] : [0, 1]
-      },
+      }),
     })
     const scope = { ownerId: 'owner', agentId: 'agent' }
     const remembered = await store.remember('用户喜欢旧内容', scope, { origin: 'manual' })
@@ -58,6 +59,26 @@ describe('persistent vector store', () => {
 
     expect(existsSync(storagePath)).toBe(true)
     expect(JSON.parse(readFileSync(storagePath, 'utf-8'))).toEqual({ version: 3, items: [] })
+  })
+
+  it('derives the vector space from the embedder and validates its contract', async () => {
+    const storagePath = temporaryFile()
+    const embedder = createTestEmbedder('derived-model-v1', 2, async () => [1, 0])
+    const store = createVectorStore({ storagePath, embedder })
+    await store.remember('用户喜欢咖啡', { ownerId: 'owner', agentId: 'agent' })
+
+    const payload = JSON.parse(readFileSync(storagePath, 'utf-8')) as {
+      items: Array<{ embeddingModel: string }>
+    }
+    expect(payload.items[0]?.embeddingModel).toBe(embedder.model)
+    expect(() => createVectorStore({ embeddingModel: 'other-model', embedder }))
+      .toThrow('embeddingModel must match embedder.model')
+
+    const invalid = createVectorStore({
+      embedder: createTestEmbedder('invalid-dimension', 2, async () => [1]),
+    })
+    await expect(invalid.remember('无效向量', { ownerId: 'owner', agentId: 'agent' }))
+      .rejects.toThrow('expected 2')
   })
 
   it('persists across instances and isolates owners', async () => {
@@ -257,8 +278,9 @@ describe('persistent vector store', () => {
   })
 
   it('ranks once even when adaptive selection evaluates multiple batches', async () => {
-    const embedder = vi.fn(async (text: string) => createTestVector(text))
-    const store = createVectorStore({ embedder, embeddingModel: 'adaptive-once', minScore: 0.1, minSemanticScore: 0.1 })
+    const embed = vi.fn(async (text: string) => createTestVector(text))
+    const embedder = createTestEmbedder('adaptive-once', 3, embed)
+    const store = createVectorStore({ embedder, minScore: 0.1, minSemanticScore: 0.1 })
     const scope = { ownerId: 'adaptive-once', agentId: 'deskpet' }
     const facts = [
       '用户喜欢饮品一', '用户喜欢饮品二', '用户喜欢饮品三', '用户喜欢饮品四',
@@ -266,7 +288,7 @@ describe('persistent vector store', () => {
     ]
     for (const [index, fact] of facts.entries())
       await store.remember(fact, scope, { kind: `adaptive-${index}` })
-    const callsAfterWrites = embedder.mock.calls.length
+    const callsAfterWrites = embed.mock.calls.length
 
     const result = await store.recallAdaptive('总结我的所有偏好', scope, {
       initialBatchSize: 2,
@@ -275,12 +297,11 @@ describe('persistent vector store', () => {
     })
 
     expect(result.batchesEvaluated).toBeGreaterThan(1)
-    expect(embedder.mock.calls.length - callsAfterWrites).toBe(1)
+    expect(embed.mock.calls.length - callsAfterWrites).toBe(1)
   })
 
   it('applies adaptive privacy filtering before evaluation and usage accounting', async () => {
     const store = createVectorStore({
-      embeddingModel: 'adaptive-privacy',
       minScore: 0.1,
       minSemanticScore: 0.1,
       embedder: sharedEmbedder,
@@ -575,13 +596,13 @@ describe('persistent vector store', () => {
     await hashStore.remember('用户喜欢听爵士乐', scope, { kind: 'preference' })
 
     const calls: string[] = []
-    const bgeEmbedder = async (text: string) => {
+    const bgeEmbedder = createTestEmbedder('test-bge-v1', 2, async (text: string) => {
       calls.push(text)
       return text.includes('所在地') || text.includes('定居') ? [1, 0] : [0, 1]
-    }
+    })
     expect(hashStore.embeddingStatus('test-bge-v1', scope)).toMatchObject({ total: 2, ready: 0, pending: 2 })
     const progress: number[] = []
-    await expect(hashStore.prepareEmbeddings('test-bge-v1', bgeEmbedder, scope, {
+    await expect(hashStore.prepareEmbeddings(bgeEmbedder.model, bgeEmbedder.embed, scope, {
       batchSize: 1,
       onProgress: state => progress.push(state.ready),
     })).resolves.toMatchObject({ total: 2, ready: 2, pending: 0 })
@@ -591,7 +612,6 @@ describe('persistent vector store', () => {
     calls.splice(0)
     const semanticStore = createVectorStore({
       storagePath: memoryPath,
-      embeddingModel: 'test-bge-v1',
       embedder: bgeEmbedder,
       embeddingIndex: createMemoryEmbeddingIndex({ persistence: createFilePersistence(embeddingPath) }),
       foregroundEmbeddingUpgrade: false,
@@ -764,37 +784,45 @@ function temporaryFile(): string {
   return join(directory, 'memories.json')
 }
 
-async function testEmbedder(text: string): Promise<number[]> {
+const testEmbedder = createTestEmbedder('test-v1', 3, async (text: string): Promise<number[]> => {
   const normalized = text.toLocaleLowerCase()
   if (normalized.includes('coffee'))
     return [1, 0, 0]
   if (normalized.includes('tea'))
     return [0, 1, 0]
   return [0, 0, 1]
-}
+})
 
-async function relevanceEmbedder(text: string): Promise<number[]> {
+const relevanceEmbedder = createTestEmbedder('test-v1', 2, async (text: string): Promise<number[]> => {
   return text.includes('咖啡') ? [1, 0] : [0, 1]
-}
+})
 
-async function sharedEmbedder(text: string): Promise<number[]> {
+const sharedEmbedder = createTestEmbedder('test-v1', 2, async (text: string): Promise<number[]> => {
   return /shared|coffee|preferred|likes/i.test(text) ? [1, 0] : [0, 1]
-}
+})
 
-async function temporalEmbedder(text: string): Promise<number[]> {
+const temporalEmbedder = createTestEmbedder('test-v1', 3, async (text: string): Promise<number[]> => {
   if (text.includes('北京') || text.includes('以前') || text.includes('2024'))
     return [1, 0, 0]
   if (text.includes('上海') || text.includes('当前') || text.includes('现在'))
     return [0, 1, 0]
   return [0, 0, 1]
-}
+})
 
-async function episodeEmbedder(text: string): Promise<number[]> {
+const episodeEmbedder = createTestEmbedder('test-v1', 2, async (text: string): Promise<number[]> => {
   return /咖啡|拿铁/.test(text) ? [1, 0] : [0, 1]
-}
+})
 
-async function phoneChainEmbedder(text: string): Promise<number[]> {
+const phoneChainEmbedder = createTestEmbedder('test-v1', 2, async (text: string): Promise<number[]> => {
   return text.includes('手机') ? [1, 0] : [0, 1]
+})
+
+function createTestEmbedder(
+  model: string,
+  dimensions: number,
+  embed: (text: string) => Promise<number[]>,
+): Embedder {
+  return { model, dimensions, embed }
 }
 
 function createTestVector(text: string): number[] {

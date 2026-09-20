@@ -1,5 +1,6 @@
 import { performance } from 'node:perf_hooks'
 import { describe, expect, it } from 'vitest'
+import type { Embedder } from '@continuum-memory/contracts'
 import { createVectorStore } from './vector-store'
 
 const ITEM_COUNT = 20_000
@@ -10,6 +11,14 @@ describe('adaptive recall scale', () => {
   it(`keeps ${ITEM_COUNT.toLocaleString()}-record repeated recall bounded and reports P95`, async () => {
     const deltas: Array<{ upserts: unknown[] }> = []
     let queryEmbeddings = 0
+    const embedder: Embedder = {
+      model: 'adaptive-stress',
+      dimensions: 3,
+      embed: async () => {
+        queryEmbeddings += 1
+        return [1, 0, 0]
+      },
+    }
     const store = createVectorStore({
       persistence: {
         load: () => JSON.stringify({
@@ -19,13 +28,9 @@ describe('adaptive recall scale', () => {
         save: () => undefined,
         appendDelta: delta => deltas.push(delta),
       },
-      embeddingModel: 'adaptive-stress',
       minScore: 0.1,
       minSemanticScore: 0.1,
-      embedder: async () => {
-        queryEmbeddings += 1
-        return [1, 0, 0]
-      },
+      embedder,
     })
     const latencies: number[] = []
     let result: Awaited<ReturnType<typeof store.recallAdaptive>> | undefined

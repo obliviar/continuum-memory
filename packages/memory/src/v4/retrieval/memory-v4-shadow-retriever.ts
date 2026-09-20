@@ -6,7 +6,7 @@ import {
 } from '../../long-term/abstention-calibration'
 import { createMemoryBm25Index, tokenizeBm25 } from '../../long-term/bm25-index'
 import { createDenseVectorCandidateIndex } from '../../long-term/dense-vector-candidate-index'
-import { createLocalEmbedding } from '../../long-term/local-embedding'
+import { createLocalHashEmbedding } from '../../long-term/local-embedding'
 import { planMemoryQuery } from '../../long-term/memory-query-planner'
 import { reciprocalRankFusion } from '../../long-term/reciprocal-rank-fusion'
 import { createSparseVectorCandidateIndex } from '../../long-term/sparse-vector-candidate-index'
@@ -289,7 +289,7 @@ export function createMemoryV4ShadowRetriever(
     for (const artifact of snapshot.derivedArtifacts) {
       if (artifact.kind !== 'summary' || artifact.status !== 'current' || !artifact.content)
         continue
-      const vector = createLocalEmbedding(artifact.content)
+      const vector = createLocalHashEmbedding(artifact.content)
       summaries.set(artifact.id, { artifact })
       summarySemantic.upsert(artifact.id, vector)
       summaryLexical.upsert({
@@ -304,7 +304,7 @@ export function createMemoryV4ShadowRetriever(
       if (!indexableFact(fact))
         continue
       const content = `${fact.memoryKey} ${fact.predicate} ${fact.canonicalText}`
-      const vector = createLocalEmbedding(content)
+      const vector = createLocalHashEmbedding(content)
       const legacySourceId = legacySourceIds.get(fact.id)
       const v3SourceId = sourceMemoryId(fact) ?? legacySourceId
       facts.set(fact.id, {
@@ -410,7 +410,7 @@ export function createMemoryV4ShadowRetriever(
       limit: candidateBudget,
       minScore: policy.evidenceThresholds.lexicalCandidateScore,
     })
-    const queryVector = createLocalEmbedding(normalizedQuery)
+    const queryVector = createLocalHashEmbedding(normalizedQuery)
     const summarySemanticHits = summarySemantic.search(queryVector, {
       limit: candidateBudget,
       minScore: policy.evidenceThresholds.semanticCandidateScore,

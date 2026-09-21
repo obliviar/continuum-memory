@@ -37,6 +37,8 @@ export interface MemoryEmbeddingIndex {
   putBatch: (entries: readonly MemoryEmbeddingVectorInput[]) => void
   removeMemoryIds: (memoryIds: readonly string[]) => number
   reconcileMemoryIds: (memoryIds: ReadonlySet<string>) => number
+  /** Remove every vector in one model space and return the deleted count. */
+  removeByModel: (model: string) => number
   compact: () => void
   scrubBackups: () => void
 }
@@ -105,6 +107,24 @@ export function createMemoryEmbeddingIndex(options: { persistence?: MemoryPersis
     return deletes.size
   }
 
+  function removeByModel(model: string): number {
+    const deletes = new Set<string>()
+    for (const [id, record] of records) {
+      if (record.model === model)
+        deletes.add(id)
+    }
+    if (deletes.size === 0)
+      return 0
+    persistDelta(persistence, records, [], [...deletes])
+    for (const id of deletes) {
+      const record = records.get(id)
+      records.delete(id)
+      if (record)
+        removeLookup(byMemoryId, record)
+    }
+    return deletes.size
+  }
+
   function reconcileMemoryIds(memoryIds: ReadonlySet<string>): number {
     return removeMemoryIds([...byMemoryId.keys()].filter(memoryId => !memoryIds.has(memoryId)))
   }
@@ -115,6 +135,7 @@ export function createMemoryEmbeddingIndex(options: { persistence?: MemoryPersis
     putBatch,
     removeMemoryIds,
     reconcileMemoryIds,
+    removeByModel,
     compact: () => persistence?.compact?.(),
     scrubBackups: () => persistence?.scrubBackups?.(),
   }
@@ -157,6 +178,15 @@ function addLookup(lookup: Map<string, Set<string>>, record: MemoryEmbeddingVect
   const ids = lookup.get(record.memoryId) ?? new Set<string>()
   ids.add(record.id)
   lookup.set(record.memoryId, ids)
+}
+
+function removeLookup(lookup: Map<string, Set<string>>, record: MemoryEmbeddingVectorRecord): void {
+  const ids = lookup.get(record.memoryId)
+  if (!ids)
+    return
+  ids.delete(record.id)
+  if (ids.size === 0)
+    lookup.delete(record.memoryId)
 }
 
 function persistDelta(

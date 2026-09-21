@@ -8,7 +8,7 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url))
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin({
-      exclude: ['@continuum-memory/core', '@continuum-memory/llm-openai', '@continuum-memory/memory', '@continuum-memory/tools'],
+      exclude: ['@continuum-memory/core', '@continuum-memory/embedding-onnx', '@continuum-memory/llm-openai', '@continuum-memory/memory', '@continuum-memory/tools'],
     })],
     build: {
       outDir: resolve(__dirname, 'dist/main'),

@@ -45,6 +45,9 @@ importers:
       '@continuum-memory/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@continuum-memory/embedding-onnx':
+        specifier: workspace:*
+        version: link:../../packages/embedding-onnx
       '@continuum-memory/llm-openai':
         specifier: workspace:*
         version: link:../../packages/llm-openai
@@ -141,6 +144,25 @@ importers:
       vitest:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.20.1)
+
+  packages/embedding-onnx:
+    dependencies:
+      '@continuum-memory/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@continuum-memory/memory':
+        specifier: workspace:*
+        version: link:../memory
+      '@huggingface/transformers':
+        specifier: 3.8.1
+        version: 3.8.1
+    devDependencies:
+      '@types/node':
+        specifier: ^22.0.0
+        version: 22.20.1
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
 
   packages/llm-openai:
     dependencies:
@@ -5803,4 +5825,5 @@ snapshots:
 
   zlibjs@0.3.1: {}
 
-  zod@3.25.76: {}
+  zod@3.25.76:
+    optional: true

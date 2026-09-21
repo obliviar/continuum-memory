@@ -44,7 +44,13 @@ export type {
 } from './long-term/model-artifact-integrity'
 export { createEncryptedFilePersistence } from './long-term/encrypted-persistence'
 export type { EncryptedFilePersistenceOptions, EncryptedMemoryPersistence } from './long-term/encrypted-persistence'
-export { createLocalEmbedding, LOCAL_EMBEDDING_MODEL } from './long-term/local-embedding'
+export {
+  createLocalEmbedding,
+  createLocalHashEmbedding,
+  LOCAL_EMBEDDING_MODEL,
+  LOCAL_HASH_EMBEDDING_MODEL,
+} from './long-term/local-embedding'
+export type { Embedder } from '@continuum-memory/contracts'
 export {
   MEMORY_SPARSE_VECTOR_CANDIDATE_INDEX_VERSION,
   createSparseVectorCandidateIndex,

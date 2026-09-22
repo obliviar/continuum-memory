@@ -225,3 +225,4 @@ export type {
 // V4 is additive during stage two. The desktop runtime continues using the
 // stable V3 port until migration, rollback and quality gates pass.
 export * from './v4'
+export * from './graph-core'

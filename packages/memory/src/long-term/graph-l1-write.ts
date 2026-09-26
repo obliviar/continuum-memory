@@ -235,8 +235,11 @@ export interface GraphL1Writer {
   retryPending: () => Promise<void>
 }
 
+export interface GraphL1SemanticPublisher { syncFromClaims: () => Promise<void> }
+
 export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
-  registry: GraphPredicateRegistry, scope: { ownerId: string; agentId: string; sessionId?: string }): GraphL1Writer {
+  registry: GraphPredicateRegistry, scope: { ownerId: string; agentId: string; sessionId?: string },
+  semantic?: GraphL1SemanticPublisher): GraphL1Writer {
   let pending: Promise<void> = Promise.resolve()
   const runTask = async (task: GraphPublicationTask): Promise<GraphPublicationTask> => {
     const current = l1.tasks().find(item => item.id === task.id) ?? task
@@ -257,6 +260,7 @@ export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
             && episode.contentHash === source.contentHash
             && snapshot.evidenceLinks.some(link => link.factId === ref.id && link.episodeId === episode.id && link.active)))
       })
+      await semantic?.syncFromClaims()
       const published = { ...persisted, state: 'published' as const, lastError: undefined }
       l1.updateTask(published)
       return published
@@ -286,6 +290,7 @@ export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
     retryPending: () => serialize(async () => {
       for (const task of l1.tasks().filter(item => item.state !== 'published'))
         await runTask(task)
+      await semantic?.syncFromClaims()
     }),
   }
 }

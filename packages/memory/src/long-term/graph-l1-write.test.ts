@@ -4,6 +4,9 @@ import { createGraphExtractionRun } from './graph-extraction-result'
 import { createGraphPredicateRegistry, normalizeGraphExtraction, type GraphEntityRecord } from './graph-identity-normalization'
 import { assessGraphClaim, confirmGraphClaim, rejectGraphClaim, deferGraphClaim,
   setGraphUseAssessment, createGraphL1Store, createGraphL1Writer } from './graph-l1-write'
+import { createGraphSemanticRepository } from '../graph-core/repository/semantic-repository'
+import { createV4GraphMemory, selectRetrievableGraphBundle, V4_GRAPH_BUDGET } from '../graph-core/adapters/v4-graph-memory'
+import type { GraphRecallRequest } from '@continuum-memory/contracts'
 
 const scope = { ownerId: 'owner', agentId: 'agent' }
 const entities: GraphEntityRecord[] = [
@@ -149,5 +152,99 @@ describe('reviewed graph L1 publication', () => {
     await createGraphL1Writer(v4, createGraphL1Store(l1Persistence), registry, scope).retryPending()
     expect(v4.snapshot().factVersions).toHaveLength(1)
     expect(createGraphL1Store(l1Persistence).claims()).toHaveLength(1)
+  })
+
+  it('publishes a graph-core bundle and recalls accepted entity facts with exact V4 evidence', async () => {
+    const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
+    const l1 = createGraphL1Store(memoryPersistence())
+    const registry = createGraphPredicateRegistry()
+    const semanticPersistence = memoryPersistence()
+    const semantic = createGraphSemanticRepository(semanticPersistence, v4)
+    const syncFromClaims = async () => {
+      const result = await semantic.syncFromClaims(l1, v4, registry, scope)
+      if (!result.ok) throw new Error(result.error.message)
+    }
+    const writer = createGraphL1Writer(v4, l1, registry, scope, { syncFromClaims })
+    const { run, fact } = fixture()
+    const review = assessGraphClaim(run, fact, { sensitivity: 'private', sharePolicy: 'local-only' }, 1_800_000_000_000)
+    expect((await writer.submit(run, fact, review, entities))?.state).toBe('published')
+    expect(semantic.snapshot()).toMatchObject({ claims: [{ atom: { predicate: 'worksAt' } }],
+      entities: [{ ref: { id: 'org-acme' }, review: { status: 'accepted', reviewedAt: 1_800_000_000_000 } },
+        { ref: { id: 'person-alex' }, review: { status: 'accepted', reviewedAt: 1_800_000_000_000 } }],
+      predicates: [{ name: 'worksAt' }] })
+    expect(createGraphSemanticRepository(semanticPersistence, v4).snapshot()?.claims).toHaveLength(1)
+    expect(selectRetrievableGraphBundle(semantic.snapshot(), [{ ...l1.tasks()[0]!,
+      review: { ...review, retrieval: { retain: false } } }])?.claims).toHaveLength(0)
+    const graph = createV4GraphMemory({ repository: v4, persistence: memoryPersistence(),
+      authorizeScope: () => true, canRead: () => true, countTokens: text => Buffer.byteLength(text),
+      now: () => 1_800_000_000_000, acceptedBundle: () => semantic.snapshot() })
+    const request: GraphRecallRequest = { protocolVersion: 'memory-graph/v1', recallId: 'entity-recall',
+      query: 'Acme', scope, temporal: { knownAt: 1_800_000_000_000,
+        valid: { kind: 'at', at: Date.UTC(2026, 8, 26, 12) } }, mode: 'direct-only',
+      budget: { ...V4_GRAPH_BUDGET }, sharePolicies: ['local-only'], sensitivities: ['private'] }
+    const found = await graph.recall(request)
+    expect(found).toMatchObject({ ok: true, value: { evidence: { claims: [{ ref: l1.claims()[0]!.ref,
+      content: 'Alex works at Acme' }] } } })
+    expect(await graph.recall({ ...request, recallId: 'privacy-denied',
+      sharePolicies: ['allow-remote'], sensitivities: ['normal'] }))
+      .toMatchObject({ ok: true, value: { evidence: { claims: [] } } })
+    v4.transaction(draft => { draft.episodes[0]!.contentState = 'deleted';
+      draft.episodes[0]!.deletedAt = 1_800_000_000_001; delete draft.episodes[0]!.content })
+    expect(await graph.recall({ ...request, recallId: 'after-delete' }))
+      .toMatchObject({ ok: true, value: { evidence: { claims: [] } } })
+    await syncFromClaims()
+    expect(semantic.snapshot()?.claims).toHaveLength(0)
+  })
+
+  it('retries graph-core bundle publication after its encrypted save fails', async () => {
+    const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
+    const l1 = createGraphL1Store(memoryPersistence())
+    const registry = createGraphPredicateRegistry()
+    let stored: string | undefined
+    let fail = true
+    const persistence = { load: () => stored, save: (payload: string) => {
+      if (fail) { fail = false; throw new Error('bundle disk failure') }
+      stored = payload
+    } }
+    const semantic = createGraphSemanticRepository(persistence, v4)
+    const syncFromClaims = async () => {
+      const result = await semantic.syncFromClaims(l1, v4, registry, scope)
+      if (!result.ok) throw new Error(result.error.message)
+    }
+    const writer = createGraphL1Writer(v4, l1, registry, scope, { syncFromClaims })
+    const { run, fact } = fixture()
+    const review = assessGraphClaim(run, fact, { sensitivity: 'normal', sharePolicy: 'allow-remote' }, 1_800_000_000_000)
+    expect((await writer.submit(run, fact, review, entities))?.state).toBe('fact-persisted')
+    expect(l1.claims()).toHaveLength(1)
+    expect(semantic.snapshot()).toBeUndefined()
+    await writer.retryPending()
+    expect(l1.tasks()[0]?.state).toBe('published')
+    expect(semantic.snapshot()?.claims).toHaveLength(1)
+    expect(v4.snapshot().facts).toHaveLength(1)
+  })
+
+  it('retrieves confirmed source material with unresolved polarity and time as incomplete evidence', async () => {
+    const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
+    const l1 = createGraphL1Store(memoryPersistence())
+    const registry = createGraphPredicateRegistry()
+    const semantic = createGraphSemanticRepository(memoryPersistence(), v4)
+    const { run, fact } = fixture()
+    run.factCandidates[0]!.context.negation = { value: null, resolution: 'unresolved' }
+    run.factCandidates[0]!.context.time = { value: null, resolution: 'unresolved' }
+    const pending = assessGraphClaim(run, fact, { sensitivity: 'normal', sharePolicy: 'allow-remote' }, 1_800_000_000_000)
+    const confirmed = confirmGraphClaim(pending, 'I verified the cited source', 1_800_000_000_000)
+    const writer = createGraphL1Writer(v4, l1, registry, scope, { syncFromClaims: async () => {
+      const result = await semantic.syncFromClaims(l1, v4, registry, scope)
+      if (!result.ok) throw new Error(result.error.message)
+    } })
+    expect((await writer.submit(run, fact, confirmed, entities))?.state).toBe('published')
+    const graph = createV4GraphMemory({ repository: v4, persistence: memoryPersistence(),
+      authorizeScope: () => true, canRead: () => true, countTokens: text => Buffer.byteLength(text),
+      now: () => 1_800_000_000_000, acceptedBundle: () => semantic.snapshot() })
+    expect(await graph.recall({ protocolVersion: 'memory-graph/v1', recallId: 'uncertain', query: 'Acme', scope,
+      temporal: { knownAt: 1_800_000_000_000, valid: { kind: 'at', at: 1_800_000_000_000 } },
+      mode: 'direct-only', budget: { ...V4_GRAPH_BUDGET }, sharePolicies: ['allow-remote'],
+      sensitivities: ['normal'] })).toMatchObject({ ok: true, value: { evidence: { claims: [
+        { polarity: 'unknown', validTime: { kind: 'unknown' } }] }, trace: { completeness: 'incomplete' } } })
   })
 })

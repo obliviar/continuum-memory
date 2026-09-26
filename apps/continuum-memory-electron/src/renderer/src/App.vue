@@ -1620,6 +1620,7 @@ async function doReset() {
                 </div>
                 <div class="memory-content">{{ item.evidence || '[来源证据不可用]' }}</div>
                 <div class="field-hint">原因：{{ item.review.reason }} · 来源：{{ item.review.sourceId }} · 隐私：{{ item.review.sensitivity }}</div>
+                <div class="field-hint">确认未解析的提及时，会为这条证据建立独立实体身份；同名实体不会自动合并。</div>
                 <input v-model="graphReviewReasons[item.review.id]" class="settings-input" maxlength="500" placeholder="填写审核原因" />
                 <label class="memory-check-row">
                   <input v-model="graphRetrievalRetain[item.review.id]" type="checkbox" />

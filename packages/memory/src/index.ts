@@ -126,6 +126,7 @@ export type {
   GraphPredicateSpec as GraphPredicateSpecView,
 } from './long-term/graph-identity-normalization'
 export { createGraphNormalizationStore } from './long-term/graph-normalization-store'
+export { confirmGraphFactIdentities } from './long-term/graph-confirmed-identity'
 export type { GraphNormalizationStore } from './long-term/graph-normalization-store'
 export {
   GRAPH_L1_WRITE_VERSION,
@@ -139,7 +140,7 @@ export {
 } from './long-term/graph-l1-write'
 export type {
   GraphClaimRecord, GraphClaimReview, GraphContextRecord, GraphEntityRelationEdge,
-  GraphL1Store, GraphL1Writer, GraphPublicationTask,
+  GraphL1Store, GraphL1Writer, GraphL1SemanticPublisher, GraphPublicationTask,
 } from './long-term/graph-l1-write'
 export type { MemoryCandidate } from './long-term/memory-extractor'
 export { MEMORY_NORMALIZER_VERSION, normalizeMemoryCandidate, normalizedMemoryFields } from './long-term/memory-normalizer'

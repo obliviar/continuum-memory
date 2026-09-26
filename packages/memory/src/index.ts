@@ -98,6 +98,17 @@ export type {
 } from './long-term/memory-write-policy'
 export { createSmartMemoryExtractor } from './long-term/smart-memory-extractor'
 export type { SmartExtractorConfig, SmartMemoryExtractorOptions } from './long-term/smart-memory-extractor'
+export {
+  GRAPH_EXTRACTION_SCHEMA_VERSION,
+  DEFAULT_GRAPH_WRITE_POLICY,
+  createGraphExtractionRun,
+  createGraphExtractionResultStore,
+  selectGraphWriteCandidates,
+} from './long-term/graph-extraction-result'
+export type {
+  EntityMention, FactCandidate, FactContext, GraphExtractionRun,
+  GraphExtractionResultStore, GraphWritePolicy, SourceSpan,
+} from './long-term/graph-extraction-result'
 export type { MemoryCandidate } from './long-term/memory-extractor'
 export { MEMORY_NORMALIZER_VERSION, normalizeMemoryCandidate, normalizedMemoryFields } from './long-term/memory-normalizer'
 export type { NormalizedMemoryFields, NormalizedMemoryModality, NormalizedMemoryPolarity } from './long-term/memory-normalizer'

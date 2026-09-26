@@ -8,6 +8,7 @@ import type {
   GraphRuleRef,
   GraphScope,
   GraphSourceRef,
+  GraphStatementRef,
   GraphTemporalQuery,
   MemorySensitivity,
   MemorySharePolicy,
@@ -21,6 +22,7 @@ import type {
   GraphProjectionSnapshot,
   GraphRuleRecord,
   GraphSemanticBundle,
+  GraphStatementRecord,
 } from '../domain/types'
 
 /** Issued by the trusted host after authentication. A structurally valid object is NOT authorization. */
@@ -37,6 +39,8 @@ export interface GraphOpenViewRequest {
   readonly temporal: GraphTemporalQuery
   readonly budget: GraphRecallBudget
   readonly expectedManifestId: string
+  /** Optional exact L3/L4 view; omitted means no hierarchy traversal. */
+  readonly expectedHierarchyManifestId?: string
   readonly policyVersion: string
 }
 
@@ -79,6 +83,7 @@ export interface GraphReadView {
   readonly context: GraphOpenViewRequest
   /** Exact versions only. Any missing/inaccessible source is an explicit error, not a shorter array. */
   resolveClaims: (refs: readonly GraphClaimRef[]) => Promise<GraphResult<readonly GraphClaimRecord[]>>
+  resolveStatements: (refs: readonly GraphStatementRef[]) => Promise<GraphResult<readonly GraphStatementRecord[]>>
   resolveRules: (refs: readonly GraphRuleRef[]) => Promise<GraphResult<readonly GraphRuleRecord[]>>
   neighbors: (query: GraphNeighborQuery) => Promise<GraphResult<GraphPage<GraphEdge>>>
   matchRuleBody: (query: GraphBindingQuery) => Promise<GraphResult<GraphPage<GraphBindingCandidate>>>

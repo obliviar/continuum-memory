@@ -24,6 +24,10 @@ export type GraphStatementRef = GraphVersionRef<'statement'>
 export type GraphRuleRef = GraphVersionRef<'rule'>
 export type GraphProofRef = GraphVersionRef<'proof'>
 export type GraphDerivedClaimRef = GraphVersionRef<'derived-claim'>
+/** Relation records are owned by the relation store, not by a community projection. */
+export type GraphRelationRef = GraphVersionRef<'relation'>
+export type GraphCommunityRef = GraphVersionRef<'community'>
+export type GraphSummaryRef = GraphVersionRef<'summary'>
 export type GraphContextRef = GraphVersionRef<'context'>
 export type GraphFactRef = GraphVersionRef<'v4-fact'>
 export type GraphAnswerRef = GraphClaimRef | GraphDerivedClaimRef
@@ -81,12 +85,16 @@ export interface GraphRecallRequest {
   readonly sharePolicies: readonly MemorySharePolicy[]
   readonly sensitivities: readonly MemorySensitivity[]
   readonly expectedManifestId?: string
+  /** Opt in to an exact L3/L4 view; absence keeps hierarchy outside this recall. */
+  readonly expectedHierarchyManifestId?: string
 }
 
 export interface GraphMemoryCapabilities {
   readonly protocolVersion: GraphProtocolVersion
   readonly temporal: 'bitemporal'
   readonly logic: 'none' | 'bounded-explicit-literals-v1'
+  /** Omitted until the independently published hierarchy read port is available. */
+  readonly hierarchy?: 'community-summary-v1'
   readonly budgetCeiling: GraphRecallBudget
 }
 
@@ -118,6 +126,12 @@ export interface GraphRecallTrace {
   readonly candidateRefs: readonly GraphAnswerRef[]
   readonly evaluatedRefs: readonly GraphAnswerRef[]
   readonly selectedRefs: readonly GraphAnswerRef[]
+  /** Navigation is an entry route, not answer evidence. */
+  readonly hierarchy?: {
+    readonly manifestId: string
+    readonly communityRefs: readonly GraphCommunityRef[]
+    readonly summaryRefs: readonly GraphSummaryRef[]
+  }
   /** Injection/citation is reported later by the consumer, never inferred from selection. */
   readonly usage: {
     readonly seeds: number

@@ -1,0 +1,9 @@
+# Graph extraction result protocol (v1)
+
+The smart extractor requests UIE shaped `graph.entities` and `graph.facts` alongside its existing `memories` response. The complete parsed model response is encrypted and saved before memory candidates are normalized or filtered. A missing or malformed graph is recorded as `incomplete`; a provider or JSON failure is recorded as `failed` with the raw response when available.
+
+Each run contains a source message ID, SHA-256 source revision, exact source text, model ID, schema version, status, raw output, parsed mentions and fact candidates. Spans use UTF-16 offsets into the source text and an exclusive end. Entity mentions carry type, original text, span and model score. Fact candidates reference a subject mention, predicate, object mention or literal, evidence span, model score, and separate negation, condition, time and speaker values with `resolved`, `unresolved` or `absent` states.
+
+`selectGraphWriteCandidates` is the downstream graph write policy. Its defaults are a 0.75 model score and eight facts per selection. It reports how many facts were below the threshold and how many eligible facts were deferred. A budget limited selection has status `incomplete`; the stored extraction remains intact for later processing. For parser safety, only the first 1,000 entities and 1,000 facts are interpreted in one run; if this limit is reached, the run records unprocessed counts and `incomplete`, while preserving the full raw response. The current V3 memory writer still uses its existing candidate verifier. The graph selection API is available to a future graph writer and does not itself write graph edges.
+
+The Electron app stores runs in `graph-extractions.enc` using the same OS protected key approach as long term memory. Truncating source messages removes corresponding runs, and clearing memory clears the run store.

@@ -28,6 +28,7 @@ import {
   createMemoryV4Repository,
   createMemoryWriter,
   createSmartMemoryExtractor,
+  createGraphExtractionResultStore,
   createV4ShadowWriter,
   createVectorStore,
   extractMemoryCandidates,
@@ -44,6 +45,7 @@ import type {
   IdleConsolidationRunner,
   MemoryCandidate,
   MemoryExtractor,
+  GraphExtractionResultStore,
   MemoryV4LifecycleService,
   MemoryCandidateReviewService,
   MemoryEmbeddingIndex,
@@ -365,6 +367,7 @@ let memoryV4ShadowEvaluationPersistence: EncryptedMemoryPersistence | undefined
 let memoryV4ShadowEvaluationStore: MemoryV4ShadowEvaluationStore | undefined
 let memoryV4InternalFeedbackPersistence: EncryptedMemoryPersistence | undefined
 let memoryV4InternalFeedbackStore: MemoryV4InternalFeedbackStore | undefined
+let graphExtractionStore: GraphExtractionResultStore | undefined
 let memoryV4ShadowTaskQueue: MemoryV4ShadowTaskQueue<MemoryV4ShadowComparisonTask> | undefined
 let memoryV4ShadowGeneration = 0
 let memoryV4ShadowEvaluationError = ''
@@ -416,6 +419,8 @@ const memoryStoragePath = join(userDataDir, 'memories.enc')
 const memoryKeyPath = join(userDataDir, 'memory-key.json')
 const memoryEmbeddingStoragePath = join(userDataDir, 'memory-embeddings.enc')
 const memoryEmbeddingKeyPath = join(userDataDir, 'memory-embedding-key.json')
+const graphExtractionStoragePath = join(userDataDir, 'graph-extractions.enc')
+const graphExtractionKeyPath = join(userDataDir, 'graph-extractions-key.json')
 const legacyMemoryStoragePath = join(userDataDir, 'memories.json')
 const memoryV4StoragePath = join(userDataDir, 'memory-v4.enc')
 const memoryV4BackupPath = join(userDataDir, 'memory-v4.enc.backup')
@@ -493,13 +498,14 @@ function mergeMemoryCandidates(candidates: MemoryCandidate[]): MemoryCandidate[]
   const unique = new Map<string, MemoryCandidate>()
   for (const candidate of candidates)
     unique.set(candidate.content.toLocaleLowerCase(), candidate)
-  return [...unique.values()].slice(0, 8)
+  return [...unique.values()]
 }
 
 function createConfiguredMemoryExtractor(): MemoryExtractor {
   const smartExtractor = createSmartMemoryExtractor({
     getConfig: () => ({ apiKey: apiConfig.apiKey, baseURL: apiConfig.baseURL, model: apiConfig.model }),
     fallback: extractMemoryCandidates,
+    saveGraphExtraction: run => graphExtractionStore?.append(run),
   })
   return async (turn) => {
     const candidates = memorySettings.extractionMode === 'smart' && memorySettings.remotePolicy !== 'disabled'
@@ -606,6 +612,7 @@ function initializeMemory(): void {
   memoryV4ShadowEvaluationPersistence = undefined
   memoryV4ShadowEvaluationStore = undefined
   memoryV4InternalFeedbackPersistence = undefined
+  graphExtractionStore = undefined
   memoryV4InternalFeedbackStore = undefined
   memoryV4ShadowEvaluationError = ''
   memoryV4InternalFeedbackError = ''
@@ -633,6 +640,13 @@ function initializeMemory(): void {
       unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
     })
     memoryPersistence = persistence
+    const graphPersistence = createEncryptedFilePersistence({
+      encryptedPath: graphExtractionStoragePath,
+      keyPath: graphExtractionKeyPath,
+      protectKey: key => safeStorage.encryptString(key.toString('base64')),
+      unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+    })
+    graphExtractionStore = createGraphExtractionResultStore(graphPersistence)
     let embeddingIndex: MemoryEmbeddingIndex | undefined
     try {
       const embeddingPersistence = createEncryptedFilePersistence({
@@ -701,6 +715,7 @@ function initializeMemory(): void {
       },
       onCaptureObserverError: error => writeBootLog(`Memory V4 capture enqueue failed: ${errorMessage(error)}`),
       onSourcesUnlinked: (commit) => {
+        graphExtractionStore?.removeSources(commit.messageIds)
         memoryV4Shadow?.enqueueSourceUnlink(commit)
         memoryV4Shadow?.flush()
       },
@@ -1827,6 +1842,7 @@ function setupIPC() {
       return { ok: false, error: '长期记忆已关闭。' }
     invalidateMemoryV4ShadowComparisons()
     await memory.clear(localMemoryScope)
+    graphExtractionStore?.clear()
     memoryV4ShadowEvaluationStore?.clear()
     memoryV4InternalFeedbackStore?.clear()
     return { ok: true, count: 0 }

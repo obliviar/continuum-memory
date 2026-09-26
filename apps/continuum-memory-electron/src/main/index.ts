@@ -1177,6 +1177,7 @@ function memoryForRemoteRuntime() {
           && (record.sensitivity === 'normal'
             || (record.sensitivity === 'private' && memorySettings.remotePolicy === 'allow-private')),
         countTokens: countGraphTokens,
+        includeOwnedSessions: true,
         utcOffsetMinutes: -new Date().getTimezoneOffset(),
       })
     : undefined
@@ -1304,12 +1305,16 @@ let runtime: ReturnType<typeof createAgentRuntime>
 
 function rebuildRuntime() {
   const llm = createOpenAILlm({ apiKey: apiConfig.apiKey, baseURL: apiConfig.baseURL })
+  const remoteMemory = memoryForRemoteRuntime()
+  if (graphMemoryEnabled && !remoteMemory?.graph)
+    writeBootLog('Graph recall adapter is unavailable; the current runtime uses the configured V3/V4 read path')
   runtime = createAgentRuntime({
     persona: { systemPrompt: currentPersona, model: apiConfig.model },
-    llm, session: sessionStore, memory: memoryForRemoteRuntime(),
+    llm, session: sessionStore, memory: remoteMemory,
     resolveMemoryScope: () => localMemoryScope,
-    ...(graphMemoryEnabled ? { graphRecall: {
+    ...(graphMemoryEnabled && remoteMemory?.graph ? { graphRecall: {
       countTokens: countGraphTokens,
+      awaitCaptureWrites: () => remoteMemory.flushPendingCaptures(),
       createRequest: (query: string) => {
         const timestamp = Date.now()
         return { protocolVersion: 'memory-graph/v1' as const, recallId: crypto.randomUUID(), query,

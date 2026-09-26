@@ -60,4 +60,3 @@ export interface GraphRecallSeedPort {
    */
   search: (request: GraphSeedSearchRequest, view: GraphRecallReadView) => Promise<GraphResult<GraphPage<GraphSeedCandidate>>>
 }
-

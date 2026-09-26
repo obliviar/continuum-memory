@@ -10,6 +10,8 @@ export interface CaptureSource {
   identity: string
   revision: number
   scope: MemoryScope
+  /** The original write isolation scope; source identity may additionally include the chat session. */
+  writeScope?: MemoryScope
   messageIds: string[]
   contentHash: string
   status: 'active' | 'superseded' | 'deleted'
@@ -85,6 +87,9 @@ export function createCaptureRepository(options: {
   for (const source of state.sources) {
     if (!source.id || sourceIds.has(source.id) || !source.scope?.ownerId || typeof source.identity !== 'string'
       || !Number.isInteger(source.revision) || source.revision < 1
+      || (source.writeScope && (source.writeScope.ownerId !== source.scope.ownerId
+        || source.writeScope.agentId !== source.scope.agentId
+        || (source.writeScope.sessionId !== undefined && source.writeScope.sessionId !== source.scope.sessionId)))
       || !Array.isArray(source.messageIds) || !['active', 'superseded', 'deleted'].includes(source.status)
       || (source.status === 'active' && typeof source.turn?.userMessage !== 'string'))
       throw new Error('Invalid capture source')
@@ -158,7 +163,7 @@ export function createCaptureRepository(options: {
       const createdAt = Date.now()
       const source: CaptureSource = {
         id: randomUUID(), identity, revision: 1 + Math.max(0, ...next.sources.filter(item => item.identity === identity).map(item => item.revision)),
-        scope: sourceScope, messageIds, contentHash, status: 'active', createdAt, turn: storedTurn,
+        scope: sourceScope, writeScope: copy(scope), messageIds, contentHash, status: 'active', createdAt, turn: storedTurn,
       }
       next.sources.push(source)
       // Anonymous sources also need stable evidence IDs so a merged fact can purge every contributing source.
@@ -211,7 +216,7 @@ export function createCaptureRepository(options: {
         memoryCaptureSegmentCount: task.segmentCount, memorySourceStart: task.start, memorySourceEnd: task.end,
         memorySourceOffsetEncoding: task.offsetEncoding, memoryCapturePlannerVersion: task.preprocessingVersion,
         memoryCaptureProcessorVersion: task.processorVersion }
-      return { task: copy(task), turn, scope: copy(source.scope) }
+      return { task: copy(task), turn, scope: copy(source.writeScope ?? source.scope) }
     },
     isCurrent: id => state.tasks.some(task => task.id === id && task.status === 'running'
       && state.sources.some(source => source.id === task.sourceId && source.status === 'active')),

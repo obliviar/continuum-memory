@@ -101,6 +101,22 @@ async function setup(options: { kind?: GraphRelationKind; polarity?: 'positive' 
 }
 
 describe('authoritative L2 to bounded recall integration', () => {
+  it('keeps relation cursors valid when page scan limits change and enforces the shared view budget', async () => {
+    const s = await setup({ fanout: 3 })
+    const core = value(await s.coreReadPort.openView({ ...s.request.view,
+      budget: { ...s.request.view.budget, maxEdges: 2 } }))
+    const relation = value(await s.relationReadPort.openView({ coreView: core, expectedRelationManifestId: 'l2-1' }))
+    const base = { claim: s.request.seed, direction: 'in' as const, kinds: ['causes' as const], limit: 1 }
+    const first = value(await relation.neighbors({ ...base, maxScanned: 2 }))
+    expect(first).toMatchObject({ scanned: 1, completion: 'more' })
+    const second = value(await relation.neighbors({ ...base, maxScanned: 1, cursor: first.nextCursor }))
+    expect(second).toMatchObject({ scanned: 1, completion: 'budget-exhausted' })
+    const third = value(await relation.neighbors({ ...base, maxScanned: 1, cursor: second.nextCursor }))
+    expect(third).toMatchObject({ items: [], scanned: 0, completion: 'budget-exhausted' })
+    await relation.close()
+    await core.close()
+  })
+
   it.each(['causes', 'precedes', 'explains', 'entails', 'contradicts'] as const)('keeps %s and its authoritative metadata without renaming semantics', async kind => {
     const s = await setup({ kind })
     const result = value(await s.service.recall(s.request))

@@ -9,6 +9,7 @@
 ## 数据结构
 
 - `CaptureSource`：独立 source ID、隔离 scope、消息 ID、源身份、修订号、内容摘要、创建时间、状态和原始捕获输入。状态为 active / superseded / deleted。同一消息编辑后生成新修订，旧任务失效；上下文、图片附件一并加密保存，以便重放，均不是事实证据。
+- 来源身份中的会话 ID 用于重复投递识别；`writeScope` 保存调用方原本的记忆隔离范围。桌面端的跨会话记忆写入不因来源属于某个聊天会话而变成仅限该会话的事实。
 - `CaptureTask`：任务 ID、source ID、抽取配置版本、分段序号/总数、原文 `[start,end)`、`utf16` 坐标约定、`identity-v1` 预处理版本、状态、尝试次数、时间、候选数、写入数、稳定错误码。原文不做 NFKC、空白合并或静默裁剪，分段不截断代理对。UIE 若输出 Unicode code-point 坐标，后续需先转为分段内 UTF-16，再加 `start`，不能直接相加。
 - `CaptureStatus`：不含原文的统计信息，通过 `memory:status`、`memory:list` 返回，并显示在记忆管理面板。
 

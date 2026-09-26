@@ -18,6 +18,8 @@ export interface V4GraphMemoryOptions {
   canRead: (record: MemoryFactV4 | MemoryEpisodeV4) => boolean
   /** Exact tokenizer or a documented conservative upper bound (e.g. UTF-8 bytes for byte BPE). */
   countTokens: (text: string) => number
+  /** Enable only when the trusted host authorizes cross-session recall for this owner. */
+  includeOwnedSessions?: boolean
   now?: () => number
   utcOffsetMinutes?: number
 }
@@ -67,6 +69,7 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         if (/为什么|为何|原因|导致|先后|先.*后|\b(why|cause|caused|before|after)\b/i.test(request.query))
           return fail('unsupported-capability', 'This host route has no L2 traversal; use the bounded relation service')
         const gathered = collectV4RecallInputs(options.repository, { scope: request.scope, expectedRevision: snapshot.revision,
+          includeOwnedSessions: options.includeOwnedSessions,
           now: timestamp, canRead: record => allowed(record, request) })
         const inputs = gathered.inputs.filter(({ fact }) => {
           const valid = timePlan.value.temporal.valid
@@ -106,6 +109,7 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         if (elapsed >= request.budget.maxElapsedMs) return fail('budget-exhausted', 'Direct recall elapsed-time budget exhausted')
         // Re-read CURRENT tombstones, policy and exact contents even when an encrypted projection exists.
         const finalInputs = collectV4RecallInputs(options.repository, { scope: request.scope, expectedRevision: snapshot.revision,
+          includeOwnedSessions: options.includeOwnedSessions,
           now: now(), canRead: record => allowed(record, request) })
         const fresh = new Map(finalInputs.inputs.map(input => [input.fact.id, graphHash(input)]))
         if (!options.authorizeScope(request.scope) || inputs.some(input => fresh.get(input.fact.id) !== graphHash(input)))
@@ -125,7 +129,10 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
               claimRefs: [claim.ref], ruleRefs: [], proofRefs: [] })) },
           trace: { recallId: request.recallId, manifestId, policyVersion: V4_SCALAR_MAPPING_POLICY,
             temporal: timePlan.value.temporal, completeness: incomplete ? 'incomplete' : 'complete-within-declared-scope',
-            searchScope: ['current-verified-scalar-L1', 'BM25', 'exact-owner-agent-session', 'no-L2', 'no-conflict-audit',
+            searchScope: ['current-verified-scalar-L1', 'BM25',
+              options.includeOwnedSessions && request.scope.sessionId === undefined
+                ? 'trusted-owner-wide-sessions' : 'exact-owner-agent-session',
+              'no-L2', 'no-conflict-audit',
               ...(gathered.rejected.length ? ['some-V4-records-excluded'] : [])], stopReason,
             candidateRefs: hits.map(hit => byId.get(hit.id)!.claim.ref), evaluatedRefs: refs, selectedRefs: refs,
             usage: { seeds: claims.length, nodes: claims.length, edges: 0, maxHopReached: 0, ruleBindings: 0,

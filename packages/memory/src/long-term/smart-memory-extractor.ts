@@ -116,7 +116,7 @@ async function completeWithOpenAI(prompt: string, config: SmartExtractorConfig):
 
 function buildPrompt(userMessage: string): string {
   return [
-    'Return all UIE graph elements before any filtering: graph:{entities:[{id,type,text,span:{start,end},modelScore}],facts:[{id,subjectMentionId,predicate,object:{mentionId}|{literal},evidenceSpan:{start,end},modelScore,context:{negation,condition,time,speaker}}]}. Offsets are UTF-16 positions in the exact user text; end is exclusive. Each context field is {value,resolution:"resolved|unresolved|absent",evidenceSpan?}. Do not apply a 0.75 score threshold or an eight-item cap.',
+    'Return all UIE graph elements before any filtering: graph:{entities:[{id,type,text,span:{start,end},modelScore}],facts:[{id,subjectMentionId,predicate,object:{mentionId}|{literal,valueType?,unit?},evidenceSpan:{start,end},modelScore,context:{negation,condition,time,speaker}}]}. Offsets are UTF-16 positions in the exact user text; end is exclusive. Each context field is {value,resolution:"resolved|unresolved|absent",evidenceSpan?}. Dates and amounts are typed literals, not entity mentions. Do not apply a 0.75 score threshold or an eight-item cap.',
     '从下面的用户原话中提取未来对话仍然有用的、明确陈述的事实。',
     '不要推测；不要提取一次性请求、寒暄、模型指令、密钥、密码或令牌。',
     '若新事实会替换旧值（姓名、生日、所在地等），cardinality 使用 single，并给稳定 memoryKey。',
@@ -124,7 +124,7 @@ function buildPrompt(userMessage: string): string {
     '敏感隐私设为 private 或 secret；private 默认 sharePolicy=local-only，secret 必须 local-only。',
     '临时事实可填写 expiresAt（ISO 8601）；不确定时留空。',
     '输出：{"memories":[{"content":"简明事实","kind":"identity|preference|project|relationship|health|routine|goal|explicit|image|other","memoryKey":"可选稳定键","cardinality":"single|multiple|set","polarity":"positive|negative|unknown","modality":"asserted|planned|hypothetical|reported|unknown","condition":"可选条件","confidence":0到1,"importance":0到1,"sensitivity":"normal|private|secret","sharePolicy":"allow-remote|local-only|ask","validFrom":"可选ISO时间","validTo":"可选ISO时间","expiresAt":"可选ISO时间"}]}',
-    '在同一个 JSON 对象中同时输出 memories 和 graph；graph 必须含 entities 与 facts 数组。没有抽取项时输出空数组。',
+    '在同一个 JSON 对象中同时输出 memories 和 graph；graph 必须含 entities 与 facts 数组。实体 type 使用 person、organization、location 等明确类型；日期和金额作为带 valueType 的字面值。没有抽取项时输出空数组。',
     `用户原话：${userMessage.slice(0, 6000)}`,
   ].join('\n')
 }

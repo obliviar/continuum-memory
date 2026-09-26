@@ -29,6 +29,8 @@ import {
   createMemoryWriter,
   createSmartMemoryExtractor,
   createGraphExtractionResultStore,
+  createGraphNormalizationStore,
+  normalizeGraphExtraction,
   createV4ShadowWriter,
   createVectorStore,
   extractMemoryCandidates,
@@ -46,6 +48,7 @@ import type {
   MemoryCandidate,
   MemoryExtractor,
   GraphExtractionResultStore,
+  GraphNormalizationStore,
   MemoryV4LifecycleService,
   MemoryCandidateReviewService,
   MemoryEmbeddingIndex,
@@ -368,6 +371,7 @@ let memoryV4ShadowEvaluationStore: MemoryV4ShadowEvaluationStore | undefined
 let memoryV4InternalFeedbackPersistence: EncryptedMemoryPersistence | undefined
 let memoryV4InternalFeedbackStore: MemoryV4InternalFeedbackStore | undefined
 let graphExtractionStore: GraphExtractionResultStore | undefined
+let graphNormalizationStore: GraphNormalizationStore | undefined
 let memoryV4ShadowTaskQueue: MemoryV4ShadowTaskQueue<MemoryV4ShadowComparisonTask> | undefined
 let memoryV4ShadowGeneration = 0
 let memoryV4ShadowEvaluationError = ''
@@ -421,6 +425,8 @@ const memoryEmbeddingStoragePath = join(userDataDir, 'memory-embeddings.enc')
 const memoryEmbeddingKeyPath = join(userDataDir, 'memory-embedding-key.json')
 const graphExtractionStoragePath = join(userDataDir, 'graph-extractions.enc')
 const graphExtractionKeyPath = join(userDataDir, 'graph-extractions-key.json')
+const graphNormalizationStoragePath = join(userDataDir, 'graph-normalization.enc')
+const graphNormalizationKeyPath = join(userDataDir, 'graph-normalization-key.json')
 const legacyMemoryStoragePath = join(userDataDir, 'memories.json')
 const memoryV4StoragePath = join(userDataDir, 'memory-v4.enc')
 const memoryV4BackupPath = join(userDataDir, 'memory-v4.enc.backup')
@@ -505,7 +511,16 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
   const smartExtractor = createSmartMemoryExtractor({
     getConfig: () => ({ apiKey: apiConfig.apiKey, baseURL: apiConfig.baseURL, model: apiConfig.model }),
     fallback: extractMemoryCandidates,
-    saveGraphExtraction: run => graphExtractionStore?.append(run),
+    saveGraphExtraction: (run) => {
+      graphExtractionStore?.append(run)
+      if (graphNormalizationStore && run.status !== 'failed') {
+        graphNormalizationStore.appendResult(normalizeGraphExtraction(run, {
+          entities: graphNormalizationStore.entities(),
+          aliasDecisions: graphNormalizationStore.aliasDecisions(),
+          scope: localMemoryScope,
+        }))
+      }
+    },
   })
   return async (turn) => {
     const candidates = memorySettings.extractionMode === 'smart' && memorySettings.remotePolicy !== 'disabled'
@@ -613,6 +628,7 @@ function initializeMemory(): void {
   memoryV4ShadowEvaluationStore = undefined
   memoryV4InternalFeedbackPersistence = undefined
   graphExtractionStore = undefined
+  graphNormalizationStore = undefined
   memoryV4InternalFeedbackStore = undefined
   memoryV4ShadowEvaluationError = ''
   memoryV4InternalFeedbackError = ''
@@ -647,6 +663,13 @@ function initializeMemory(): void {
       unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
     })
     graphExtractionStore = createGraphExtractionResultStore(graphPersistence)
+    const graphNormalizationPersistence = createEncryptedFilePersistence({
+      encryptedPath: graphNormalizationStoragePath,
+      keyPath: graphNormalizationKeyPath,
+      protectKey: key => safeStorage.encryptString(key.toString('base64')),
+      unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+    })
+    graphNormalizationStore = createGraphNormalizationStore(graphNormalizationPersistence)
     let embeddingIndex: MemoryEmbeddingIndex | undefined
     try {
       const embeddingPersistence = createEncryptedFilePersistence({
@@ -716,6 +739,7 @@ function initializeMemory(): void {
       onCaptureObserverError: error => writeBootLog(`Memory V4 capture enqueue failed: ${errorMessage(error)}`),
       onSourcesUnlinked: (commit) => {
         graphExtractionStore?.removeSources(commit.messageIds)
+        graphNormalizationStore?.removeSources(commit.messageIds)
         memoryV4Shadow?.enqueueSourceUnlink(commit)
         memoryV4Shadow?.flush()
       },
@@ -1843,6 +1867,7 @@ function setupIPC() {
     invalidateMemoryV4ShadowComparisons()
     await memory.clear(localMemoryScope)
     graphExtractionStore?.clear()
+    graphNormalizationStore?.clear()
     memoryV4ShadowEvaluationStore?.clear()
     memoryV4InternalFeedbackStore?.clear()
     return { ok: true, count: 0 }

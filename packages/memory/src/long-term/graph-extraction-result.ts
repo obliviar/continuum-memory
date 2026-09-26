@@ -35,7 +35,7 @@ export interface FactCandidate {
   id: string
   subjectMentionId: string
   predicate: string
-  object: { mentionId: string } | { literal: string }
+  object: { mentionId: string } | { literal: string; valueType?: 'string' | 'number' | 'date' | 'boolean' | 'amount'; unit?: string }
   evidenceSpan: SourceSpan
   modelScore: number
   context: FactContext
@@ -199,7 +199,14 @@ function parseFact(value: unknown, sourceText: string, entityIds: Set<string>): 
     id: raw.id,
     subjectMentionId: raw.subjectMentionId,
     predicate: raw.predicate,
-    object: typeof mentionId === 'string' ? { mentionId } : { literal: literal as string },
+    object: typeof mentionId === 'string' ? { mentionId } : {
+      literal: literal as string,
+      ...(objectValue?.valueType === 'string' || objectValue?.valueType === 'number'
+        || objectValue?.valueType === 'date' || objectValue?.valueType === 'boolean'
+        || objectValue?.valueType === 'amount' ? { valueType: objectValue.valueType } : {}),
+      ...(typeof objectValue?.unit === 'string' && objectValue.unit.trim()
+        ? { unit: objectValue.unit.trim() } : {}),
+    },
     evidenceSpan: position,
     modelScore: raw.modelScore,
     context: {

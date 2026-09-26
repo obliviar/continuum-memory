@@ -47,6 +47,7 @@ export interface GraphOpenViewRequest {
 /** Opaque cursors must bind the view ID, query fingerprint and scan position. */
 export interface GraphPageRequest {
   readonly limit: number
+  /** Maximum records scanned by this page; the view also enforces its cumulative budget. */
   readonly maxScanned: number
   readonly cursor?: string
 }
@@ -87,7 +88,9 @@ export interface GraphReadView {
   resolveRules: (refs: readonly GraphRuleRef[]) => Promise<GraphResult<readonly GraphRuleRecord[]>>
   neighbors: (query: GraphNeighborQuery) => Promise<GraphResult<GraphPage<GraphEdge>>>
   matchRuleBody: (query: GraphBindingQuery) => Promise<GraphResult<GraphPage<GraphBindingCandidate>>>
-  /** Complete exact-key conflict lookup; budget exhaustion must prevent proof validation. */
+  /** Declare only when exact-key conflict lookup is complete within its policy and budget. */
+  readonly conflictPolicy?: 'exact-opposite-polarity-v1'
+  /** An incomplete or budget-exhausted page cannot validate a proof. */
   findConflicts: (ref: GraphClaimRef, page: GraphPageRequest) => Promise<GraphResult<GraphPage<GraphClaimRecord>>>
   close: () => Promise<void>
 }

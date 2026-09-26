@@ -8,6 +8,9 @@ import { createAgentRuntime, createSessionManager, createChatHooks } from '@cont
 import { createOpenAILlm } from '@continuum-memory/llm-openai'
 import {
   createEncryptedFilePersistence,
+  createEncryptedGraphL1Persistence,
+  createV4GraphMemory,
+  V4_GRAPH_BUDGET,
   createEncryptedV4Persistence,
   createIdleConsolidationRunner,
   createJournaledV4Persistence,
@@ -60,6 +63,7 @@ import type {
 import { createToolRegistry, webSearchTool, fileReadTool, httpFetchTool } from '@continuum-memory/tools'
 
 import { createPersistence } from './persist'
+import { withGraphSourceInvalidation } from './graph-source-invalidation'
 import { createSettingsManager } from './settings'
 import { setupVoiceIPC } from './voice'
 import { createImageMemoryService, isExplicitImageMemoryRequest } from './image-memory'
@@ -349,6 +353,10 @@ let memoryV4SemanticBackgroundIndex: MemoryV4SemanticBackgroundIndex | undefined
 let memoryInitializationError = ''
 let memoryLegacyMigrated = false
 let memoryV4Shadow: V4ShadowWriter | undefined
+let graphL1Persistence: ReturnType<typeof createEncryptedGraphL1Persistence> | undefined
+const graphMemoryEnabled = process.env.CONTINUUM_GRAPH_MEMORY === '1'
+// Conservative byte-BPE token upper bound; final escaped graph prompt is checked again by core.
+const countGraphTokens = (text: string) => Buffer.byteLength(text, 'utf8')
 let memoryV4Repository: MemoryV4Repository | undefined
 let memoryV4Lifecycle: MemoryV4LifecycleService | undefined
 let memoryCandidateReview: MemoryCandidateReviewService | undefined
@@ -807,7 +815,17 @@ function initializeMemory(): void {
         checkpoint: v4Checkpoint,
         journalPath: memoryV4JournalPath,
       })
-      const v4Repository = createMemoryV4Repository({ persistence: v4Persistence })
+      graphL1Persistence = createEncryptedGraphL1Persistence({
+        encryptedPath: join(userDataDir, 'memory-graph-l1.enc'),
+        keyPath: join(userDataDir, 'memory-graph-l1.key'),
+        protectKey: key => safeStorage.encryptString(key.toString('base64')),
+        unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+      })
+      const l1Persistence = graphL1Persistence
+      const v4Repository = createMemoryV4Repository({ persistence: withGraphSourceInvalidation(v4Persistence, () => {
+        // Covers lifecycle purge, shadow writes and updates outside the Agent port, even when graph mode is off.
+        if (existsSync(l1Persistence.storagePath!)) l1Persistence.save('{}')
+      }) })
       memoryV4Repository = v4Repository
       memoryV4Lifecycle = createMemoryV4LifecycleService(v4Repository)
       memoryCandidateReview = createMemoryCandidateReviewService(v4Repository)
@@ -1150,6 +1168,19 @@ function memoryForRemoteRuntime() {
     return undefined
   const localMemory = memory
   const worker = memoryV4ShadowWorkerClient
+  const graph = graphMemoryEnabled && memoryV4Repository && graphL1Persistence
+    ? createV4GraphMemory({
+        repository: memoryV4Repository, persistence: graphL1Persistence,
+        authorizeScope: scope => scope.ownerId === localMemoryScope.ownerId
+          && scope.agentId === localMemoryScope.agentId && scope.sessionId === undefined,
+        canRead: record => memorySettings.remotePolicy !== 'disabled' && record.sharePolicy === 'allow-remote'
+          && (record.sensitivity === 'normal'
+            || (record.sensitivity === 'private' && memorySettings.remotePolicy === 'allow-private')),
+        countTokens: countGraphTokens,
+        includeOwnedSessions: true,
+        utcOffsetMinutes: -new Date().getTimezoneOffset(),
+      })
+    : undefined
   const readController = createMemoryV4ReadController({
     mode: config.memoryV4ReadMode,
     recallV3: (query, scope, options) => localMemory.recallAdaptive!(query, scope, options),
@@ -1211,6 +1242,7 @@ function memoryForRemoteRuntime() {
   writeBootLog(`Memory V4 official read controller ready: ${config.memoryV4ReadMode}, per-request V3 fallback enabled`)
   return {
     ...localMemory,
+    ...(graph ? { graph } : {}),
     async recall(query: string, scope: Parameters<typeof localMemory.recall>[1], topK = 5) {
       if (memorySettings.remotePolicy === 'disabled')
         return []
@@ -1273,10 +1305,26 @@ let runtime: ReturnType<typeof createAgentRuntime>
 
 function rebuildRuntime() {
   const llm = createOpenAILlm({ apiKey: apiConfig.apiKey, baseURL: apiConfig.baseURL })
+  const remoteMemory = memoryForRemoteRuntime()
+  if (graphMemoryEnabled && !remoteMemory?.graph)
+    writeBootLog('Graph recall adapter is unavailable; the current runtime uses the configured V3/V4 read path')
   runtime = createAgentRuntime({
     persona: { systemPrompt: currentPersona, model: apiConfig.model },
-    llm, session: sessionStore, memory: memoryForRemoteRuntime(),
+    llm, session: sessionStore, memory: remoteMemory,
     resolveMemoryScope: () => localMemoryScope,
+    ...(graphMemoryEnabled && remoteMemory?.graph ? { graphRecall: {
+      countTokens: countGraphTokens,
+      awaitCaptureWrites: () => remoteMemory.flushPendingCaptures(),
+      createRequest: (query: string) => {
+        const timestamp = Date.now()
+        return { protocolVersion: 'memory-graph/v1' as const, recallId: crypto.randomUUID(), query,
+          scope: localMemoryScope, temporal: { knownAt: timestamp, valid: { kind: 'at' as const, at: timestamp } },
+          mode: 'direct-only' as const, budget: { ...V4_GRAPH_BUDGET },
+          sharePolicies: ['allow-remote' as const],
+          sensitivities: memorySettings.remotePolicy === 'allow-private'
+            ? ['normal' as const, 'private' as const] : ['normal' as const] }
+      },
+    } } : {}),
     tools: tools.hasTools() ? tools : undefined,
     hooks,
   })

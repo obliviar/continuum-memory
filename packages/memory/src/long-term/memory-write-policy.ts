@@ -159,6 +159,15 @@ export function createLocalMemoryCandidateVerifier(
     if (durabilityScore < minimumDurabilityScore) {
       return { ...base, action: 'NOOP', status: 'rejected', reasonCodes: ['insufficient-durability'] } satisfies MemoryCandidateEvaluation
     }
+    if (candidate.metadata.requiresReview === true) {
+      return {
+        ...base,
+        action: 'QUARANTINE',
+        status: 'quarantined',
+        ambiguityFlags: unique([...ambiguityFlags, 'model-candidate-review-required']),
+        reasonCodes: ['model-candidate-requires-confirmation'],
+      } satisfies MemoryCandidateEvaluation
+    }
     if (extractionScore < minimumExtractionScore
       || evidenceScore < minimumEvidenceScore
       || policyVerificationScore < minimumVerificationScore

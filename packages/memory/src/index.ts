@@ -1,4 +1,6 @@
 export { createVectorStore } from './long-term/vector-store'
+export { createCaptureRepository } from './long-term/capture-repository'
+export type { CaptureRepository, CaptureSnapshot, CaptureSource, CaptureTask, CaptureTaskStatus, CaptureStatus } from './long-term/capture-repository'
 export type {
   MemoryPersistence,
   MemoryPersistenceDelta,

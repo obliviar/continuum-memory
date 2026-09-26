@@ -49,6 +49,29 @@ describe('memory candidate review and reprocessing', () => {
     expect(repository.snapshot().domainEvents.find(event => event.type === 'CANDIDATE_REPROCESSED')?.actor).toBe('system')
   })
 
+  it('does not promote a UIE candidate during non-shadow reprocessing', async () => {
+    const repository = createMemoryV4Repository({ now: () => 100 })
+    seedCandidate(repository)
+    repository.transaction((draft) => {
+      draft.episodes[0]!.content = '张三的父亲是李四。'
+      Object.assign(draft.candidates[0]!, {
+        predicate: 'uie.父亲', subjectId: 'entity:张三',
+        object: '张三的父亲：李四', canonicalText: '张三的父亲：李四',
+        normalizedValue: '李四', extractorVersion: 'local-uie-base-v1',
+      })
+    })
+    const result = await createMemoryCandidateReviewService(repository).reprocess({
+      scope, verifier: createLocalMemoryCandidateVerifier(),
+      inspectMatches: async () => ({ activeByMemoryKey: [] }),
+      shadow: false,
+    })
+    expect(result.quarantined).toBe(1)
+    expect(repository.snapshot().candidates[0]).toMatchObject({
+      status: 'quarantined', proposedAction: 'QUARANTINE',
+      decisionReasonCodes: ['model-candidate-requires-confirmation'],
+    })
+  })
+
   it('prevents two concurrent approvals from activating the same candidate twice', async () => {
     const repository = createMemoryV4Repository({ now: () => 100 })
     seedCandidate(repository)

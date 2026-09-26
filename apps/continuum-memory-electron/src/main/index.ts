@@ -44,6 +44,7 @@ import {
   createGraphL1Store,
   createGraphL1Writer,
   createGraphSemanticRepository,
+  createGraphRelationTaskQueue,
   createGraphPredicateRegistry,
   confirmGraphFactIdentities,
   createV4ShadowWriter,
@@ -67,6 +68,7 @@ import type {
   GraphL1Store,
   GraphL1Writer,
   GraphSemanticRepository,
+  GraphRelationTaskQueue,
   GraphExtractionRun,
   MemoryV4LifecycleService,
   MemoryCandidateReviewService,
@@ -402,12 +404,24 @@ let graphNormalizationStore: GraphNormalizationStore | undefined
 let graphL1Store: GraphL1Store | undefined
 let graphL1Writer: GraphL1Writer | undefined
 let graphSemanticRepository: GraphSemanticRepository | undefined
+let graphRelationTaskQueue: GraphRelationTaskQueue | undefined
 function syncGraphSemantic(): void {
   if (!graphSemanticRepository || !graphL1Store || !memoryV4Repository) return
   void graphSemanticRepository.syncFromClaims(graphL1Store, memoryV4Repository,
     createGraphPredicateRegistry(), localMemoryScope).then(result => {
     if (!result.ok) writeBootLog(`Graph semantic sync deferred: ${result.error.message}`)
+    else syncGraphRelationTasks()
   }).catch(error => writeBootLog(`Graph semantic sync deferred: ${errorMessage(error)}`))
+}
+function syncGraphRelationTasks(): void {
+  const bundle = graphSemanticRepository?.snapshot()
+  if (!bundle || !graphRelationTaskQueue || !memoryV4Repository) return
+  const episodes = new Map(memoryV4Repository.snapshot().episodes.map(episode => [episode.id, episode]))
+  graphRelationTaskQueue.sync(bundle.claims, bundle.predicates, localMemoryScope, claim =>
+    claim.provenance.sources.map(source => {
+      const text = episodes.get(source.episodeId)?.content ?? ''
+      return source.locator.kind === 'text-span' ? text.slice(source.locator.start, source.locator.end) : text
+    }).join('\n'))
 }
 let memoryV4ShadowTaskQueue: MemoryV4ShadowTaskQueue<MemoryV4ShadowComparisonTask> | undefined
 let memoryV4ShadowGeneration = 0
@@ -720,6 +734,7 @@ function initializeMemory(): void {
   graphL1Store = undefined
   graphL1Writer = undefined
   graphSemanticRepository = undefined
+  graphRelationTaskQueue = undefined
   memoryV4InternalFeedbackStore = undefined
   memoryV4ShadowEvaluationError = ''
   memoryV4InternalFeedbackError = ''
@@ -930,12 +945,20 @@ function initializeMemory(): void {
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
       })
       graphSemanticRepository = createGraphSemanticRepository(graphSemanticPersistence, v4Repository)
+      graphRelationTaskQueue = createGraphRelationTaskQueue(createEncryptedFilePersistence({
+        encryptedPath: join(userDataDir, 'graph-relation-tasks.enc'),
+        keyPath: join(userDataDir, 'graph-relation-tasks-key.json'),
+        protectKey: key => safeStorage.encryptString(key.toString('base64')),
+        unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+      }), { modelId: 'graph-nli', modelRevision: 'unconfigured',
+        preprocessingVersion: 'graph-relation-evidence-v1' })
       const predicateRegistry = createGraphPredicateRegistry()
       graphL1Writer = createGraphL1Writer(v4Repository, graphL1Store!, predicateRegistry, localMemoryScope, {
         syncFromClaims: async () => {
           const result = await graphSemanticRepository!.syncFromClaims(graphL1Store!, v4Repository,
             predicateRegistry, localMemoryScope)
           if (!result.ok) throw new Error(result.error.message)
+          syncGraphRelationTasks()
         },
       })
       memoryV4Lifecycle = createMemoryV4LifecycleService(v4Repository)

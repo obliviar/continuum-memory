@@ -1,4 +1,4 @@
-import type { GraphClaimRef } from '@continuum-memory/contracts'
+import type { GraphClaimRef, GraphScope } from '@continuum-memory/contracts'
 import type { GraphClaimRecord } from './types'
 
 export interface GraphRelationPairSeed {
@@ -10,10 +10,12 @@ export interface GraphRelationPairSeed {
 
 export interface GraphRelationPairInput {
   readonly source: GraphClaimRecord
+  /** Trusted caller's comparison scope. An omitted session authorizes its owner's sessions. */
+  readonly comparisonScope?: GraphScope
   readonly sourceCue: readonly GraphClaimRecord[]
   readonly structured: readonly GraphClaimRecord[]
   readonly dense: readonly GraphClaimRecord[]
-  /** Only already accepted one-hop L2 neighbors of dense seeds belong here. */
+  /** Already accepted one-hop L2 neighbors of any retrieved seed belong here. */
   readonly neighbors: readonly { readonly seed: GraphClaimRef; readonly related: GraphClaimRecord }[]
   readonly maxCandidates: number
   readonly maxDenseSeeds: number
@@ -27,13 +29,13 @@ export function selectGraphRelationPairSeeds(input: GraphRelationPairInput): rea
   if (input.source.review.status !== 'accepted' || input.source.transactionTime.closedAt !== null)
     return []
   const selected = new Map<string, GraphRelationPairSeed>()
-  const denseSeeds = new Set<string>()
+  const retrievedSeeds = new Set<string>()
+  let denseCount = 0
 
   function eligible(claim: GraphClaimRecord): boolean {
     return refKey(claim.ref) !== refKey(input.source.ref)
       && claim.review.status === 'accepted' && claim.transactionTime.closedAt === null
-      && sameScope(claim, input.source)
-      && refKey(claim.context) === refKey(input.source.context)
+      && comparableScope(claim, input.source, input.comparisonScope ?? input.source.scope)
   }
 
   function add(claim: GraphClaimRecord, route: GraphRelationPairSeed['route']): boolean {
@@ -43,6 +45,7 @@ export function selectGraphRelationPairSeeds(input: GraphRelationPairInput): rea
     if (selected.has(key))
       return false
     selected.set(key, { from: input.source.ref, to: claim.ref, route })
+    if (route !== 'relation-neighbor') retrievedSeeds.add(key)
     return true
   }
 
@@ -52,26 +55,25 @@ export function selectGraphRelationPairSeeds(input: GraphRelationPairInput): rea
   for (const claim of input.structured)
     add(claim, 'structured')
   for (const claim of input.dense) {
-    if (denseSeeds.size >= input.maxDenseSeeds)
+    if (denseCount >= input.maxDenseSeeds)
       break
     if (eligible(claim)) {
-      denseSeeds.add(refKey(claim.ref))
+      denseCount++
       add(claim, 'dense')
     }
   }
   for (const neighbor of input.neighbors) {
-    if (denseSeeds.has(refKey(neighbor.seed)))
+    if (retrievedSeeds.has(refKey(neighbor.seed)))
       add(neighbor.related, 'relation-neighbor')
   }
-  for (const claim of input.dense)
-    add(claim, 'dense')
   return [...selected.values()]
 }
 
-function sameScope(a: GraphClaimRecord, b: GraphClaimRecord): boolean {
-  return a.scope.ownerId === b.scope.ownerId
-    && a.scope.agentId === b.scope.agentId
-    && a.scope.sessionId === b.scope.sessionId
+function comparableScope(a: GraphClaimRecord, b: GraphClaimRecord, authorized: GraphScope): boolean {
+  return a.scope.ownerId === b.scope.ownerId && a.scope.agentId === b.scope.agentId
+    && a.scope.ownerId === authorized.ownerId && a.scope.agentId === authorized.agentId
+    && (authorized.sessionId === undefined || (a.scope.sessionId === undefined || a.scope.sessionId === authorized.sessionId)
+      && (b.scope.sessionId === undefined || b.scope.sessionId === authorized.sessionId))
 }
 
 function refKey(ref: { kind: string; id: string; version: number }): string {

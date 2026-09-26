@@ -109,6 +109,22 @@ export type {
   EntityMention, FactCandidate, FactContext, GraphExtractionRun,
   GraphExtractionResultStore, GraphWritePolicy, SourceSpan,
 } from './long-term/graph-extraction-result'
+export {
+  DEFAULT_GRAPH_PREDICATES,
+  createGraphPredicateRegistry,
+  normalizeGraphExtraction,
+} from './long-term/graph-identity-normalization'
+export type {
+  GraphEntityResolution, GraphNormalizedFact, GraphNormalizationResult,
+  GraphNormalizationOptions, GraphTypedValue,
+} from './long-term/graph-identity-normalization'
+export type {
+  GraphEntityRecord as GraphEntityRecordView,
+  GraphAliasDecision as GraphAliasDecisionView,
+  GraphPredicateSpec as GraphPredicateSpecView,
+} from './long-term/graph-identity-normalization'
+export { createGraphNormalizationStore } from './long-term/graph-normalization-store'
+export type { GraphNormalizationStore } from './long-term/graph-normalization-store'
 export type { MemoryCandidate } from './long-term/memory-extractor'
 export { MEMORY_NORMALIZER_VERSION, normalizeMemoryCandidate, normalizedMemoryFields } from './long-term/memory-normalizer'
 export type { NormalizedMemoryFields, NormalizedMemoryModality, NormalizedMemoryPolarity } from './long-term/memory-normalizer'

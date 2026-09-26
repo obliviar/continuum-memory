@@ -47,6 +47,7 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
       const viewId = `relation-view:${++nextViewId}:${pinnedId}`
       const cursorSecret = randomBytes(32)
       let closed = false
+      let scannedTotal = 0
 
       async function checkLive(): Promise<GraphResult<void>> {
         if (closed || !await coreViewIsLive(options, coreView.viewId))
@@ -106,8 +107,8 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
             || query.claim.version <= 0 || !['out', 'in', 'both'].includes(query.direction)
             || !Array.isArray(query.kinds))
             return error('invalid-request', 'Invalid relation neighbor query')
-          const maxScanned = Math.min(query.maxScanned, coreView.context.budget.maxEdges)
-          const fingerprint = hash(JSON.stringify([viewId, query.claim, query.direction, query.kinds, maxScanned]))
+          const maxScanned = query.maxScanned
+          const fingerprint = hash(JSON.stringify([viewId, query.claim, query.direction, query.kinds]))
           let offset = 0
           let scannedBefore = 0
           if (query.cursor !== undefined) {
@@ -123,9 +124,11 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
               && matchesValidTime(edge.validTime, coreView.context.temporal)
               && authorizedByPolicy(byRef.get(refKey(edge.relation))!, coreView.context.access))
             .sort((a, b) => a.id.localeCompare(b.id))
-          if (offset > eligible.length || scannedBefore > maxScanned)
+          if (offset > eligible.length)
             return error('invalid-request', 'Relation cursor is outside the result set')
-          const count = Math.min(query.limit, maxScanned - scannedBefore, eligible.length - offset)
+          const remaining = coreView.context.budget.maxHops === 0 ? 0 : Math.max(0, coreView.context.budget.maxEdges - scannedTotal)
+          const count = Math.min(query.limit, maxScanned, remaining, eligible.length - offset)
+          scannedTotal += count
           const items = eligible.slice(offset, offset + count)
           for (const edge of items) {
             const relation = byRef.get(refKey(edge.relation))!
@@ -142,7 +145,7 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
           const detachedItems = clone(items)
           const page: GraphPage<GraphRelationEdge> = nextOffset >= eligible.length
             ? { items: detachedItems, scanned: count, completion: 'complete' }
-            : scanned >= maxScanned
+            : scannedTotal >= coreView.context.budget.maxEdges || remaining === 0
               ? { items: detachedItems, scanned: count, completion: 'budget-exhausted', nextCursor }
               : { items: detachedItems, scanned: count, completion: 'more', nextCursor }
           return { ok: true, value: page }

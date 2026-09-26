@@ -1,4 +1,6 @@
 import type {
+  GraphRecallRequest,
+  GraphRecallResult,
   AdaptiveMemoryRecallResult,
   AgentContextPort,
   AgentForegroundStreamPort,
@@ -18,6 +20,7 @@ import type {
   ToolCall,
 } from '@continuum-memory/contracts'
 
+import { buildGraphEvidencePrompt } from '../prompt/graph-evidence-prompt'
 import { createChatHooks } from './hooks'
 import { buildSystemPrompt } from '../prompt/system-prompt'
 
@@ -38,6 +41,11 @@ export interface AgentRuntimeDeps {
   session: AgentSessionPort
   context?: AgentContextPort
   memory?: AgentMemoryPort
+  /** Explicit graph route. Never falls back to legacy recall on graph errors. */
+  graphRecall?: {
+    createRequest: (query: string, scope: MemoryScope) => GraphRecallRequest
+    countTokens: (text: string) => number
+  }
   /** Resolve a stable, isolated memory owner for a session. */
   resolveMemoryScope?: (sessionId: string) => MemoryScope
   tools?: AgentToolPort
@@ -209,7 +217,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
     // Recall long-term memories relevant to this message.
     let memories
     let adaptiveResult: AdaptiveMemoryRecallResult | undefined
-    if (deps.memory) {
+    if (deps.memory && !deps.graphRecall) {
       try {
         if (options?.memoryTopK !== undefined || !deps.memory.recallAdaptive) {
           memories = await deps.memory.recall(userMessage, memoryScope, options?.memoryTopK ?? 5)
@@ -276,7 +284,39 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
       let currentMessages = messages
 
       while (round <= maxToolRounds) {
+        // Recollect immediately before every model round, including after tool-driven deletions.
+        // Await capture so its V4 changes cannot silently invalidate the selected source version.
+        let graphResult: GraphRecallResult | undefined
+        if (deps.graphRecall) {
+          await capturePromise
+          if (!deps.memory?.graph) throw new Error('Graph memory mode is enabled but no graph adapter is available')
+          const request = deps.graphRecall.createRequest(userMessage, memoryScope)
+          const recalled = await deps.memory.graph.recall(request)
+          if (!recalled.ok) throw new Error(`Graph memory recall failed: ${recalled.error.code}`)
+          graphResult = recalled.value
+          if (graphResult.recallId !== request.recallId || graphResult.scope.ownerId !== request.scope.ownerId
+            || graphResult.scope.agentId !== request.scope.agentId || graphResult.scope.sessionId !== request.scope.sessionId)
+            throw new Error('Graph memory returned a mismatched scope or recall')
+          const graphPrompt = buildGraphEvidencePrompt(graphResult)
+          const promptCost = deps.graphRecall.countTokens(graphPrompt)
+          if (!Number.isSafeInteger(promptCost) || promptCost < 0 || promptCost > request.budget.maxEvidenceTokens)
+            throw new Error('Graph memory prompt exceeds the evidence budget')
+          currentMessages = [{ role: 'system', content: `${systemPrompt}\n${graphPrompt}` }, ...currentMessages.slice(1)]
+        }
         result = await runLLMRound(currentMessages, model, ctx)
+        if (graphResult && deps.memory?.graph) {
+          try {
+            await deps.memory.graph.reportFeedback({
+              protocolVersion: graphResult.protocolVersion, feedbackId: crypto.randomUUID(),
+              recallId: graphResult.recallId, manifestId: graphResult.manifestId, scope: graphResult.scope,
+              recordedAt: Date.now(), answerModel: model,
+              events: graphResult.evidence.claims.flatMap(claim => [
+                { kind: 'injected' as const, target: claim.ref },
+                { kind: result.text.includes(`[${claim.citation}]`) ? 'cited' as const : 'ignored' as const, target: claim.ref },
+              ]),
+            })
+          } catch { /* Feedback failure must not discard a completed answer. */ }
+        }
 
         if (result.toolCalls.length === 0)
           break

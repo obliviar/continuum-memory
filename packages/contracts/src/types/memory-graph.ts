@@ -100,7 +100,7 @@ export interface GraphMemoryCapabilities {
 
 export type GraphProtocolErrorCode = 'invalid-request' | 'unsupported-capability'
   | 'scope-denied' | 'version-mismatch' | 'source-unavailable' | 'unsupported-logic'
-  | 'stale-projection' | 'view-closed' | 'not-ready'
+  | 'stale-projection' | 'view-closed' | 'not-ready' | 'budget-exhausted'
 
 export interface GraphProtocolError {
   readonly code: GraphProtocolErrorCode

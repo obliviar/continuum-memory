@@ -87,7 +87,9 @@ export interface GraphReadView {
   resolveRules: (refs: readonly GraphRuleRef[]) => Promise<GraphResult<readonly GraphRuleRecord[]>>
   neighbors: (query: GraphNeighborQuery) => Promise<GraphResult<GraphPage<GraphEdge>>>
   matchRuleBody: (query: GraphBindingQuery) => Promise<GraphResult<GraphPage<GraphBindingCandidate>>>
-  /** Complete exact-key conflict lookup; budget exhaustion must prevent proof validation. */
+  /** Optional explicit policy; absence does not certify conflict completeness. */
+  readonly conflictPolicy?: 'exact-opposite-polarity-v1'
+  /** Policy-scoped lookup; not sufficient on its own to validate proofs. */
   findConflicts: (ref: GraphClaimRef, page: GraphPageRequest) => Promise<GraphResult<GraphPage<GraphClaimRecord>>>
   close: () => Promise<void>
 }

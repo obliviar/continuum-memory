@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import type { MemoryRecallOptions } from '@continuum-memory/contracts'
+import type { Embedder, MemoryRecallOptions } from '@continuum-memory/contracts'
 import { createVectorStore } from '../long-term/vector-store'
 import { createMemoryEmbeddingIndex } from '../long-term/embedding-index'
 import { runMemoryStage3RetrievalEval } from './stage3-retrieval-eval'
@@ -137,14 +137,18 @@ async function runComparison(fixture: FixtureData, bgeExtractor: BgeExtractor, l
 
   const bgeScope = { ownerId: `bge-compare-${label}-bge`, agentId: 'deskpet' }
   const bgeEmbedIndex = createMemoryEmbeddingIndex()
+  const bgeEmbedder: Embedder = {
+    model: BGE_FINGERPRINT,
+    dimensions: BGE_EXPECTED_DIMENSION,
+    embed: (text: string) => embedWithBge(bgeExtractor, text),
+  }
   const bgeStore = createVectorStore({
-    embeddingModel: BGE_FINGERPRINT,
-    embedder: async (text: string) => embedWithBge(bgeExtractor, text),
+    embedder: bgeEmbedder,
     embeddingIndex: bgeEmbedIndex,
     foregroundEmbeddingUpgrade: false,
   })
   await populateStore(bgeStore, bgeScope, fixture.facts)
-  await bgeStore.prepareEmbeddings(BGE_FINGERPRINT, async (text: string) => embedWithBge(bgeExtractor, text), bgeScope, { batchSize: 8 })
+  await bgeStore.prepareEmbeddings(bgeEmbedder.model, bgeEmbedder.embed, bgeScope, { batchSize: 8 })
 
   const bgeReport = await runMemoryStage3RetrievalEval(
     fixture.cases,

@@ -1,4 +1,6 @@
 export { createVectorStore } from './long-term/vector-store'
+export { createCaptureRepository } from './long-term/capture-repository'
+export type { CaptureRepository, CaptureSnapshot, CaptureSource, CaptureTask, CaptureTaskStatus, CaptureStatus } from './long-term/capture-repository'
 export type {
   MemoryPersistence,
   MemoryPersistenceDelta,
@@ -44,7 +46,13 @@ export type {
 } from './long-term/model-artifact-integrity'
 export { createEncryptedFilePersistence } from './long-term/encrypted-persistence'
 export type { EncryptedFilePersistenceOptions, EncryptedMemoryPersistence } from './long-term/encrypted-persistence'
-export { createLocalEmbedding, LOCAL_EMBEDDING_MODEL } from './long-term/local-embedding'
+export {
+  createLocalEmbedding,
+  createLocalHashEmbedding,
+  LOCAL_EMBEDDING_MODEL,
+  LOCAL_HASH_EMBEDDING_MODEL,
+} from './long-term/local-embedding'
+export type { Embedder } from '@continuum-memory/contracts'
 export {
   MEMORY_SPARSE_VECTOR_CANDIDATE_INDEX_VERSION,
   createSparseVectorCandidateIndex,
@@ -219,3 +227,4 @@ export type {
 // V4 is additive during stage two. The desktop runtime continues using the
 // stable V3 port until migration, rollback and quality gates pass.
 export * from './v4'
+export * from './graph-core'

@@ -32,3 +32,6 @@ export type { AgentVoicePort, SpeechToTextPort, TextToSpeechPort } from './ports
 export type { AgentToolPort } from './ports/tool-port'
 export type { AgentForegroundStreamPort } from './ports/stream-port'
 export type { ChatHookRegistry, HookUnsubscribe } from './hooks/hook-types'
+export type { Embedder } from './ports/embedder-port'
+export * from './types/memory-graph'
+export type { AgentGraphMemoryPort } from './ports/memory-graph-port'

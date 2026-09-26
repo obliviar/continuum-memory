@@ -35,6 +35,12 @@
         "to": "config.example.json"
       }
     ],
+    "extraResources": [
+      {
+        "from": "resources/uie_extract.py",
+        "to": "uie_extract.py"
+      }
+    ],
     "win": {
       "target": "zip",
       "icon": null,
@@ -43,6 +49,7 @@
   },
   "dependencies": {
     "@continuum-memory/core": "workspace:*",
+    "@continuum-memory/embedding-onnx": "workspace:*",
     "@continuum-memory/llm-openai": "workspace:*",
     "@continuum-memory/memory": "workspace:*",
     "@continuum-memory/tools": "workspace:*",

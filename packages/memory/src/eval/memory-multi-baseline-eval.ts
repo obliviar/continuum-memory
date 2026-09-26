@@ -6,7 +6,7 @@ import type {
 } from '@continuum-memory/contracts'
 import { createMemoryBm25Index } from '../long-term/bm25-index'
 import { createDenseVectorCandidateIndex } from '../long-term/dense-vector-candidate-index'
-import { createLocalEmbedding, LOCAL_EMBEDDING_MODEL } from '../long-term/local-embedding'
+import { createLocalHashEmbedding, LOCAL_HASH_EMBEDDING_MODEL } from '../long-term/local-embedding'
 import { planMemoryQuery, type MemoryQueryPlan } from '../long-term/memory-query-planner'
 import {
   createVectorStore,
@@ -218,8 +218,8 @@ function prepareCorpus(
       sharePolicy: 'allow-remote',
       sensitivity: 'normal',
       scope: { ...scope },
-      embedding: createLocalEmbedding(fact.content),
-      embeddingModel: LOCAL_EMBEDDING_MODEL,
+      embedding: createLocalHashEmbedding(fact.content),
+      embeddingModel: LOCAL_HASH_EMBEDDING_MODEL,
       createdAt,
       updatedAt: createdAt,
     }
@@ -242,8 +242,8 @@ function prepareCorpus(
       sharePolicy: 'allow-remote',
       sensitivity: 'normal',
       scope: { ...scope },
-      embedding: createLocalEmbedding(content),
-      embeddingModel: LOCAL_EMBEDDING_MODEL,
+      embedding: createLocalHashEmbedding(content),
+      embeddingModel: LOCAL_HASH_EMBEDDING_MODEL,
       createdAt,
       updatedAt: createdAt,
     })
@@ -306,7 +306,7 @@ async function prepareRetrievers(
       scope: record.scope,
       state: record.status === 'active' ? 'active' : 'historical',
     })
-    dense.upsert(record.id, createLocalEmbedding(record.content))
+    dense.upsert(record.id, createLocalHashEmbedding(record.content))
   }
 
   const repository = createMemoryV4Repository({ now })
@@ -341,7 +341,7 @@ async function prepareRetrievers(
       const plan = planMemoryQuery(query, recallOptions)
       if (!plan.requiresMemory)
         return []
-      return dense.search(createLocalEmbedding(query), {
+      return dense.search(createLocalHashEmbedding(query), {
         limit: topK,
         minScore: 0.2,
         allow: id => temporalEligible(recordsById.get(id), plan, now()),

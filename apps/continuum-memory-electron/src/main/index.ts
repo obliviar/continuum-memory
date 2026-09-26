@@ -8,6 +8,9 @@ import { createAgentRuntime, createSessionManager, createChatHooks } from '@cont
 import { createOpenAILlm } from '@continuum-memory/llm-openai'
 import {
   createEncryptedFilePersistence,
+  createEncryptedGraphL1Persistence,
+  createV4GraphMemory,
+  V4_GRAPH_BUDGET,
   createEncryptedV4Persistence,
   createIdleConsolidationRunner,
   createJournaledV4Persistence,
@@ -27,6 +30,7 @@ import {
   createMemoryPurgeConfirmationGate,
   createMemoryV4Repository,
   createMemoryWriter,
+  createCaptureRepository,
   createSmartMemoryExtractor,
   createV4ShadowWriter,
   createVectorStore,
@@ -35,7 +39,7 @@ import {
   freezeMemoryV4InternalFeedbackDataset,
   inferMemoryPrivacy,
   isSafeMemoryContent,
-  LOCAL_EMBEDDING_MODEL,
+  LOCAL_HASH_EMBEDDING_MODEL,
   migrateV3SourceIntoV4,
 } from '@continuum-memory/memory'
 import type {
@@ -59,6 +63,7 @@ import type {
 import { createToolRegistry, webSearchTool, fileReadTool, httpFetchTool } from '@continuum-memory/tools'
 
 import { createPersistence } from './persist'
+import { withGraphSourceInvalidation } from './graph-source-invalidation'
 import { createSettingsManager } from './settings'
 import { setupVoiceIPC } from './voice'
 import { createImageMemoryService, isExplicitImageMemoryRequest } from './image-memory'
@@ -95,6 +100,7 @@ import {
   type MemoryV4ReadController,
 } from './memory-v4-read-controller'
 import { createMemoryV4RuntimeObservability } from './memory-v4-runtime-observability'
+import { createLocalUieExtractor, uieReviewCandidates } from './uie-extractor'
 
 // Some Windows systems cannot initialize Electron's GPU subprocess. Disable
 // hardware acceleration before app readiness so the packaged app still starts.
@@ -162,7 +168,9 @@ const config = {
   ),
   embeddingApiKey: environmentValue('CONTINUUM_MEMORY_EMBEDDING_API_KEY', 'DESKPET_EMBEDDING_API_KEY') || fileConfig.embeddingApiKey || process.env.CONTINUUM_MEMORY_API_KEY || process.env.OPENAI_API_KEY || fileConfig.apiKey || '',
   embeddingBaseURL: environmentValue('CONTINUUM_MEMORY_EMBEDDING_BASE_URL', 'DESKPET_EMBEDDING_BASE_URL') || fileConfig.embeddingBaseURL || process.env.CONTINUUM_MEMORY_BASE_URL || process.env.OPENAI_BASE_URL || fileConfig.baseURL || undefined,
-  embeddingModel: environmentValue('CONTINUUM_MEMORY_EMBEDDING_MODEL', 'DESKPET_EMBEDDING_MODEL') || fileConfig.embeddingModel || LOCAL_EMBEDDING_MODEL,
+  embeddingModel: environmentValue('CONTINUUM_MEMORY_EMBEDDING_MODEL', 'DESKPET_EMBEDDING_MODEL') || fileConfig.embeddingModel || LOCAL_HASH_EMBEDDING_MODEL,
+  uiePythonPath: process.env.CONTINUUM_MEMORY_UIE_PYTHON || fileConfig.uiePythonPath || 'D:\\Models\\UIE-mini\\.venv-paddle\\Scripts\\python.exe',
+  uieModelHome: process.env.CONTINUUM_MEMORY_UIE_MODEL_HOME || fileConfig.uieModelHome || 'D:\\Models\\UIE-mini',
 }
 
 // ── Persistence ─────────────────────────────────────────
@@ -295,7 +303,7 @@ function saveSessions() {
 }
 
 // ── Scheme A long-term memory ───────────────────────────
-type MemoryExtractionMode = 'rules' | 'smart'
+type MemoryExtractionMode = 'rules' | 'smart' | 'uie'
 type MemoryRemotePolicy = 'normal-only' | 'allow-private' | 'disabled'
 const memoryV4InternalReviewEnvironmentOverride
   = typeof memoryV4InternalReviewEnvironment === 'string'
@@ -321,7 +329,7 @@ const defaultMemorySettings: MemorySettings = {
 
 function normalizeMemorySettings(value: Partial<MemorySettings> | undefined): MemorySettings {
   return {
-    extractionMode: value?.extractionMode === 'smart' ? 'smart' : 'rules',
+    extractionMode: value?.extractionMode === 'smart' || value?.extractionMode === 'uie' ? value.extractionMode : 'rules',
     semanticEnabled: value?.semanticEnabled === true,
     imageMemoryEnabled: value?.imageMemoryEnabled !== false,
     remotePolicy: value?.remotePolicy === 'allow-private' || value?.remotePolicy === 'disabled'
@@ -345,6 +353,10 @@ let memoryV4SemanticBackgroundIndex: MemoryV4SemanticBackgroundIndex | undefined
 let memoryInitializationError = ''
 let memoryLegacyMigrated = false
 let memoryV4Shadow: V4ShadowWriter | undefined
+let graphL1Persistence: ReturnType<typeof createEncryptedGraphL1Persistence> | undefined
+const graphMemoryEnabled = process.env.CONTINUUM_GRAPH_MEMORY === '1'
+// Conservative byte-BPE token upper bound; final escaped graph prompt is checked again by core.
+const countGraphTokens = (text: string) => Buffer.byteLength(text, 'utf8')
 let memoryV4Repository: MemoryV4Repository | undefined
 let memoryV4Lifecycle: MemoryV4LifecycleService | undefined
 let memoryCandidateReview: MemoryCandidateReviewService | undefined
@@ -440,6 +452,13 @@ const imageMemory = createImageMemoryService(join(userDataDir, 'models', 'ocr'),
   imageMemoryProgress = progress
   mainWindow?.webContents.send('memory:ocr-progress', progress)
 })
+const localUie = createLocalUieExtractor({
+  pythonPath: config.uiePythonPath,
+  modelHome: config.uieModelHome,
+  scriptPath: app.isPackaged
+    ? join(process.resourcesPath, 'uie_extract.py')
+    : join(app.getAppPath(), 'resources', 'uie_extract.py'),
+})
 
 function updateSemanticModelProgress(progress: SemanticModelProgress): void {
   semanticModelProgress = progress
@@ -491,21 +510,45 @@ function saveMemorySettings(): void {
 
 function mergeMemoryCandidates(candidates: MemoryCandidate[]): MemoryCandidate[] {
   const unique = new Map<string, MemoryCandidate>()
-  for (const candidate of candidates)
-    unique.set(candidate.content.toLocaleLowerCase(), candidate)
+  for (const candidate of candidates) {
+    const key = candidate.content.toLocaleLowerCase()
+    if (!unique.has(key))
+      unique.set(key, candidate)
+  }
   return [...unique.values()].slice(0, 8)
 }
 
 function createConfiguredMemoryExtractor(): MemoryExtractor {
+  const captureSettings = { ...memorySettings }
+  const captureApiConfig = { ...apiConfig }
   const smartExtractor = createSmartMemoryExtractor({
-    getConfig: () => ({ apiKey: apiConfig.apiKey, baseURL: apiConfig.baseURL, model: apiConfig.model }),
+    getConfig: () => captureApiConfig,
     fallback: extractMemoryCandidates,
   })
   return async (turn) => {
-    const candidates = memorySettings.extractionMode === 'smart' && memorySettings.remotePolicy !== 'disabled'
-      ? await smartExtractor(turn)
-      : await extractMemoryCandidates(turn)
-    if (!memorySettings.imageMemoryEnabled
+    let candidates: MemoryCandidate[]
+    if (captureSettings.extractionMode === 'uie' && memoryV4Shadow && memoryCandidateReview) {
+      const local = await extractMemoryCandidates(turn)
+      try {
+        const structured = await localUie.extract(turn.userMessage)
+        const existing = new Set(local.map(candidate => candidate.content.toLocaleLowerCase()))
+        candidates = [
+          ...local,
+          ...uieReviewCandidates(turn.userMessage, structured)
+            .filter(candidate => !existing.has(candidate.content.toLocaleLowerCase())),
+        ]
+      }
+      catch (error) {
+        writeBootLog(`Local UIE-base extraction failed, using rules: ${errorMessage(error)}`)
+        candidates = local
+      }
+    }
+    else {
+      candidates = captureSettings.extractionMode === 'smart' && captureSettings.remotePolicy !== 'disabled'
+        ? await smartExtractor(turn)
+        : await extractMemoryCandidates(turn)
+    }
+    if (!captureSettings.imageMemoryEnabled
       || !turn.attachments?.length
       || !isExplicitImageMemoryRequest(turn.userMessage))
       return candidates
@@ -650,7 +693,7 @@ function initializeMemory(): void {
     memoryEmbeddingIndex = embeddingIndex
     const probeStore = createVectorStore({
       persistence,
-      embeddingModel: LOCAL_EMBEDDING_MODEL,
+      embeddingModel: LOCAL_HASH_EMBEDDING_MODEL,
       ...(embeddingIndex ? { embeddingIndex } : {}),
     })
     const semanticRequested = memorySettings.semanticEnabled
@@ -677,8 +720,8 @@ function initializeMemory(): void {
       persistence,
       embeddingModel: semanticActive
         ? SEMANTIC_MEMORY_FINGERPRINT
-        : LOCAL_EMBEDDING_MODEL,
-      ...(semanticActive ? { embedder: semanticMemory.embed } : {}),
+        : LOCAL_HASH_EMBEDDING_MODEL,
+      ...(semanticActive ? { embedder: semanticMemory } : {}),
       ...(embeddingIndex ? { embeddingIndex } : {}),
       foregroundEmbeddingUpgrade: !semanticActive,
       onCommittedChange: commit => memoryV4Shadow?.enqueueCommit(commit),
@@ -694,6 +737,21 @@ function initializeMemory(): void {
       })
     memory = createMemoryWriter({
       store,
+      captureRepository: createCaptureRepository({
+        persistence: createEncryptedFilePersistence({
+          encryptedPath: join(userDataDir, 'memory-captures.enc'),
+          keyPath: join(userDataDir, 'memory-captures.key'),
+          protectKey: key => safeStorage.encryptString(key.toString('base64')),
+          unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+        }),
+      }),
+      captureProcessorVersion: `capture-v1:${createHmac('sha256', 'capture-profile-v1').update(JSON.stringify({
+        mode: memorySettings.extractionMode,
+        remotePolicy: memorySettings.remotePolicy,
+        imageMemoryEnabled: memorySettings.imageMemoryEnabled,
+        ...(memorySettings.extractionMode === 'uie' ? { uieModelHome: config.uieModelHome } : {}),
+        ...(memorySettings.extractionMode === 'smart' ? { model: apiConfig.model, baseURL: apiConfig.baseURL } : {}),
+      })).digest('hex')}`,
       extractor: createConfiguredMemoryExtractor(),
       onCaptured: (capture) => {
         memoryV4Shadow?.enqueueCapture(capture)
@@ -731,6 +789,15 @@ function initializeMemory(): void {
       onBackgroundCaptureError: error => writeBootLog(`Memory background capture failed: ${errorMessage(error)}`),
     })
     memoryLegacyMigrated = persistence.wasLegacyMigrated()
+    const initializedWriter = memory
+    // Run only after synchronous V4 setup has finished, and never on an obsolete writer.
+    queueMicrotask(() => {
+      if (memory === initializedWriter) {
+        void initializedWriter.resumePendingCaptures().catch(error => {
+          writeBootLog(`Memory capture recovery failed: ${errorMessage(error)}`)
+        })
+      }
+    })
     writeBootLog(`long-term memory initialized (${semanticActive ? 'semantic' : 'local-hash'})`)
     if (!config.memoryV4ShadowEnabled) {
       writeBootLog('Memory V4 shadow disabled by kill switch; V3 remains authoritative')
@@ -748,7 +815,17 @@ function initializeMemory(): void {
         checkpoint: v4Checkpoint,
         journalPath: memoryV4JournalPath,
       })
-      const v4Repository = createMemoryV4Repository({ persistence: v4Persistence })
+      graphL1Persistence = createEncryptedGraphL1Persistence({
+        encryptedPath: join(userDataDir, 'memory-graph-l1.enc'),
+        keyPath: join(userDataDir, 'memory-graph-l1.key'),
+        protectKey: key => safeStorage.encryptString(key.toString('base64')),
+        unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+      })
+      const l1Persistence = graphL1Persistence
+      const v4Repository = createMemoryV4Repository({ persistence: withGraphSourceInvalidation(v4Persistence, () => {
+        // Covers lifecycle purge, shadow writes and updates outside the Agent port, even when graph mode is off.
+        if (existsSync(l1Persistence.storagePath!)) l1Persistence.save('{}')
+      }) })
       memoryV4Repository = v4Repository
       memoryV4Lifecycle = createMemoryV4LifecycleService(v4Repository)
       memoryCandidateReview = createMemoryCandidateReviewService(v4Repository)
@@ -1091,6 +1168,18 @@ function memoryForRemoteRuntime() {
     return undefined
   const localMemory = memory
   const worker = memoryV4ShadowWorkerClient
+  const graph = graphMemoryEnabled && memoryV4Repository && graphL1Persistence
+    ? createV4GraphMemory({
+        repository: memoryV4Repository, persistence: graphL1Persistence,
+        authorizeScope: scope => scope.ownerId === localMemoryScope.ownerId
+          && scope.agentId === localMemoryScope.agentId && scope.sessionId === undefined,
+        canRead: record => memorySettings.remotePolicy !== 'disabled' && record.sharePolicy === 'allow-remote'
+          && (record.sensitivity === 'normal'
+            || (record.sensitivity === 'private' && memorySettings.remotePolicy === 'allow-private')),
+        countTokens: countGraphTokens,
+        utcOffsetMinutes: -new Date().getTimezoneOffset(),
+      })
+    : undefined
   const readController = createMemoryV4ReadController({
     mode: config.memoryV4ReadMode,
     recallV3: (query, scope, options) => localMemory.recallAdaptive!(query, scope, options),
@@ -1152,6 +1241,7 @@ function memoryForRemoteRuntime() {
   writeBootLog(`Memory V4 official read controller ready: ${config.memoryV4ReadMode}, per-request V3 fallback enabled`)
   return {
     ...localMemory,
+    ...(graph ? { graph } : {}),
     async recall(query: string, scope: Parameters<typeof localMemory.recall>[1], topK = 5) {
       if (memorySettings.remotePolicy === 'disabled')
         return []
@@ -1218,6 +1308,18 @@ function rebuildRuntime() {
     persona: { systemPrompt: currentPersona, model: apiConfig.model },
     llm, session: sessionStore, memory: memoryForRemoteRuntime(),
     resolveMemoryScope: () => localMemoryScope,
+    ...(graphMemoryEnabled ? { graphRecall: {
+      countTokens: countGraphTokens,
+      createRequest: (query: string) => {
+        const timestamp = Date.now()
+        return { protocolVersion: 'memory-graph/v1' as const, recallId: crypto.randomUUID(), query,
+          scope: localMemoryScope, temporal: { knownAt: timestamp, valid: { kind: 'at' as const, at: timestamp } },
+          mode: 'direct-only' as const, budget: { ...V4_GRAPH_BUDGET },
+          sharePolicies: ['allow-remote' as const],
+          sensitivities: memorySettings.remotePolicy === 'allow-private'
+            ? ['normal' as const, 'private' as const] : ['normal' as const] }
+      },
+    } } : {}),
     tools: tools.hasTools() ? tools : undefined,
     hooks,
   })
@@ -1432,7 +1534,7 @@ function setupIPC() {
     model: apiConfig.model,
   }))
 
-  ipcMain.handle('api:set', (_event, input: { apiKey?: string; baseURL?: string; model?: string }) => {
+  ipcMain.handle('api:set', async (_event, input: { apiKey?: string; baseURL?: string; model?: string }) => {
     const apiKey = input.apiKey?.trim() || apiConfig.apiKey
     const baseURL = input.baseURL?.trim() || ''
     const model = input.model?.trim() || ''
@@ -1452,8 +1554,10 @@ function setupIPC() {
     if (!model)
       return { ok: false, error: '请输入模型名称。' }
 
+    await memory?.flushPendingCaptures()
     apiConfig = { apiKey, baseURL: baseURL.replace(/\/$/, ''), model }
     saveApiConfig()
+    initializeMemory()
     rebuildRuntime()
     return { ok: true, configured: true }
   })
@@ -1476,6 +1580,7 @@ function setupIPC() {
   })
 
   ipcMain.handle('memory:status', async () => ({
+    capture: memory?.captureStatus(),
     enabled: !!memory,
     count: memory ? await memory.count(localMemoryScope) : 0,
     storagePath: memoryStoragePath,
@@ -1537,6 +1642,7 @@ function setupIPC() {
   }))
 
   ipcMain.handle('memory:list', async (_event, limit = 200) => ({
+    capture: memory?.captureStatus(),
     ok: true,
     enabled: !!memory,
     count: memory ? await memory.count(localMemoryScope) : 0,
@@ -1692,6 +1798,17 @@ function setupIPC() {
     return { ok: true, pendingCaptureSegments: memory.pendingCaptureCount() }
   })
 
+  ipcMain.handle('memory:capture-retry', async () => {
+    if (!memory) return { ok: false, error: '长期记忆已关闭。' }
+    try {
+      await memory.resumePendingCaptures(true)
+      return { ok: true, capture: memory.captureStatus() }
+    }
+    catch (error) {
+      return { ok: false, error: errorMessage(error) }
+    }
+  })
+
   ipcMain.handle('memory:add', async (_event, content: string) => {
     if (!memory)
       return { ok: false, error: '长期记忆已关闭。' }
@@ -1790,6 +1907,12 @@ function setupIPC() {
     if (nextSettings.semanticEnabled && !semanticMemory.isInstalled()) {
       return { ok: false, error: '请先下载本地语义模型。', settings: memorySettings }
     }
+    if (nextSettings.extractionMode === 'uie' && !localUie.isReady()) {
+      return { ok: false, error: '本地 UIE-base 模型或 Python 环境不可用，请检查 config.json 中的 uiePythonPath 和 uieModelHome。', settings: memorySettings }
+    }
+    if (nextSettings.extractionMode === 'uie' && (!memoryV4Shadow || !memoryCandidateReview)) {
+      return { ok: false, error: 'UIE-base 候选需要 V4 影子存储与审核服务；当前不可用。', settings: memorySettings }
+    }
     if (nextSettings.semanticEnabled && !semanticMemory.isVerified() && !await semanticMemory.verify()) {
       return {
         ok: false,
@@ -1804,6 +1927,17 @@ function setupIPC() {
     initializeMemory()
     rebuildRuntime()
     return { ok: true, settings: memorySettings }
+  })
+
+  ipcMain.handle('memory:uie-extract', async (_event, text: unknown) => {
+    if (typeof text !== 'string' || !text.trim() || text.length > 4000)
+      return { ok: false, error: '请输入不超过 4000 字的文本。' }
+    try {
+      return { ok: true, extraction: await localUie.extract(text) }
+    }
+    catch (error) {
+      return { ok: false, error: `本地 UIE-base 提取失败：${errorMessage(error)}` }
+    }
   })
 
   ipcMain.handle('memory:model-install', async () => {

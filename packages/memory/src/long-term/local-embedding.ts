@@ -1,5 +1,9 @@
-/** Privacy-preserving local embedding used by default by the desktop app. */
-export const LOCAL_EMBEDDING_MODEL = 'local-hash-v3'
+/** Privacy-preserving hash embedding used for tests and offline fallback. */
+export const LOCAL_HASH_EMBEDDING_MODEL = 'local-hash-v3'
+
+/** @deprecated Use LOCAL_HASH_EMBEDDING_MODEL. */
+export const LOCAL_EMBEDDING_MODEL = LOCAL_HASH_EMBEDDING_MODEL
+
 export const LEGACY_LOCAL_EMBEDDING_MODELS = new Set(['local-hash-v1', 'local-hash-v2'])
 
 const DEFAULT_DIMENSIONS = 384
@@ -63,7 +67,7 @@ export function sharesLocalSemanticConcept(text: string, concepts: ReadonlySet<s
  * unigrams/bigrams and weighted semantic field aliases. Version 3 improves
  * paraphrase recall without sending personal text to a remote service.
  */
-export function createLocalEmbedding(text: string, dimensions = DEFAULT_DIMENSIONS): number[] {
+export function createLocalHashEmbedding(text: string, dimensions = DEFAULT_DIMENSIONS): number[] {
   const normalized = text.normalize('NFKC').toLocaleLowerCase()
   const tokens: string[] = []
 
@@ -114,3 +118,6 @@ function fnv1a(value: string): number {
   }
   return hash >>> 0
 }
+
+/** @deprecated Use createLocalHashEmbedding. */
+export const createLocalEmbedding = createLocalHashEmbedding

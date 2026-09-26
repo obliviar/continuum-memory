@@ -1,6 +1,7 @@
 import type {
   AdaptiveMemoryRecallOptions,
   AdaptiveMemoryRecallResult,
+  Embedder,
   MemoryEvidencePackEntry,
   MemoryEvidenceSourceType,
   MemoryFragment,
@@ -17,10 +18,10 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import { dirname } from 'node:path'
 import OpenAI from 'openai'
 import {
-  createLocalEmbedding,
+  createLocalHashEmbedding,
   LEGACY_LOCAL_EMBEDDING_MODELS,
   localSemanticConcepts,
-  LOCAL_EMBEDDING_MODEL,
+  LOCAL_HASH_EMBEDDING_MODEL,
 } from './local-embedding'
 import { isBroadPersonalMemoryQuery, selectAdaptiveRecall } from './adaptive-recall'
 import {
@@ -62,6 +63,7 @@ export interface MemoryPersistenceDelta {
 export interface VectorStoreOptions {
   apiKey?: string
   baseURL?: string
+  /** Explicit model for remote embeddings; local embedders supply their own fingerprint. */
   embeddingModel?: string
   storagePath?: string
   persistence?: MemoryPersistence
@@ -69,7 +71,8 @@ export interface VectorStoreOptions {
   minSemanticScore?: number
   minLexicalScore?: number
   maxMemories?: number
-  embedder?: (text: string) => Promise<number[]>
+  /** Local embedding implementation. Omit it to use hash fallback or a configured remote model. */
+  embedder?: Embedder
   /** Rebuildable encrypted side index used to prepare/switch embedding models without mixing vector spaces. */
   embeddingIndex?: MemoryEmbeddingIndex
   /** Legacy behavior is kept by default. Desktop semantic mode disables foreground bulk upgrades. */
@@ -78,11 +81,7 @@ export interface VectorStoreOptions {
   retrievalFusion?: 'rrf-v1' | 'weighted-linear-v1'
   /** Versioned threshold model fitted on a calibration split. */
   abstentionCalibration?: RecallAbstentionCalibrationModel
-  /**
-   * Optional post-commit observer used by additive shadow stores. It runs only
-   * after the V3 persistence operation succeeds. Observer failures are
-   * isolated and never roll back or reject the working V3 operation.
-   */
+  /** Runs only after the V3 persistence operation succeeds. Observer failures never roll it back. */
   onCommittedChange?: (commit: V3MemoryCommit) => void
   onCommitObserverError?: (error: unknown, commit: V3MemoryCommit) => void
 }
@@ -191,13 +190,17 @@ export interface MemoryEmbeddingPreparationOptions {
 }
 
 export function createVectorStore(options: VectorStoreOptions = {}) {
-  const configuredEmbeddingModel = options.embeddingModel ?? LOCAL_EMBEDDING_MODEL
+  assertEmbedder(options.embedder, options.embeddingModel)
+  const configuredEmbeddingModel = options.embedder?.model
+    ?? options.embeddingModel
+    ?? LOCAL_HASH_EMBEDDING_MODEL
   // Treat old local-hash configuration values as aliases for the current local
   // model. This rebuilds persisted vectors lazily and prevents a legacy config
   // from being mistaken for a remote OpenAI-compatible embedding model.
   const embeddingModel = LEGACY_LOCAL_EMBEDDING_MODELS.has(configuredEmbeddingModel)
-    ? LOCAL_EMBEDDING_MODEL
+    ? LOCAL_HASH_EMBEDDING_MODEL
     : configuredEmbeddingModel
+  const isHashModel = embeddingModel === LOCAL_HASH_EMBEDDING_MODEL
   const {
     apiKey,
     baseURL,
@@ -211,12 +214,12 @@ export function createVectorStore(options: VectorStoreOptions = {}) {
     onCommittedChange,
     onCommitObserverError,
   } = options
-  const minScore = options.minScore ?? (embeddingModel === LOCAL_EMBEDDING_MODEL ? 0.12 : 0.3)
-  const minSemanticScore = options.minSemanticScore ?? (embeddingModel === LOCAL_EMBEDDING_MODEL ? 0.2 : 0.32)
+  const minScore = options.minScore ?? (isHashModel ? 0.12 : 0.7)
+  const minSemanticScore = options.minSemanticScore ?? (isHashModel ? 0.2 : 0.75)
   const minLexicalScore = options.minLexicalScore ?? 0.08
 
   const persistence = options.persistence ?? createFilePersistence(storagePath)
-  const remoteClient = !embedder && embeddingModel !== LOCAL_EMBEDDING_MODEL
+  const remoteClient = !embedder && !isHashModel
     ? new OpenAI({ apiKey: requireApiKey(apiKey), baseURL })
     : undefined
   const loaded = loadIndex(persistence)
@@ -229,11 +232,16 @@ export function createVectorStore(options: VectorStoreOptions = {}) {
     persistIndex(persistence, index)
 
   async function embed(text: string): Promise<number[]> {
-    if (embedder)
-      return embedder(text)
-    if (embeddingModel === LOCAL_EMBEDDING_MODEL)
-      return createLocalEmbedding(text)
-    const res = await remoteClient!.embeddings.create({ model: embeddingModel, input: text })
+    if (embedder) {
+      const result = await embedder.embed(text)
+      assertEmbeddingVector(result, embedder)
+      return result
+    }
+    if (isHashModel)
+      return createLocalHashEmbedding(text)
+    if (!remoteClient)
+      throw new Error('Remote embedding client is not configured')
+    const res = await remoteClient.embeddings.create({ model: embeddingModel, input: text })
     const result = res.data[0]?.embedding ?? []
     if (result.length === 0)
       throw new Error('Embedding provider returned an empty vector')
@@ -247,7 +255,7 @@ export function createVectorStore(options: VectorStoreOptions = {}) {
   }
 
   function cacheCanonicalEmbedding(item: IndexedMemory): void {
-    if (!embeddingIndex || item.embedding.length === 0 || item.embeddingModel === LOCAL_EMBEDDING_MODEL)
+    if (!embeddingIndex || item.embedding.length === 0 || item.embeddingModel === LOCAL_HASH_EMBEDDING_MODEL)
       return
     embeddingIndex.putBatch([{
       memoryId: item.id,
@@ -352,7 +360,7 @@ export function createVectorStore(options: VectorStoreOptions = {}) {
     }
 
     const queryEmbedding = await embed(query)
-    const queryConcepts = embeddingModel === LOCAL_EMBEDDING_MODEL
+    const queryConcepts = isHashModel
       ? new Set(localSemanticConcepts(query))
       : undefined
     const hasQueryConcepts = (queryConcepts?.size ?? 0) > 0
@@ -447,11 +455,12 @@ export function createVectorStore(options: VectorStoreOptions = {}) {
         const lexicalRelevant = lexical >= minLexicalScore
           && strongLexicalOverlap
           && (!hasQueryConcepts || sharedConcept)
-        const semanticRelevant = semantic >= minSemanticScore
-          && (embeddingModel !== LOCAL_EMBEDDING_MODEL
-            || sharedConcept
-            || (!hasQueryConcepts
-              && (strongLexicalOverlap || semantic >= Math.max(0.34, minSemanticScore))))
+        const semanticRelevant = isHashModel
+          ? semantic >= minSemanticScore
+            && (sharedConcept
+              || (!hasQueryConcepts
+                && (strongLexicalOverlap || semantic >= Math.max(0.34, minSemanticScore))))
+          : semantic >= minSemanticScore
         // A user can explicitly ask for a broad account of what the agent
         // remembers without naming any one semantic field. Only this tightly
         // scoped personal-memory intent may enter on quality priors alone.
@@ -613,6 +622,11 @@ export function createVectorStore(options: VectorStoreOptions = {}) {
         ...(exact ? { exact: cloneCommittedRecords([exact])[0] } : {}),
         activeByMemoryKey: cloneCommittedRecords(activeByMemoryKey),
       }
+    },
+    get(id: string, scope: MemoryScope): MemoryFragment | undefined {
+      const record = secondary.byId.get(id)
+      return record && matchesScope(record.scope, normalizeScope(scope))
+        ? toMemoryFragment(cloneCommittedRecords([record])[0]!) : undefined
     },
     async list(scope: MemoryScope, limit = 100): Promise<MemoryFragment[]> {
       const normalizedScope = normalizeScope(scope)
@@ -2018,6 +2032,26 @@ function requireApiKey(apiKey?: string): string {
   if (!apiKey)
     throw new Error('apiKey is required for remote embeddings')
   return apiKey
+}
+
+function assertEmbedder(embedder: Embedder | undefined, configuredModel: string | undefined): void {
+  if (!embedder)
+    return
+  if (!embedder.model.trim())
+    throw new Error('embedder.model is required')
+  if (!Number.isSafeInteger(embedder.dimensions) || embedder.dimensions <= 0)
+    throw new Error('embedder.dimensions must be a positive integer')
+  if (configuredModel !== undefined && configuredModel !== embedder.model)
+    throw new Error('embeddingModel must match embedder.model when both are provided')
+}
+
+function assertEmbeddingVector(vector: number[], embedder: Embedder): void {
+  if (!Array.isArray(vector)
+    || vector.length !== embedder.dimensions
+    || !vector.every(Number.isFinite)) {
+    const actualDimensions = Array.isArray(vector) ? vector.length : 'non-array'
+    throw new Error(`Embedder ${embedder.model} returned an invalid ${actualDimensions}-dimensional vector; expected ${embedder.dimensions}`)
+  }
 }
 
 export type VectorStore = ReturnType<typeof createVectorStore>

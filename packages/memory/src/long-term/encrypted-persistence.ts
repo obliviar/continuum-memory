@@ -229,9 +229,11 @@ export function createEncryptedFilePersistence(
     compact,
     scrubBackups(): void {
       compact()
-      if (!existsSync(backupPath) || !cachedIndex)
+      if (!existsSync(backupPath))
         return
-      const payload = serializeMemoryIndex(cachedIndex)
+      const payload = cachedIndex ? serializeMemoryIndex(cachedIndex) : cachedPayload
+      if (payload === undefined)
+        return
       const key = getOrCreateKey()
       atomicWrite(backupPath, encryptPayload(payload, key))
       if (decryptPayload(readFileSync(backupPath, 'utf-8'), key) !== payload)

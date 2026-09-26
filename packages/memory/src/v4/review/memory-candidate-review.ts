@@ -204,6 +204,7 @@ export function createMemoryCandidateReviewService(repository: MemoryV4Repositor
           importance: candidate.durabilityScore,
           extractionChannel: candidate.calibrationCohort?.split(':', 1)[0] || 'reprocess',
           extractorVersion: candidate.extractorVersion,
+          ...(candidate.extractorVersion.startsWith('local-uie-base-') ? { requiresReview: true } : {}),
         },
       })
       const turn: MemoryCapture = {

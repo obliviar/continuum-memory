@@ -92,6 +92,29 @@ export const DEFAULT_GRAPH_PREDICATES: readonly GraphPredicateRegistration[] = [
     sourceRole: 'person', targetRole: 'amount', literalFormat: 'amount',
     labels: [{ text: 'salaryAmount', direction: 'forward' }, { text: '薪资为', direction: 'forward' }, { text: 'salary is', direction: 'forward' }],
   },
+  ...([
+    ['hasFather', 'person', 'person', '父亲'], ['hasMother', 'person', 'person', '母亲'],
+    ['hasHusband', 'person', 'person', '丈夫'], ['hasWife', 'person', 'person', '妻子'],
+    ['nationality', 'person', 'location', '国籍'], ['graduatedFrom', 'person', 'organization', '毕业院校'],
+    ['residesIn', 'person', 'location', '居住地'],
+    ['starredBy', 'film', 'person', '主演'], ['directedBy', 'film', 'person', '导演'],
+    ['producedBy', 'film', 'organization', '出品公司'], ['themeSong', 'film', 'song', '主题曲'],
+    ['authoredBy', 'book', 'person', '作者'], ['performedBy', 'song', 'person', '歌手'],
+    ['lyricsBy', 'song', 'person', '作词'], ['composedBy', 'song', 'person', '作曲'],
+    ['onAlbum', 'song', 'album', '所属专辑'], ['chairedBy', 'organization', 'person', '董事长'],
+    ['foundedBy', 'organization', 'person', '创始人'], ['principal', 'organization', 'person', '校长'],
+  ] as const).map(([name, sourceType, targetType, label]): GraphPredicateRegistration => ({
+    spec: spec(name, 'subject', { entityType: sourceType }, 'object', { entityType: targetType }, 'multiple'),
+    sourceRole: 'subject', targetRole: 'object', labels: [{ text: label, direction: 'forward' }],
+  })),
+  ...([
+    ['releasedOn', 'film', 'date', '上映时间'], ['foundedOn', 'organization', 'date', '成立日期'],
+    ['officialLanguage', 'location', 'string', '官方语言'], ['dynasty', 'person', 'string', '朝代'],
+    ['population', 'location', 'number', '人口数量'], ['boxOffice', 'film', 'number', '票房'],
+  ] as const).map(([name, sourceType, valueType, label]): GraphPredicateRegistration => ({
+    spec: spec(name, 'subject', { entityType: sourceType }, 'value', valueType, 'single'),
+    sourceRole: 'subject', targetRole: 'value', labels: [{ text: label, direction: 'forward' }],
+  })),
 ]
 
 export function createGraphPredicateRegistry(
@@ -318,7 +341,7 @@ function parseLiteral(object: Extract<FactCandidate['object'], { literal: string
       ? { kind: 'date', value: `${match[1]}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}` } : undefined
   }
   const numberText = text.replace(/,/gu, '')
-  const amountMatch = /^(?:([¥$€])\s*)?([+-]?\d+(?:\.\d+)?)\s*(CNY|USD|EUR|元|美元|欧元)?$/iu.exec(numberText)
+  const amountMatch = /^(?:([¥$€])\s*)?([+-]?\d+(?:\.\d+)?)\s*(CNY|USD|EUR|亿元|万元|亿人|万人|亿|万|元|美元|欧元|人)?$/iu.exec(numberText)
   if (!amountMatch)
     return undefined
   const value = Number(amountMatch[2])

@@ -130,6 +130,16 @@ interface GraphReviewItem {
   evidence: string
 }
 
+interface GraphRelationReviewItem {
+  key: string
+  claims: Array<{ id: string; version: number }>
+  routes: string[]
+  result: { label: 'CONTRADICTION' | 'NEUTRAL' | 'ENTAILMENT'; scores?: Record<string, number>; truncated?: boolean }
+  evidence: string[]
+  sensitivity: string
+  review?: { status: string; reason: string }
+}
+
 // ── Speech synthesis types (Chromium built-in TTS) ─────
 // (speechSynthesis and SpeechSynthesisUtterance are global DOM types)
 
@@ -240,6 +250,8 @@ const memoryStoragePath = ref('')
 const memoryItems = ref<MemoryItem[]>([])
 const memoryReviewItems = ref<MemoryReviewItem[]>([])
 const graphReviewItems = ref<GraphReviewItem[]>([])
+const graphRelationReviewItems = ref<GraphRelationReviewItem[]>([])
+const graphRelationReviewReasons = ref<Record<string, string>>({})
 const graphReviewReasons = ref<Record<string, string>>({})
 const graphRetrievalRetain = ref<Record<string, boolean>>({})
 const graphProactivePreferences = ref<Record<string, boolean>>({})
@@ -524,6 +536,7 @@ async function refreshMemoryList() {
     memoryItems.value = Array.isArray(result.items) ? result.items : []
     memoryReviewItems.value = Array.isArray(result.reviewItems) ? result.reviewItems : []
     graphReviewItems.value = Array.isArray(result.graphReviewItems) ? result.graphReviewItems : []
+    graphRelationReviewItems.value = Array.isArray(result.graphRelationReviewItems) ? result.graphRelationReviewItems : []
     for (const item of graphReviewItems.value) {
       graphRetrievalRetain.value[item.review.id] ??= item.review.retrieval.retain
       graphProactivePreferences.value[item.review.id] ??= item.review.proactive.useAsPreference
@@ -600,6 +613,28 @@ async function reviewGraphCandidate(id: string, outcome: 'approved' | 'rejected'
   finally {
     memoryMutating.value = false
   }
+}
+
+async function reviewGraphRelation(key: string, outcome: 'accepted' | 'rejected' | 'pending') {
+  if (memoryMutating.value) return
+  const reason = graphRelationReviewReasons.value[key]?.trim()
+  if (!reason) return
+  memoryMutating.value = true
+  try {
+    const result = await ipcRenderer.invoke('memory:graph-relation-review', { key, outcome, reason })
+    if (!result?.ok) throw new Error(result?.error || '信息关系审核失败。')
+    memoryStatusError.value = false
+    memoryStatusMessage.value = outcome === 'accepted'
+      ? '人工审核已记录；该判断尚未发布为正式 L2 关系。'
+      : outcome === 'rejected' ? '信息关系候选已拒绝。' : '信息关系候选保持待确认。'
+    delete graphRelationReviewReasons.value[key]
+    await refreshMemoryList()
+  }
+  catch (error) {
+    memoryStatusError.value = true
+    memoryStatusMessage.value = error instanceof Error ? error.message : '信息关系审核失败。'
+  }
+  finally { memoryMutating.value = false }
 }
 
 async function reprocessMemoryCandidates() {
@@ -1635,6 +1670,28 @@ async function doReset() {
                 <button class="memory-restore-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'approved')">确认</button>
                 <button class="memory-delete-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'rejected')">拒绝</button>
                 <button class="secondary-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'pending')">继续待确认</button>
+              </div>
+            </div>
+          </section>
+
+          <section v-if="graphRelationReviewItems.length > 0" class="memory-review-panel">
+            <div class="memory-list-header"><strong>待审信息关系</strong><span>NLI 分数是判断线索；审核记录不会自动成为正式 L2 关系</span></div>
+            <div v-for="item in graphRelationReviewItems" :key="item.key" class="memory-review-item">
+              <div class="memory-item-main">
+                <div class="memory-item-meta">
+                  <span class="memory-kind">{{ item.result.label }}</span>
+                  <span class="memory-state conflicted">待确认</span>
+                  <span>模型分数 {{ Math.round((item.result.scores?.[item.result.label] || 0) * 100) }}%</span>
+                </div>
+                <div class="memory-content">{{ item.evidence[0] || '[第一条证据不可用]' }}</div>
+                <div class="memory-content">{{ item.evidence[1] || '[第二条证据不可用]' }}</div>
+                <div class="field-hint">来源版本：{{ item.claims.map(claim => `${claim.id}@${claim.version}`).join(' ↔ ') }} · 隐私：{{ item.sensitivity }} · {{ item.result.truncated ? '模型输入已截断' : '模型输入完整' }}</div>
+                <input v-model="graphRelationReviewReasons[item.key]" class="settings-input" maxlength="500" placeholder="填写审核原因" />
+              </div>
+              <div class="memory-item-actions">
+                <button class="memory-restore-btn" :disabled="memoryMutating || !graphRelationReviewReasons[item.key]?.trim()" @click="reviewGraphRelation(item.key, 'accepted')">记录确认</button>
+                <button class="memory-delete-btn" :disabled="memoryMutating || !graphRelationReviewReasons[item.key]?.trim()" @click="reviewGraphRelation(item.key, 'rejected')">拒绝</button>
+                <button class="secondary-btn" :disabled="memoryMutating || !graphRelationReviewReasons[item.key]?.trim()" @click="reviewGraphRelation(item.key, 'pending')">继续待确认</button>
               </div>
             </div>
           </section>

@@ -7,7 +7,7 @@ import type { GraphExtractionRun } from '@continuum-memory/memory'
 
 const ENTITY_LABELS = new Set([
   '人物', '地点', '组织机构', '项目', '企业', '影视作品', '图书作品',
-  '歌曲', '历史人物', '学校', '国家', '行政区',
+  '歌曲', '历史人物', '学校', '国家', '行政区', '机构',
 ])
 const FIELD_LABELS = new Set(['姓名', '职业', '所在地', '喜好', '当前项目'])
 const MAX_OUTPUT_BYTES = 2_000_000
@@ -177,14 +177,19 @@ export function uieGraphExtractionRun(sourceId: string, sourceText: string, extr
       spans.set(key, mention)
   }
   for (const mention of [...extraction.entities, ...extraction.fields]) add(mention)
-  for (const relation of extraction.relations) { add(relation.subject); add(relation.object) }
+  for (const relation of extraction.relations) {
+    add(relation.subject)
+    if (!literalType(relation.predicate)) add(relation.object)
+  }
   const mentionId = (mention: UieMention) => `uie:${mention.start}:${mention.end}`
   const utf16 = (offset: number) => Array.from(sourceText).slice(0, offset).join('').length
   const entities = [...spans.values()].map(mention => ({ id: mentionId(mention), type: entityType(mention.label),
     text: mention.text, span: { start: utf16(mention.start), end: utf16(mention.end) }, modelScore: mention.score }))
   const facts = extraction.relations.map((relation, index) => ({
     id: `uie-fact:${index}`, subjectMentionId: mentionId(relation.subject), predicate: relation.predicate,
-    object: { mentionId: mentionId(relation.object) },
+    object: literalType(relation.predicate)
+      ? { literal: relation.object.text, valueType: literalType(relation.predicate) }
+      : { mentionId: mentionId(relation.object) },
     evidenceSpan: { start: utf16(Math.min(relation.subject.start, relation.object.start)),
       end: utf16(Math.max(relation.subject.end, relation.object.end)) },
     modelScore: relation.score,
@@ -198,10 +203,21 @@ export function uieGraphExtractionRun(sourceId: string, sourceText: string, extr
 }
 
 function entityType(label: string): string {
-  if (label === '人物' || label === '历史人物') return 'person'
-  if (label === '组织机构' || label === '企业' || label === '学校' || label === '所属组织') return 'organization'
-  if (label === '地点' || label === '国家' || label === '行政区' || label === '总部地点') return 'location'
+  if (['人物', '历史人物', '父亲', '母亲', '丈夫', '妻子', '主演', '导演', '作者', '歌手', '作词', '作曲', '董事长', '创始人', '校长'].includes(label)) return 'person'
+  if (['组织机构', '机构', '企业', '学校', '所属组织', '毕业院校', '出品公司'].includes(label)) return 'organization'
+  if (['地点', '国家', '行政区', '总部地点', '国籍', '居住地'].includes(label)) return 'location'
+  if (label === '影视作品') return 'film'
+  if (label === '图书作品') return 'book'
+  if (label === '歌曲' || label === '主题曲') return 'song'
+  if (label === '所属专辑') return 'album'
   return label
+}
+
+function literalType(label: string): 'string' | 'number' | 'date' | undefined {
+  if (['上映时间', '成立日期'].includes(label)) return 'date'
+  if (['票房', '人口数量'].includes(label)) return 'number'
+  if (['官方语言', '朝代'].includes(label)) return 'string'
+  return undefined
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

@@ -36,6 +36,7 @@ import {
   createGraphExtractionResultStore,
   createGraphNormalizationStore,
   normalizeGraphExtraction,
+  graphEntityVectorCandidates,
   assessGraphClaim,
   confirmGraphClaim,
   rejectGraphClaim,
@@ -695,6 +696,7 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
       const normalized = normalizeGraphExtraction(run, {
         entities: graphNormalizationStore.entities(),
         aliasDecisions: graphNormalizationStore.aliasDecisions(),
+        vectorCandidatesByMentionId: graphEntityVectorCandidates(run, graphNormalizationStore.entities(), localMemoryScope),
         scope: localMemoryScope,
       })
       graphNormalizationStore.appendResult(normalized)
@@ -1981,6 +1983,16 @@ function setupIPC() {
         evidence: run && source ? run.sourceText.slice(source.evidenceSpan.start, source.evidenceSpan.end) : '',
       }
     }) ?? [],
+    graphRelationReviewItems: graphRelationTaskQueue?.snapshot().filter(task => task.status === 'completed'
+      && (!task.review || task.review.status === 'pending')).slice(0, Number(limit)).map(task => {
+      const claims = task.claims.map(ref => graphSemanticRepository?.snapshot()?.claims.find(claim =>
+        claim.ref.id === ref.id && claim.ref.version === ref.version))
+      return { key: task.key, claims: task.claims, routes: task.routes, result: task.result,
+        modelId: task.modelId, modelRevision: task.modelRevision, review: task.review,
+        evidence: claims.map(claim => claim ? graphClaimEvidenceText(claim) : ''),
+        sensitivity: claims.some(claim => claim?.sensitivity === 'secret') ? 'secret'
+          : claims.some(claim => claim?.sensitivity === 'private') ? 'private' : 'normal' }
+    }) ?? [],
     pendingCaptureSegments: memory?.pendingCaptureCount() ?? 0,
   }))
 
@@ -2053,6 +2065,16 @@ function setupIPC() {
       return { ok: false, error: '来源或实体身份尚未完成解析。' }
     const task = await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
     return task?.state === 'published' ? { ok: true, published: true } : { ok: true, published: false }
+  })
+
+  ipcMain.handle('memory:graph-relation-review', async (_event,
+    input: { key?: unknown; outcome?: unknown; reason?: unknown }) => {
+    const key = typeof input?.key === 'string' ? input.key.trim() : ''
+    const reason = typeof input?.reason === 'string' ? input.reason.trim() : ''
+    if (!graphRelationTaskQueue || !key || !reason || !['accepted', 'rejected', 'pending'].includes(String(input.outcome)))
+      return { ok: false, error: '无效的信息关系审核操作。' }
+    const changed = graphRelationTaskQueue.review(key, input.outcome as 'accepted' | 'rejected' | 'pending', reason)
+    return changed ? { ok: true } : { ok: false, error: '候选不存在或 NLI 判断尚未完成。' }
   })
 
   ipcMain.handle('memory:v4-internal-feedback', async (

@@ -90,5 +90,9 @@ describe('graph relation judgement queue', () => {
       premiseHash: 'premise', hypothesisHash: 'hypothesis', truncated: false })
     expect(make().snapshot()[0]?.result?.scores?.ENTAILMENT).toBe(0.7)
     expect(make().ready(7000)).toEqual([])
+    expect(make().review(key, 'accepted', 'Compared both source passages')).toBe(true)
+    expect(make().snapshot()[0]?.review).toMatchObject({ status: 'accepted',
+      reason: 'Compared both source passages', reviewer: 'local-user' })
+    expect(make().review('missing', 'rejected', 'No match')).toBe(false)
   })
 })

@@ -121,4 +121,32 @@ describe('local UIE-base output adapter', () => {
     expect(run.factCandidates[0]).toMatchObject({ predicate: '工作于', modelScore: 0.88,
       evidenceSpan: { start: 2, end: 11 }, context: { negation: { resolution: 'unresolved' } } })
   })
+  it('maps UIE film roles and keeps dates as typed literals', () => {
+    const text = '电影甲由张三主演，2024年1月2日上映。'
+    const raw = { 影视作品: [{ text: '电影甲', start: 0, end: 3, probability: 0.95,
+      relations: { 主演: [{ text: '张三', start: 4, end: 6, probability: 0.9 }],
+        上映时间: [{ text: '2024年1月2日', start: 9, end: 18, probability: 0.85 }] } }] }
+    const run = uieGraphExtractionRun('source', text, parseUieOutput(text, raw))
+    expect(run.factCandidates).toMatchObject([
+      { predicate: '主演', object: { mentionId: expect.any(String) } },
+      { predicate: '上映时间', object: { literal: '2024年1月2日', valueType: 'date' } },
+    ])
+    expect(run.entityMentions.some(mention => mention.text === '2024年1月2日')).toBe(false)
+    const registry = createGraphPredicateRegistry()
+    expect(registry.lookup('主演')?.registration.spec.name).toBe('starredBy')
+    expect(registry.lookup('上映时间')?.registration.spec.name).toBe('releasedOn')
+  })
+  it('keeps population magnitude as a typed value after identity confirmation', () => {
+    const text = '北京人口数量为2000万人。'
+    const raw = { 行政区: [{ text: '北京', start: 0, end: 2, probability: 0.9,
+      relations: { 人口数量: [{ text: '2000万人', start: 7, end: 13, probability: 0.8 }] } }] }
+    const run = uieGraphExtractionRun('source', text, parseUieOutput(text, raw))
+    const scope = { ownerId: 'owner', agentId: 'agent' }
+    const normalized = normalizeGraphExtraction(run, { scope,
+      entities: [{ ref: { kind: 'entity', id: 'beijing', version: 1 }, scope,
+        entityType: 'location', canonicalName: '北京', aliases: [] }],
+      explicitIdentityByMentionId: { [run.factCandidates[0]!.subjectMentionId]: 'beijing' } })
+    expect(normalized.facts[0]).toMatchObject({ status: 'ready', predicate: 'population',
+      arguments: { value: { kind: 'number', value: 2000, unit: '万人' } } })
+  })
 })

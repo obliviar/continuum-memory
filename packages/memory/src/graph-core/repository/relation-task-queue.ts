@@ -26,6 +26,9 @@ export interface GraphRelationJudgementTask {
     readonly truncated?: boolean
     readonly evaluatedAt: number
   }
+  /** Human assessment of the NLI suggestion; it does not publish an L2 relation. */
+  readonly review?: { readonly status: 'accepted' | 'rejected' | 'pending'; readonly reason: string;
+    readonly reviewedAt: number; readonly reviewer: 'local-user' }
 }
 export interface GraphRelationTaskPersistence {
   load: () => string | undefined
@@ -38,6 +41,7 @@ export interface GraphRelationTaskQueue {
     sourceText: (claim: GraphClaimRecord) => string,
     relations?: readonly GraphRelationRecord[]) => number
   complete: (key: string, result: NonNullable<GraphRelationJudgementTask['result']>) => void
+  review: (key: string, status: 'accepted' | 'rejected' | 'pending', reason: string) => boolean
   fail: (key: string, error: string, nextAttemptAt: number) => void
   ready: (now?: number) => readonly GraphRelationJudgementTask[]
   nextRetryAt: () => number | undefined
@@ -93,6 +97,15 @@ export function createGraphRelationTaskQueue(persistence: GraphRelationTaskPersi
       const prior = tasks.get(key)
       tasks.set(key, next)
       try { persist() } catch (error) { tasks.set(key, prior!); throw error }
+    },
+    review(key, status, reason) {
+      const task = tasks.get(key)
+      if (!task || task.status !== 'completed' || !task.result || !reason.trim()) return false
+      const next = { ...task, review: { status, reason: reason.trim().slice(0, 500),
+        reviewedAt: Date.now(), reviewer: 'local-user' as const } }
+      tasks.set(key, next)
+      try { persist() } catch (error) { tasks.set(key, task); throw error }
+      return true
     },
     sync(claims, predicates, scope, sourceText, relations = []) {
       const active = claims.filter(claim => claim.review.status === 'accepted'

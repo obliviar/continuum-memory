@@ -126,6 +126,7 @@ export type {
   GraphPredicateSpec as GraphPredicateSpecView,
 } from './long-term/graph-identity-normalization'
 export { createGraphNormalizationStore } from './long-term/graph-normalization-store'
+export { graphEntityVectorCandidates } from './long-term/graph-entity-vector-candidates'
 export { confirmGraphFactIdentities } from './long-term/graph-confirmed-identity'
 export type { GraphNormalizationStore } from './long-term/graph-normalization-store'
 export {

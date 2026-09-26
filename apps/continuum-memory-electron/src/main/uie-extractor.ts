@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { inferMemoryPrivacy, isSafeMemoryContent } from '@continuum-memory/memory'
+import { createGraphExtractionRun, inferMemoryPrivacy, isSafeMemoryContent } from '@continuum-memory/memory'
 import type { MemoryCandidate } from '@continuum-memory/memory'
+import type { GraphExtractionRun } from '@continuum-memory/memory'
 
 const ENTITY_LABELS = new Set([
   '人物', '地点', '组织机构', '项目', '企业', '影视作品', '图书作品',
@@ -29,6 +30,7 @@ export interface UieRelation {
 
 export interface UieExtraction {
   model: 'uie-base'
+  rawOutput: unknown
   entities: UieMention[]
   fields: UieMention[]
   relations: UieRelation[]
@@ -157,7 +159,44 @@ export function parseUieOutput(source: string, raw: unknown): UieExtraction {
       }
     }
   }
-  return { model: 'uie-base', entities: [...entities.values()], fields: [...fields.values()], relations: [...relations.values()] }
+  return { model: 'uie-base', rawOutput: raw, entities: [...entities.values()], fields: [...fields.values()], relations: [...relations.values()] }
+}
+
+/** Preserve the untouched UIE payload, then convert code-point offsets for graph review. */
+export function uieGraphExtractionRun(sourceId: string, sourceText: string, extraction: UieExtraction): GraphExtractionRun {
+  const spans = new Map<string, UieMention>()
+  const add = (mention: UieMention) => {
+    const key = `${mention.start}:${mention.end}`
+    const previous = spans.get(key)
+    if (!previous || (entityType(previous.label) === previous.label && entityType(mention.label) !== mention.label))
+      spans.set(key, mention)
+  }
+  for (const mention of [...extraction.entities, ...extraction.fields]) add(mention)
+  for (const relation of extraction.relations) { add(relation.subject); add(relation.object) }
+  const mentionId = (mention: UieMention) => `uie:${mention.start}:${mention.end}`
+  const utf16 = (offset: number) => Array.from(sourceText).slice(0, offset).join('').length
+  const entities = [...spans.values()].map(mention => ({ id: mentionId(mention), type: entityType(mention.label),
+    text: mention.text, span: { start: utf16(mention.start), end: utf16(mention.end) }, modelScore: mention.score }))
+  const facts = extraction.relations.map((relation, index) => ({
+    id: `uie-fact:${index}`, subjectMentionId: mentionId(relation.subject), predicate: relation.predicate,
+    object: { mentionId: mentionId(relation.object) },
+    evidenceSpan: { start: utf16(Math.min(relation.subject.start, relation.object.start)),
+      end: utf16(Math.max(relation.subject.end, relation.object.end)) },
+    modelScore: relation.score,
+    context: { negation: { value: null, resolution: 'unresolved' },
+      condition: { value: null, resolution: 'unresolved' },
+      time: { value: null, resolution: 'unresolved' },
+      speaker: { value: null, resolution: 'unresolved' } },
+  }))
+  return createGraphExtractionRun({ sourceId, sourceText, modelId: extraction.model,
+    rawOutput: { graph: { entities, facts }, uieRawOutput: extraction.rawOutput } })
+}
+
+function entityType(label: string): string {
+  if (label === '人物' || label === '历史人物') return 'person'
+  if (label === '组织机构' || label === '企业' || label === '学校') return 'organization'
+  if (label === '地点' || label === '国家' || label === '行政区') return 'location'
+  return label
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

@@ -10,6 +10,7 @@ import {
   createEncryptedFilePersistence,
   createEncryptedGraphL1Persistence,
   createV4GraphMemory,
+  selectRetrievableGraphBundle,
   V4_GRAPH_BUDGET,
   createEncryptedV4Persistence,
   createIdleConsolidationRunner,
@@ -42,7 +43,9 @@ import {
   setGraphUseAssessment,
   createGraphL1Store,
   createGraphL1Writer,
+  createGraphSemanticRepository,
   createGraphPredicateRegistry,
+  confirmGraphFactIdentities,
   createV4ShadowWriter,
   createVectorStore,
   extractMemoryCandidates,
@@ -63,6 +66,8 @@ import type {
   GraphNormalizationStore,
   GraphL1Store,
   GraphL1Writer,
+  GraphSemanticRepository,
+  GraphExtractionRun,
   MemoryV4LifecycleService,
   MemoryCandidateReviewService,
   MemoryEmbeddingIndex,
@@ -115,7 +120,7 @@ import {
   type MemoryV4ReadController,
 } from './memory-v4-read-controller'
 import { createMemoryV4RuntimeObservability } from './memory-v4-runtime-observability'
-import { createLocalUieExtractor, uieReviewCandidates } from './uie-extractor'
+import { createLocalUieExtractor, uieGraphExtractionRun, uieReviewCandidates } from './uie-extractor'
 
 // Some Windows systems cannot initialize Electron's GPU subprocess. Disable
 // hardware acceleration before app readiness so the packaged app still starts.
@@ -396,6 +401,14 @@ let graphExtractionStore: GraphExtractionResultStore | undefined
 let graphNormalizationStore: GraphNormalizationStore | undefined
 let graphL1Store: GraphL1Store | undefined
 let graphL1Writer: GraphL1Writer | undefined
+let graphSemanticRepository: GraphSemanticRepository | undefined
+function syncGraphSemantic(): void {
+  if (!graphSemanticRepository || !graphL1Store || !memoryV4Repository) return
+  void graphSemanticRepository.syncFromClaims(graphL1Store, memoryV4Repository,
+    createGraphPredicateRegistry(), localMemoryScope).then(result => {
+    if (!result.ok) writeBootLog(`Graph semantic sync deferred: ${result.error.message}`)
+  }).catch(error => writeBootLog(`Graph semantic sync deferred: ${errorMessage(error)}`))
+}
 let memoryV4ShadowTaskQueue: MemoryV4ShadowTaskQueue<MemoryV4ShadowComparisonTask> | undefined
 let memoryV4ShadowGeneration = 0
 let memoryV4ShadowEvaluationError = ''
@@ -453,6 +466,8 @@ const graphNormalizationStoragePath = join(userDataDir, 'graph-normalization.enc
 const graphNormalizationKeyPath = join(userDataDir, 'graph-normalization-key.json')
 const graphL1StoragePath = join(userDataDir, 'graph-l1.enc')
 const graphL1KeyPath = join(userDataDir, 'graph-l1-key.json')
+const graphSemanticStoragePath = join(userDataDir, 'graph-semantic.enc')
+const graphSemanticKeyPath = join(userDataDir, 'graph-semantic-key.json')
 const legacyMemoryStoragePath = join(userDataDir, 'memories.json')
 const memoryV4StoragePath = join(userDataDir, 'memory-v4.enc')
 const memoryV4BackupPath = join(userDataDir, 'memory-v4.enc.backup')
@@ -546,31 +561,31 @@ function mergeMemoryCandidates(candidates: MemoryCandidate[]): MemoryCandidate[]
 function createConfiguredMemoryExtractor(): MemoryExtractor {
   const captureSettings = { ...memorySettings }
   const captureApiConfig = { ...apiConfig }
+  const saveGraphExtraction = async (run: GraphExtractionRun) => {
+    graphExtractionStore?.append(run)
+    if (graphNormalizationStore && run.status !== 'failed') {
+      const normalized = normalizeGraphExtraction(run, {
+        entities: graphNormalizationStore.entities(),
+        aliasDecisions: graphNormalizationStore.aliasDecisions(),
+        scope: localMemoryScope,
+      })
+      graphNormalizationStore.appendResult(normalized)
+      for (const fact of normalized.facts) {
+        const evidence = run.factCandidates.find(item => item.id === fact.sourceFactId)
+        if (!evidence) continue
+        const privacy = inferMemoryPrivacy(run.sourceText)
+        const review = assessGraphClaim(run, fact, privacy)
+        if (graphL1Writer)
+          await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
+        else
+          graphL1Store?.recordReview(review)
+      }
+    }
+  }
   const smartExtractor = createSmartMemoryExtractor({
     getConfig: () => captureApiConfig,
     fallback: extractMemoryCandidates,
-    saveGraphExtraction: async (run) => {
-      graphExtractionStore?.append(run)
-      if (graphNormalizationStore && run.status !== 'failed') {
-        const normalized = normalizeGraphExtraction(run, {
-          entities: graphNormalizationStore.entities(),
-          aliasDecisions: graphNormalizationStore.aliasDecisions(),
-          scope: localMemoryScope,
-        })
-        graphNormalizationStore.appendResult(normalized)
-        for (const fact of normalized.facts) {
-          const evidence = run.factCandidates.find(item => item.id === fact.sourceFactId)
-          if (!evidence)
-            continue
-          const privacy = inferMemoryPrivacy(run.sourceText)
-          const review = assessGraphClaim(run, fact, privacy)
-          if (graphL1Writer)
-            await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
-          else
-            graphL1Store?.recordReview(review)
-        }
-      }
-    },
+    saveGraphExtraction,
   })
   return async (turn) => {
     let candidates: MemoryCandidate[]
@@ -578,6 +593,10 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
       const local = await extractMemoryCandidates(turn)
       try {
         const structured = await localUie.extract(turn.userMessage)
+        const sourceIds = turn.metadata?.sourceMessageIds
+        const sourceId = Array.isArray(sourceIds) && typeof sourceIds[0] === 'string'
+          ? sourceIds[0] : String(turn.metadata?.memoryCaptureId ?? 'unknown-source')
+        await saveGraphExtraction(uieGraphExtractionRun(sourceId, turn.userMessage, structured))
         const existing = new Set(local.map(candidate => candidate.content.toLocaleLowerCase()))
         candidates = [
           ...local,
@@ -700,6 +719,7 @@ function initializeMemory(): void {
   graphNormalizationStore = undefined
   graphL1Store = undefined
   graphL1Writer = undefined
+  graphSemanticRepository = undefined
   memoryV4InternalFeedbackStore = undefined
   memoryV4ShadowEvaluationError = ''
   memoryV4InternalFeedbackError = ''
@@ -836,6 +856,7 @@ function initializeMemory(): void {
         graphL1Store?.removeSources(commit.messageIds)
         memoryV4Shadow?.enqueueSourceUnlink(commit)
         memoryV4Shadow?.flush()
+        syncGraphSemantic()
       },
       onSourceUnlinkObserverError: error => writeBootLog(`Memory V4 source unlink enqueue failed: ${errorMessage(error)}`),
       onRecallFeedback: (report) => {
@@ -902,7 +923,21 @@ function initializeMemory(): void {
         if (existsSync(l1Persistence.storagePath!)) l1Persistence.save('{}')
       }) })
       memoryV4Repository = v4Repository
-      graphL1Writer = createGraphL1Writer(v4Repository, graphL1Store!, createGraphPredicateRegistry(), localMemoryScope)
+      const graphSemanticPersistence = createEncryptedFilePersistence({
+        encryptedPath: graphSemanticStoragePath,
+        keyPath: graphSemanticKeyPath,
+        protectKey: key => safeStorage.encryptString(key.toString('base64')),
+        unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+      })
+      graphSemanticRepository = createGraphSemanticRepository(graphSemanticPersistence, v4Repository)
+      const predicateRegistry = createGraphPredicateRegistry()
+      graphL1Writer = createGraphL1Writer(v4Repository, graphL1Store!, predicateRegistry, localMemoryScope, {
+        syncFromClaims: async () => {
+          const result = await graphSemanticRepository!.syncFromClaims(graphL1Store!, v4Repository,
+            predicateRegistry, localMemoryScope)
+          if (!result.ok) throw new Error(result.error.message)
+        },
+      })
       memoryV4Lifecycle = createMemoryV4LifecycleService(v4Repository)
       memoryCandidateReview = createMemoryCandidateReviewService(v4Repository)
       memoryV4Persistence = v4Persistence
@@ -1256,6 +1291,8 @@ function memoryForRemoteRuntime() {
         countTokens: countGraphTokens,
         includeOwnedSessions: true,
         utcOffsetMinutes: -new Date().getTimezoneOffset(),
+        acceptedBundle: () => selectRetrievableGraphBundle(graphSemanticRepository?.snapshot(),
+          graphL1Store?.tasks() ?? []),
       })
     : undefined
   const readController = createMemoryV4ReadController({
@@ -1844,9 +1881,23 @@ function setupIPC() {
       return { ok: true }
     }
     const run = graphExtractionStore.list().find(item => item.id === review.runId)
-    const fact = graphNormalizationStore.results().find(item => item.runId === review.runId)
+    let fact = graphNormalizationStore.results().find(item => item.runId === review.runId)
       ?.facts.find(item => item.sourceFactId === review.sourceFactId)
-    if (!run || !fact || fact.status !== 'ready')
+    if (!run || !fact)
+      return { ok: false, error: '来源或抽取结果不可用。' }
+    if (fact.status !== 'ready') {
+      try {
+        const confirmed = confirmGraphFactIdentities(run, review.sourceFactId, {
+          entities: graphNormalizationStore.entities(), aliases: graphNormalizationStore.aliasDecisions(),
+          scope: localMemoryScope,
+        })
+        graphNormalizationStore.replaceCatalog(confirmed.entities, graphNormalizationStore.aliasDecisions())
+        graphNormalizationStore.appendResult(confirmed.normalized)
+        fact = confirmed.normalized.facts.find(item => item.sourceFactId === review.sourceFactId)
+      }
+      catch (error) { return { ok: false, error: errorMessage(error) } }
+    }
+    if (!fact || fact.status !== 'ready')
       return { ok: false, error: '来源或实体身份尚未完成解析。' }
     const task = await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
     return task?.state === 'published' ? { ok: true, published: true } : { ok: true, published: false }
@@ -2093,6 +2144,7 @@ function setupIPC() {
     graphExtractionStore?.clear()
     graphNormalizationStore?.clear()
     graphL1Store?.clear()
+    syncGraphSemantic()
     memoryV4ShadowEvaluationStore?.clear()
     memoryV4InternalFeedbackStore?.clear()
     return { ok: true, count: 0 }
@@ -2113,6 +2165,7 @@ function setupIPC() {
     graphExtractionStore?.clear()
     graphNormalizationStore?.clear()
     graphL1Store?.clear()
+    syncGraphSemantic()
     memoryV4ShadowEvaluationStore?.clear()
     sessionStore.getSessionMessages('default').splice(0)
     sessionPersistence?.save('{}')

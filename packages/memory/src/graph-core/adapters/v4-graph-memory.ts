@@ -6,6 +6,8 @@ import { createMemoryBm25Index } from '../../long-term/bm25-index'
 import { collectV4RecallInputs } from './v4-recall-input'
 import { graphHash, projectV4ScalarInputs, V4_SCALAR_MAPPING_POLICY } from './v4-semantic-adapter'
 import { planGraphQueryTime } from '../recall/query-time-plan'
+import type { GraphClaimRecord, GraphSemanticBundle } from '../domain/types'
+import { exactClaimAvailable } from '../repository/semantic-repository'
 
 export interface V4GraphPersistence { storagePath?: string; load: () => string | undefined; save: (payload: string) => void }
 export const V4_GRAPH_BUDGET: GraphRecallBudget = { maxSeeds: 8, maxNodes: 64, maxEdges: 0, maxHops: 0,
@@ -22,6 +24,17 @@ export interface V4GraphMemoryOptions {
   includeOwnedSessions?: boolean
   now?: () => number
   utcOffsetMinutes?: number
+  /** Accepted entity Claims from the authoritative semantic bundle. Re-read on every recall. */
+  acceptedBundle?: () => GraphSemanticBundle | undefined
+}
+
+/** Retrieval consent is separate from semantic acceptance and proactive preference use. */
+export function selectRetrievableGraphBundle(bundle: GraphSemanticBundle | undefined,
+  tasks: readonly { id: string; state: string; review: { retrieval: { retain: boolean } } }[]): GraphSemanticBundle | undefined {
+  if (!bundle) return undefined
+  const retained = new Set(tasks.filter(task => task.state === 'published' && task.review.retrieval.retain)
+    .map(task => task.id))
+  return { ...bundle, claims: bundle.claims.filter(claim => retained.has(claim.ref.id)) }
 }
 
 /** Direct L1 scalar recall. Does not advertise relation traversal, history reconstruction or proofs. */
@@ -71,33 +84,74 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         const gathered = collectV4RecallInputs(options.repository, { scope: request.scope, expectedRevision: snapshot.revision,
           includeOwnedSessions: options.includeOwnedSessions,
           now: timestamp, canRead: record => allowed(record, request) })
+        const acceptedBundle = options.acceptedBundle?.()
         const inputs = gathered.inputs.filter(({ fact }) => {
+          // Reviewed graph facts use their accepted Claim identity, never a second synthetic scalar Claim.
+          if (fact.metadata?.graphTaskId) return false
           const valid = timePlan.value.temporal.valid
           return valid.kind === 'at' ? fact.validFrom! <= valid.at && (fact.validTo === undefined || valid.at < fact.validTo)
             : fact.validFrom! < valid.to && (fact.validTo === undefined || valid.from < fact.validTo)
         })
-        const projection = projectV4ScalarInputs(inputs, request.scope, snapshot.revision)
+        const accepted = acceptedBundle?.claims.flatMap(claim => {
+          const fact = snapshot.facts.find(item => item.id === claim.fact.id)
+          if (!fact || !eligibleAcceptedClaim(claim, fact, snapshot, request, timestamp,
+            !!options.includeOwnedSessions, allowed)) return []
+          const valid = timePlan.value.temporal.valid
+          const interval = claim.validTime
+          if (interval.kind === 'interval' && interval.from !== null
+            && (valid.kind === 'at' ? interval.from > valid.at || (interval.to !== null && valid.at >= interval.to)
+              : interval.from >= valid.to || (interval.to !== null && valid.from >= interval.to))) return []
+          return [{ claim, fact }]
+        }) ?? []
+        const scalarProjection = projectV4ScalarInputs(inputs, request.scope, snapshot.revision)
+        const acceptedClaims = accepted.map(item => item.claim)
+        const entityIds = new Set(acceptedClaims.flatMap(claim => Object.values(claim.atom.args)
+          .filter(term => term.kind === 'entity').map(term => term.ref.id)))
+        const predicateNames = new Set(acceptedClaims.map(claim => claim.atom.predicate))
+        const projection = acceptedClaims.length && acceptedBundle ? (() => {
+          const graphEntities = acceptedBundle.entities.filter(item => entityIds.has(item.ref.id))
+          const graphContexts = acceptedBundle.contexts.filter(item => acceptedClaims.some(claim => claim.context.id === item.ref.id))
+          const graphPredicates = acceptedBundle.predicates.filter(item => predicateNames.has(item.name))
+          const manifestId = `v4-l1:${graphHash([scalarProjection.manifest.manifestId, acceptedClaims,
+            graphEntities, graphContexts, graphPredicates])}`
+          const semanticBundle = { ...scalarProjection.semanticBundle, bundleId: manifestId,
+            revisions: { ...scalarProjection.semanticBundle.revisions,
+              semantics: acceptedBundle.revisions.semantics },
+            claims: [...scalarProjection.semanticBundle.claims, ...acceptedClaims],
+            entities: graphEntities, contexts: [...scalarProjection.semanticBundle.contexts, ...graphContexts],
+            predicates: [...scalarProjection.semanticBundle.predicates, ...graphPredicates] }
+          return { ...scalarProjection, semanticBundle,
+            manifest: { ...scalarProjection.manifest, manifestId, sourceBundleId: manifestId,
+              sourceRevisions: semanticBundle.revisions, semanticFingerprint: manifestId } }
+        })() : scalarProjection
         const manifestId = projection.manifest.manifestId
         if (request.expectedManifestId && request.expectedManifestId !== manifestId)
           return fail('version-mismatch', 'Requested L1 manifest is no longer current')
         const index = createMemoryBm25Index()
         for (const { fact } of inputs) index.upsert({ id: fact.id, scope: request.scope, state: 'active',
           content: `${fact.canonicalText} ${fact.predicate}` })
+        for (const { claim, fact } of accepted) index.upsert({ id: `claim:${claim.ref.id}`, scope: request.scope,
+          state: 'active', content: `${fact.canonicalText} ${claim.atom.predicate}` })
         const hits = index.search(timePlan.value.lexicalQuery, { scope: request.scope, limit: 10000, minScore: 0.2 })
-        const byId = new Map(inputs.map((input, i) => [input.fact.id, { input, claim: projection.semanticBundle.claims[i]! }]))
+        const byId = new Map(inputs.map((input, i) => [input.fact.id,
+          { fact: input.fact, claim: scalarProjection.semanticBundle.claims[i]! }]))
+        for (const item of accepted) byId.set(`claim:${item.claim.ref.id}`, item)
         const claims: GraphEvidenceClaim[] = []
         let tokens = 0
         let stopReason: GraphRecallResult['trace']['stopReason'] = hits.length ? 'exhausted-within-scope' : 'no-eligible-seeds'
         let incomplete = gathered.rejected.some(item => item.reason !== 'access-denied')
+          || accepted.some(({ claim }) => claim.validTime.kind === 'unknown'
+            || claim.polarity === 'unknown' || claim.modality !== 'asserted' || claim.condition.kind !== 'none')
         for (const hit of hits) {
           if (claims.length >= Math.min(request.budget.maxSeeds, request.budget.maxNodes)) {
             stopReason = request.budget.maxNodes <= request.budget.maxSeeds ? 'node-budget' : 'coverage-satisfied'; incomplete = true; break
           }
-          const { input, claim } = byId.get(hit.id)!
+          const { fact, claim } = byId.get(hit.id)!
           const entry: GraphEvidenceClaim = { kind: 'direct', ref: claim.ref, fact: claim.fact,
-            citation: `G${claims.length + 1}`, content: input.fact.canonicalText,
+            citation: `G${claims.length + 1}`, content: fact.canonicalText,
             sources: claim.provenance.sources, polarity: claim.polarity, modality: claim.modality,
-            conditionText: null, context: claim.context, validTime: claim.validTime,
+            conditionText: claim.condition.kind === 'none' ? null : claim.condition.text,
+            context: claim.context, validTime: claim.validTime,
             // Verified source extraction does not certify that competing explanations were exhaustively checked.
             support: 'unknown' }
           const cost = options.countTokens(JSON.stringify(entry).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'))
@@ -114,11 +168,24 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         const fresh = new Map(finalInputs.inputs.map(input => [input.fact.id, graphHash(input)]))
         if (!options.authorizeScope(request.scope) || inputs.some(input => fresh.get(input.fact.id) !== graphHash(input)))
           return fail('stale-projection', 'Source or authorization changed during recall')
+        const liveBundle = options.acceptedBundle?.()
+        const liveClaims = new Map(liveBundle?.claims.map(claim => [claim.ref.id, claim]) ?? [])
+        const liveSnapshot = options.repository.snapshot()
+        if (accepted.some(({ claim, fact }) => graphHash(liveClaims.get(claim.ref.id)) !== graphHash(claim)
+          || !eligibleAcceptedClaim(claim, liveSnapshot.facts.find(item => item.id === fact.id),
+            liveSnapshot, request, now(), !!options.includeOwnedSessions, allowed)))
+          return fail('stale-projection', 'Accepted graph source changed during recall')
         const payload = JSON.stringify({ policy: V4_SCALAR_MAPPING_POLICY, projection })
         if (payload !== persisted) { options.persistence.save(payload); persisted = payload }
         // Persistence adapters are trusted, but may trigger lifecycle updates while saving.
-        if (graphHash(options.repository.snapshot()) !== graphHash(snapshot) || !options.authorizeScope(request.scope)
-          || inputs.some(input => !allowed(input.fact, request) || input.sources.some(s => !allowed(s.episode, request))))
+        const afterSaveBundle = options.acceptedBundle?.()
+        const afterSaveClaims = new Map(afterSaveBundle?.claims.map(claim => [claim.ref.id, claim]) ?? [])
+        const afterSaveSnapshot = options.repository.snapshot()
+        if (graphHash(afterSaveSnapshot) !== graphHash(snapshot) || !options.authorizeScope(request.scope)
+          || inputs.some(input => !allowed(input.fact, request) || input.sources.some(s => !allowed(s.episode, request)))
+          || accepted.some(({ claim, fact }) => graphHash(afterSaveClaims.get(claim.ref.id)) !== graphHash(claim)
+            || !eligibleAcceptedClaim(claim, afterSaveSnapshot.facts.find(item => item.id === fact.id),
+              afterSaveSnapshot, request, now(), !!options.includeOwnedSessions, allowed)))
           return fail('stale-projection', 'Source or authorization changed during publication')
         if (performance.now() - start >= request.budget.maxElapsedMs) return fail('budget-exhausted', 'Publication exceeded time budget')
         const refs = claims.map(claim => claim.ref)
@@ -129,7 +196,7 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
               claimRefs: [claim.ref], ruleRefs: [], proofRefs: [] })) },
           trace: { recallId: request.recallId, manifestId, policyVersion: V4_SCALAR_MAPPING_POLICY,
             temporal: timePlan.value.temporal, completeness: incomplete ? 'incomplete' : 'complete-within-declared-scope',
-            searchScope: ['current-verified-scalar-L1', 'BM25',
+            searchScope: ['current-verified-scalar-L1', 'accepted-source-backed-entity-L1', 'BM25',
               options.includeOwnedSessions && request.scope.sessionId === undefined
                 ? 'trusted-owner-wide-sessions' : 'exact-owner-agent-session',
               'no-L2', 'no-conflict-audit',
@@ -162,4 +229,39 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
       return { ok: true, value: { recorded: true } }
     },
   }
+}
+
+function eligibleAcceptedClaim(claim: GraphClaimRecord, fact: MemoryFactV4 | undefined,
+  snapshot: ReturnType<MemoryV4Repository['snapshot']>, request: GraphRecallRequest, at: number,
+  includeOwnedSessions: boolean,
+  allowed: (record: MemoryFactV4 | MemoryEpisodeV4, request: GraphRecallRequest) => boolean): boolean {
+  if (!fact || !exactClaimAvailable(claim, snapshot) || claim.review.status !== 'accepted'
+    || fact.verificationState !== 'verified'
+    || fact.updatedAt > at || (fact.expiresAt !== undefined && fact.expiresAt <= at)
+    || !allowed(fact, request) || !request.sharePolicies.includes(claim.sharePolicy)
+    || !request.sensitivities.includes(claim.sensitivity)
+    || fact.scope.ownerId !== request.scope.ownerId || fact.scope.agentId !== request.scope.agentId
+    || claim.scope.ownerId !== request.scope.ownerId || claim.scope.agentId !== request.scope.agentId
+    || !scopeIncludesSession(request.scope, fact.scope, claim.scope, includeOwnedSessions)) return false
+  const latest = snapshot.factVersions.filter(item => item.factId === fact.id)
+    .reduce((version, item) => Math.max(version, item.version), 0)
+  if (latest !== claim.fact.version) return false
+  const sensitivity = ['normal', 'private', 'secret']
+  const shares = ['allow-remote', 'ask', 'local-only']
+  if (sensitivity.indexOf(claim.sensitivity) < sensitivity.indexOf(fact.sensitivity)
+    || shares.indexOf(claim.sharePolicy) < shares.indexOf(fact.sharePolicy)) return false
+  return claim.provenance.sources.every(source => {
+    const episode = snapshot.episodes.find(item => item.id === source.episodeId)
+    return !!episode && allowed(episode, request)
+      && sensitivity.indexOf(claim.sensitivity) >= sensitivity.indexOf(episode.sensitivity)
+      && shares.indexOf(claim.sharePolicy) >= shares.indexOf(episode.sharePolicy)
+  })
+}
+
+function scopeIncludesSession(request: GraphScope, fact: GraphScope, claim: GraphScope,
+  includeOwnedSessions: boolean): boolean {
+  if (fact.sessionId !== claim.sessionId) return false
+  return request.sessionId === undefined
+    ? includeOwnedSessions || fact.sessionId === undefined
+    : fact.sessionId === request.sessionId
 }

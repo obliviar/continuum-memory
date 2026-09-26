@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseUieOutput, uieReviewCandidates } from './uie-extractor'
+import { parseUieOutput, uieGraphExtractionRun, uieReviewCandidates } from './uie-extractor'
 
 describe('local UIE-base output adapter', () => {
   it('deduplicates root spans and preserves nested relation evidence', () => {
@@ -52,5 +52,19 @@ describe('local UIE-base output adapter', () => {
       人物: [{ text: '张三', start: 1, end: 3, probability: 0.8 }],
     })
     expect(result.entities[0]).toMatchObject({ text: '张三', start: 1, end: 3 })
+  })
+
+  it('retains raw UIE output and converts every relation to source-aligned graph candidates', () => {
+    const text = '🙂张三工作于星河公司。'
+    const raw = { 人物: [{ text: '张三', start: 1, end: 3, probability: 0.92,
+      relations: { 工作于: [{ text: '星河公司', start: 6, end: 10, probability: 0.88 }] } }],
+    企业: [{ text: '星河公司', start: 6, end: 10, probability: 0.91 }] }
+    const parsed = parseUieOutput(text, raw)
+    const run = uieGraphExtractionRun('message-1', text, parsed)
+    expect((run.rawOutput as { uieRawOutput: unknown }).uieRawOutput).toEqual(raw)
+    expect(run.entityMentions).toMatchObject([{ text: '张三', span: { start: 2, end: 4 } },
+      { text: '星河公司', span: { start: 7, end: 11 } }])
+    expect(run.factCandidates[0]).toMatchObject({ predicate: '工作于', modelScore: 0.88,
+      evidenceSpan: { start: 2, end: 11 }, context: { negation: { resolution: 'unresolved' } } })
   })
 })

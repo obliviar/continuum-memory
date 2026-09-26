@@ -31,6 +31,14 @@ import {
   createGraphExtractionResultStore,
   createGraphNormalizationStore,
   normalizeGraphExtraction,
+  assessGraphClaim,
+  confirmGraphClaim,
+  rejectGraphClaim,
+  deferGraphClaim,
+  setGraphUseAssessment,
+  createGraphL1Store,
+  createGraphL1Writer,
+  createGraphPredicateRegistry,
   createV4ShadowWriter,
   createVectorStore,
   extractMemoryCandidates,
@@ -49,6 +57,8 @@ import type {
   MemoryExtractor,
   GraphExtractionResultStore,
   GraphNormalizationStore,
+  GraphL1Store,
+  GraphL1Writer,
   MemoryV4LifecycleService,
   MemoryCandidateReviewService,
   MemoryEmbeddingIndex,
@@ -372,6 +382,8 @@ let memoryV4InternalFeedbackPersistence: EncryptedMemoryPersistence | undefined
 let memoryV4InternalFeedbackStore: MemoryV4InternalFeedbackStore | undefined
 let graphExtractionStore: GraphExtractionResultStore | undefined
 let graphNormalizationStore: GraphNormalizationStore | undefined
+let graphL1Store: GraphL1Store | undefined
+let graphL1Writer: GraphL1Writer | undefined
 let memoryV4ShadowTaskQueue: MemoryV4ShadowTaskQueue<MemoryV4ShadowComparisonTask> | undefined
 let memoryV4ShadowGeneration = 0
 let memoryV4ShadowEvaluationError = ''
@@ -427,6 +439,8 @@ const graphExtractionStoragePath = join(userDataDir, 'graph-extractions.enc')
 const graphExtractionKeyPath = join(userDataDir, 'graph-extractions-key.json')
 const graphNormalizationStoragePath = join(userDataDir, 'graph-normalization.enc')
 const graphNormalizationKeyPath = join(userDataDir, 'graph-normalization-key.json')
+const graphL1StoragePath = join(userDataDir, 'graph-l1.enc')
+const graphL1KeyPath = join(userDataDir, 'graph-l1-key.json')
 const legacyMemoryStoragePath = join(userDataDir, 'memories.json')
 const memoryV4StoragePath = join(userDataDir, 'memory-v4.enc')
 const memoryV4BackupPath = join(userDataDir, 'memory-v4.enc.backup')
@@ -511,14 +525,26 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
   const smartExtractor = createSmartMemoryExtractor({
     getConfig: () => ({ apiKey: apiConfig.apiKey, baseURL: apiConfig.baseURL, model: apiConfig.model }),
     fallback: extractMemoryCandidates,
-    saveGraphExtraction: (run) => {
+    saveGraphExtraction: async (run) => {
       graphExtractionStore?.append(run)
       if (graphNormalizationStore && run.status !== 'failed') {
-        graphNormalizationStore.appendResult(normalizeGraphExtraction(run, {
+        const normalized = normalizeGraphExtraction(run, {
           entities: graphNormalizationStore.entities(),
           aliasDecisions: graphNormalizationStore.aliasDecisions(),
           scope: localMemoryScope,
-        }))
+        })
+        graphNormalizationStore.appendResult(normalized)
+        for (const fact of normalized.facts) {
+          const evidence = run.factCandidates.find(item => item.id === fact.sourceFactId)
+          if (!evidence)
+            continue
+          const privacy = inferMemoryPrivacy(run.sourceText)
+          const review = assessGraphClaim(run, fact, privacy)
+          if (graphL1Writer)
+            await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
+          else
+            graphL1Store?.recordReview(review)
+        }
       }
     },
   })
@@ -629,6 +655,8 @@ function initializeMemory(): void {
   memoryV4InternalFeedbackPersistence = undefined
   graphExtractionStore = undefined
   graphNormalizationStore = undefined
+  graphL1Store = undefined
+  graphL1Writer = undefined
   memoryV4InternalFeedbackStore = undefined
   memoryV4ShadowEvaluationError = ''
   memoryV4InternalFeedbackError = ''
@@ -670,6 +698,13 @@ function initializeMemory(): void {
       unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
     })
     graphNormalizationStore = createGraphNormalizationStore(graphNormalizationPersistence)
+    const graphL1Persistence = createEncryptedFilePersistence({
+      encryptedPath: graphL1StoragePath,
+      keyPath: graphL1KeyPath,
+      protectKey: key => safeStorage.encryptString(key.toString('base64')),
+      unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+    })
+    graphL1Store = createGraphL1Store(graphL1Persistence)
     let embeddingIndex: MemoryEmbeddingIndex | undefined
     try {
       const embeddingPersistence = createEncryptedFilePersistence({
@@ -740,6 +775,7 @@ function initializeMemory(): void {
       onSourcesUnlinked: (commit) => {
         graphExtractionStore?.removeSources(commit.messageIds)
         graphNormalizationStore?.removeSources(commit.messageIds)
+        graphL1Store?.removeSources(commit.messageIds)
         memoryV4Shadow?.enqueueSourceUnlink(commit)
         memoryV4Shadow?.flush()
       },
@@ -789,6 +825,7 @@ function initializeMemory(): void {
       })
       const v4Repository = createMemoryV4Repository({ persistence: v4Persistence })
       memoryV4Repository = v4Repository
+      graphL1Writer = createGraphL1Writer(v4Repository, graphL1Store!, createGraphPredicateRegistry(), localMemoryScope)
       memoryV4Lifecycle = createMemoryV4LifecycleService(v4Repository)
       memoryCandidateReview = createMemoryCandidateReviewService(v4Repository)
       memoryV4Persistence = v4Persistence
@@ -817,6 +854,7 @@ function initializeMemory(): void {
         writeBootLog(`Memory V4 dual-write ready: ${memoryV4Reconciliation.mirroredCount}/${memoryV4Reconciliation.sourceCount} facts reconciled, ${memoryV4Reconciliation.deletedCount} tombstoned`)
         writeBootLog(`Memory V4 diff audit: ${(memoryV4Audit.consistency * 100).toFixed(4)}% exact, ${memoryV4Audit.issues.length} issues`)
       }
+      void graphL1Writer.retryPending().catch(error => writeBootLog(`Graph L1 publication retry failed: ${errorMessage(error)}`))
       if (memorySemanticActive && embeddingIndex) {
         try {
           const semanticGeneration = memoryV4ShadowGeneration
@@ -1634,6 +1672,15 @@ function setupIPC() {
     },
     items: memory ? await memory.list(localMemoryScope, Number(limit)) : [],
     reviewItems: memoryCandidateReview?.list(localMemoryScope, Number(limit)) ?? [],
+    graphReviewItems: graphL1Store?.reviews().filter(item => item.status === 'pending').slice(0, Number(limit)).map((review) => {
+      const run = graphExtractionStore?.list().find(item => item.id === review.runId)
+      const source = run?.factCandidates.find(item => item.id === review.sourceFactId)
+      return {
+        review,
+        predicate: source?.predicate ?? '',
+        evidence: run && source ? run.sourceText.slice(source.evidenceSpan.start, source.evidenceSpan.end) : '',
+      }
+    }) ?? [],
     pendingCaptureSegments: memory?.pendingCaptureCount() ?? 0,
   }))
 
@@ -1654,6 +1701,44 @@ function setupIPC() {
       : memoryCandidateReview.reject(id, localMemoryScope, note)
     memoryV4Shadow?.flush()
     return changed ? { ok: true } : { ok: false, error: '候选不存在、已审核或不属于当前作用域。' }
+  })
+
+  ipcMain.handle('memory:graph-review', async (
+    _event,
+    input: { id?: unknown; outcome?: unknown; reason?: unknown; retrievalRetain?: unknown; proactivePreference?: unknown },
+  ) => {
+    if (!graphL1Store || !graphL1Writer || !graphExtractionStore || !graphNormalizationStore)
+      return { ok: false, error: 'Graph L1 审核当前不可用。' }
+    const id = typeof input?.id === 'string' ? input.id.trim() : ''
+    const reason = typeof input?.reason === 'string' ? input.reason.trim() : ''
+    if (!id || !reason || !['approved', 'rejected', 'pending'].includes(String(input.outcome)))
+      return { ok: false, error: '无效的 Graph L1 审核操作。' }
+    const current = graphL1Store.reviews().find(item => item.id === id)
+    if (!current || graphL1Store.tasks().some(task => task.review.id === id))
+      return { ok: false, error: '审核项不存在或已进入发布流程。' }
+    let review = input.outcome === 'approved' ? confirmGraphClaim(current, reason)
+      : input.outcome === 'rejected' ? rejectGraphClaim(current, reason)
+        : deferGraphClaim(current, reason)
+    if (review.status === 'approved'
+      && (typeof input.retrievalRetain === 'boolean' || typeof input.proactivePreference === 'boolean')) {
+      review = setGraphUseAssessment(review, {
+        retrievalRetain: typeof input.retrievalRetain === 'boolean' ? input.retrievalRetain : review.retrieval.retain,
+        proactivePreference: typeof input.proactivePreference === 'boolean'
+          ? input.proactivePreference : review.proactive.useAsPreference,
+        reason,
+      })
+    }
+    if (review.status !== 'approved') {
+      graphL1Store.recordReview(review)
+      return { ok: true }
+    }
+    const run = graphExtractionStore.list().find(item => item.id === review.runId)
+    const fact = graphNormalizationStore.results().find(item => item.runId === review.runId)
+      ?.facts.find(item => item.sourceFactId === review.sourceFactId)
+    if (!run || !fact || fact.status !== 'ready')
+      return { ok: false, error: '来源或实体身份尚未完成解析。' }
+    const task = await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
+    return task?.state === 'published' ? { ok: true, published: true } : { ok: true, published: false }
   })
 
   ipcMain.handle('memory:v4-internal-feedback', async (
@@ -1868,6 +1953,7 @@ function setupIPC() {
     await memory.clear(localMemoryScope)
     graphExtractionStore?.clear()
     graphNormalizationStore?.clear()
+    graphL1Store?.clear()
     memoryV4ShadowEvaluationStore?.clear()
     memoryV4InternalFeedbackStore?.clear()
     return { ok: true, count: 0 }
@@ -1885,6 +1971,9 @@ function setupIPC() {
   ipcMain.handle('app:reset', async () => {
     invalidateMemoryV4ShadowComparisons()
     await memory?.clear(localMemoryScope)
+    graphExtractionStore?.clear()
+    graphNormalizationStore?.clear()
+    graphL1Store?.clear()
     memoryV4ShadowEvaluationStore?.clear()
     sessionStore.getSessionMessages('default').splice(0)
     sessionPersistence?.save('{}')

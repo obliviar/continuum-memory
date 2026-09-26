@@ -17,7 +17,7 @@ export interface SmartMemoryExtractorOptions {
   fallback?: MemoryExtractor
   complete?: (prompt: string, config: SmartExtractorConfig) => Promise<string>
   /** Persist the complete UIE result before memory candidate conversion. */
-  saveGraphExtraction?: (run: GraphExtractionRun) => void
+  saveGraphExtraction?: (run: GraphExtractionRun) => void | Promise<void>
 }
 
 interface RawSmartMemory {
@@ -65,7 +65,7 @@ export function createSmartMemoryExtractor(options: SmartMemoryExtractorOptions)
           ? sourceIds[0] : String(turn.metadata?.memoryCaptureId ?? 'unknown-source')
         const memories = (parsed as { memories?: unknown })?.memories
         saveAttempted = true
-        options.saveGraphExtraction(createGraphExtractionRun({
+        await options.saveGraphExtraction(createGraphExtractionRun({
           sourceId,
           sourceText: turn.userMessage.slice(0, 6000),
           modelId: config.model,
@@ -89,7 +89,7 @@ export function createSmartMemoryExtractor(options: SmartMemoryExtractorOptions)
           statusReason: 'model-or-response-error',
         })
         failed.status = 'failed'
-        try { options.saveGraphExtraction(failed) }
+        try { await options.saveGraphExtraction(failed) }
         catch { /* Keep the existing local fallback when diagnostic storage fails. */ }
       }
       return local

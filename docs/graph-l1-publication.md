@@ -1,0 +1,11 @@
+# L1 graph fact review and publication
+
+Smart extraction saves raw UIE output first. Identity and predicate normalization runs next. A separate graph review records `approved`, `rejected`, or `pending` with a reason, source ID and revision, model score, reviewer, user-confirmation flag, sensitivity, and share policy. The retrieval assessment is independent of proactive preference use: source-backed entity facts can be retained for search without becoming user preferences. Proactive preference use requires an explicit user confirmation and selection.
+
+Approved, resolved candidates enter an encrypted publication outbox. The writer commits an Episode, active V4 Fact, direct evidence link, auditable Fact version, and domain event in one V4 repository transaction. Only after the exact version exists does it publish a graph-core-shaped `GraphClaimRecord` and its context in the encrypted L1 store. Entity-to-entity edges are derived from that Claim and carry its `claimRef`; literals do not become entity edges. The Claim retains entity refs, predicate roles, evidence span and source hash, valid time and original time text, polarity, modality, condition, privacy, and accepted review provenance.
+
+The outbox is persisted before either write. If V4 persistence fails, no Claim is published. If L1 persistence fails after V4 commits, the task remains for retry. Startup retries outstanding tasks, validates the exact active Fact version and available evidence, and uses deterministic IDs to avoid duplicates. Source truncation and memory clear remove local L1 claims, edges, tasks, and reviews.
+
+The memory manager exposes pending graph reviews with source evidence, a required reason, and separate checkboxes for retrieval retention and proactive preference use. Manual confirmation keeps the source and privacy fields and does not replace the original model score.
+
+The current `experiment` branch still lacks the complete graph-core package from `origin/feat/graph-core`. This change provides a local encrypted Claim/context/edge store with record shapes compatible with that branch. It does not publish a complete `GraphSemanticBundle` through the remote branch's `GraphSemanticWritePort`; that integration will be needed when graph-core is merged. No unresolved entity or predicate is silently promoted to an accepted Claim.

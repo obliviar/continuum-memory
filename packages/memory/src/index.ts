@@ -125,6 +125,20 @@ export type {
 } from './long-term/graph-identity-normalization'
 export { createGraphNormalizationStore } from './long-term/graph-normalization-store'
 export type { GraphNormalizationStore } from './long-term/graph-normalization-store'
+export {
+  GRAPH_L1_WRITE_VERSION,
+  assessGraphClaim,
+  confirmGraphClaim,
+  rejectGraphClaim,
+  deferGraphClaim,
+  setGraphUseAssessment,
+  createGraphL1Store,
+  createGraphL1Writer,
+} from './long-term/graph-l1-write'
+export type {
+  GraphClaimRecord, GraphClaimReview, GraphContextRecord, GraphEntityRelationEdge,
+  GraphL1Store, GraphL1Writer, GraphPublicationTask,
+} from './long-term/graph-l1-write'
 export type { MemoryCandidate } from './long-term/memory-extractor'
 export { MEMORY_NORMALIZER_VERSION, normalizeMemoryCandidate, normalizedMemoryFields } from './long-term/memory-normalizer'
 export type { NormalizedMemoryFields, NormalizedMemoryModality, NormalizedMemoryPolarity } from './long-term/memory-normalizer'

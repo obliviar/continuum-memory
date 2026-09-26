@@ -115,6 +115,21 @@ interface MemoryReviewItem {
   evidence: Array<{ id: string; content?: string; contentState: string; recordedAt: number }>
 }
 
+interface GraphReviewItem {
+  review: {
+    id: string
+    status: 'pending'
+    reason: string
+    modelScore: number
+    sourceId: string
+    sensitivity: 'normal' | 'private' | 'secret'
+    retrieval: { retain: boolean; reason: string }
+    proactive: { useAsPreference: boolean; reason: string }
+  }
+  predicate: string
+  evidence: string
+}
+
 // ── Speech synthesis types (Chromium built-in TTS) ─────
 // (speechSynthesis and SpeechSynthesisUtterance are global DOM types)
 
@@ -224,6 +239,10 @@ const memoryCount = ref(0)
 const memoryStoragePath = ref('')
 const memoryItems = ref<MemoryItem[]>([])
 const memoryReviewItems = ref<MemoryReviewItem[]>([])
+const graphReviewItems = ref<GraphReviewItem[]>([])
+const graphReviewReasons = ref<Record<string, string>>({})
+const graphRetrievalRetain = ref<Record<string, boolean>>({})
+const graphProactivePreferences = ref<Record<string, boolean>>({})
 const pendingCaptureSegments = ref(0)
 const manualMemoryInput = ref('')
 const memoryLoading = ref(false)
@@ -500,6 +519,11 @@ async function refreshMemoryList() {
     memoryStoragePath.value = result.storagePath || ''
     memoryItems.value = Array.isArray(result.items) ? result.items : []
     memoryReviewItems.value = Array.isArray(result.reviewItems) ? result.reviewItems : []
+    graphReviewItems.value = Array.isArray(result.graphReviewItems) ? result.graphReviewItems : []
+    for (const item of graphReviewItems.value) {
+      graphRetrievalRetain.value[item.review.id] ??= item.review.retrieval.retain
+      graphProactivePreferences.value[item.review.id] ??= item.review.proactive.useAsPreference
+    }
     pendingCaptureSegments.value = Number(result.pendingCaptureSegments) || 0
     applyMemoryRuntimeStatus(result)
     if (result.error) {
@@ -535,6 +559,38 @@ async function reviewMemoryCandidate(id: string, outcome: 'approved' | 'rejected
   catch (error) {
     memoryStatusError.value = true
     memoryStatusMessage.value = error instanceof Error ? error.message : '候选审核失败。'
+  }
+  finally {
+    memoryMutating.value = false
+  }
+}
+
+async function reviewGraphCandidate(id: string, outcome: 'approved' | 'rejected' | 'pending') {
+  if (memoryMutating.value) return
+  const reason = graphReviewReasons.value[id]?.trim()
+  if (!reason) return
+  memoryMutating.value = true
+  memoryStatusError.value = false
+  try {
+    const result = await ipcRenderer.invoke('memory:graph-review', {
+      id, outcome, reason,
+      retrievalRetain: graphRetrievalRetain.value[id] !== false,
+      proactivePreference: graphProactivePreferences.value[id] === true,
+    })
+    if (!result?.ok) {
+      memoryStatusError.value = true
+      memoryStatusMessage.value = result?.error || '图事实审核失败。'
+      return
+    }
+    memoryStatusMessage.value = outcome === 'approved'
+      ? result.published ? '图事实已确认并写入。' : '审核已保存，发布任务等待重试。'
+      : outcome === 'rejected' ? '图事实已拒绝。' : '图事实保持待确认。'
+    delete graphReviewReasons.value[id]
+    await refreshMemoryList()
+  }
+  catch (error) {
+    memoryStatusError.value = true
+    memoryStatusMessage.value = error instanceof Error ? error.message : '图事实审核失败。'
   }
   finally {
     memoryMutating.value = false
@@ -1485,6 +1541,38 @@ async function doReset() {
             <div class="memory-review-toolbar">
               <span>策略升级后可影子重跑全部候选，不会直接改动正式记忆。</span>
               <button class="secondary-btn" :disabled="memoryMutating" @click="reprocessMemoryCandidates">影子重处理</button>
+            </div>
+          </section>
+
+          <section v-if="graphReviewItems.length > 0" class="memory-review-panel">
+            <div class="memory-list-header">
+              <strong>待确认图事实</strong>
+              <span>可检索资料与主动偏好分开审核</span>
+            </div>
+            <div v-for="item in graphReviewItems" :key="item.review.id" class="memory-review-item">
+              <div class="memory-item-main">
+                <div class="memory-item-meta">
+                  <span class="memory-kind">{{ item.predicate || '未识别关系' }}</span>
+                  <span class="memory-state conflicted">待确认</span>
+                  <span>模型分数 {{ Math.round(item.review.modelScore * 100) }}%</span>
+                </div>
+                <div class="memory-content">{{ item.evidence || '[来源证据不可用]' }}</div>
+                <div class="field-hint">原因：{{ item.review.reason }} · 来源：{{ item.review.sourceId }} · 隐私：{{ item.review.sensitivity }}</div>
+                <input v-model="graphReviewReasons[item.review.id]" class="settings-input" maxlength="500" placeholder="填写审核原因" />
+                <label class="memory-check-row">
+                  <input v-model="graphRetrievalRetain[item.review.id]" type="checkbox" />
+                  <span>保留为可检索资料</span>
+                </label>
+                <label class="memory-check-row">
+                  <input v-model="graphProactivePreferences[item.review.id]" type="checkbox" />
+                  <span>作为我的长期偏好主动使用</span>
+                </label>
+              </div>
+              <div class="memory-item-actions">
+                <button class="memory-restore-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'approved')">确认</button>
+                <button class="memory-delete-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'rejected')">拒绝</button>
+                <button class="secondary-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'pending')">继续待确认</button>
+              </div>
             </div>
           </section>
 

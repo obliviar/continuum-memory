@@ -51,6 +51,7 @@ describe('graph relation judgement queue', () => {
     expect(make('r1').sync([a, b, c], [predicate], scope, () => '')).toBe(0)
     expect(make('r1').snapshot().find(task => task.key === key)?.status).toBe('completed')
     expect(make('r2').sync([a, b, c], [predicate], scope, () => '')).toBe(2)
+    expect(make('r2').snapshot().find(task => task.key === key)?.status).toBe('stale')
     const revised = { ...b, ref: { ...b.ref, version: 2 } }
     expect(make('r1').sync([a, revised, c], [predicate], scope, () => '')).toBe(2)
     const restored = make('r1')
@@ -71,5 +72,23 @@ describe('graph relation judgement queue', () => {
     expect(queue.snapshot().map(task => task.routes[0])).toContain('dense')
     expect(queue.snapshot().some(task => task.routes.includes('relation-neighbor'))).toBe(true)
     expect(queue.snapshot().every(task => task.claims.every(ref => ref.id !== 'c4'))).toBe(true)
+  })
+
+  it('persists NLI scores and retries a failed task without losing its pair key', () => {
+    const persistence = storage()
+    const a = claim('c1', 'episode-1', 'person-1')
+    const b = claim('c2', 'episode-2', 'person-1')
+    const make = () => createGraphRelationTaskQueue(persistence, { modelId: 'nli', modelRevision: 'r1', maxDenseSeeds: 0 })
+    const queue = make()
+    queue.sync([a, b], [predicate], scope, () => '')
+    const key = queue.ready()[0]!.key
+    queue.fail(key, 'local model not ready', 5000)
+    expect(make().ready(4999)).toEqual([])
+    expect(make().ready(5000)[0]?.attempts).toBe(1)
+    make().complete(key, { label: 'ENTAILMENT', evaluatedAt: 6000,
+      scores: { CONTRADICTION: 0.1, NEUTRAL: 0.2, ENTAILMENT: 0.7 },
+      premiseHash: 'premise', hypothesisHash: 'hypothesis', truncated: false })
+    expect(make().snapshot()[0]?.result?.scores?.ENTAILMENT).toBe(0.7)
+    expect(make().ready(7000)).toEqual([])
   })
 })

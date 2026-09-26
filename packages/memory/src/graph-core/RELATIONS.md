@@ -17,7 +17,7 @@ L2 使用独立的关系快照；不修改现有 V4 持久化格式，也不把�
 
 来源或 Claim 删除时，宿主应先停止读取并调用 `purge`，原子清除关联关系、候选和 NLI 观察，随后重建并发布新的 ready 快照。如果旧 Claim 已从 L1 快照移走，宿主还需传入受影响的精确 Claim 引用。`invalidate` 只关闭旧视图，不替代清除。加密文件没有明文备份；物理介质残留和宿主级备份仍由宿主的数据删除策略负责。
 
-桌面端目前生成待判断任务，尚未接入具体 NLI 进程／服务，也尚无已采纳 L2 关系快照供桌面队列查询邻居。队列的邻居索引接收已审核关系后即可使用。现有 V4 Worker 和 `GraphAnswerEvidenceBundle` 亦未接入；候选分数不能绕过审核发布为权威关系。
+桌面端将待判断任务送入本地常驻 `Erlangshen-Roberta-330M-NLI` 进程。模型从本地快照离线加载，返回矛盾、无关、蕴含三分类概率；队列加密保存分数、输入文本哈希、截断状态与失败重试时间。模型输出只是观察，不自动采纳 L2 关系。可通过 `CONTINUUM_MEMORY_NLI_PYTHON`、`CONTINUUM_MEMORY_NLI_MODEL_PATH` 和 `CONTINUUM_MEMORY_NLI_DEPENDENCIES` 指向其他本地安装位置。桌面端尚无已采纳 L2 关系快照供队列查询邻居；队列的邻居索引接收已审核关系后即可使用。现有 V4 Worker 和 `GraphAnswerEvidenceBundle` 亦未接入；候选分数不能绕过审核发布为权威关系。
 ## 与受限召回的连接
 
 `recall/l2-recall-adapter.ts` 的 `createL2GraphRecallAdapter` 将精确 L1/L2 视图接入现有受限多跳召回和内部 `GraphAnswerEvidencePack`。输入须指定 expectedRelationManifestId；读取时保留五种关系的原义、权威原记录和 L2 manifest，不将旧样例 contributes-to 自动转换为 explains。宿主须提供 L1 读取、L2 来源读取、tokenizer，以及可选的问题种子检索回调。

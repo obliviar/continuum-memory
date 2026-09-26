@@ -15,7 +15,17 @@ export interface GraphRelationJudgementTask {
   readonly routes: readonly GraphRelationPairSeed['route'][]
   readonly status: 'pending' | 'completed' | 'stale'
   readonly createdAt: number
-  readonly result?: { readonly label: 'CONTRADICTION' | 'NEUTRAL' | 'ENTAILMENT'; readonly evaluatedAt: number }
+  readonly attempts?: number
+  readonly nextAttemptAt?: number
+  readonly lastError?: string
+  readonly result?: {
+    readonly label: 'CONTRADICTION' | 'NEUTRAL' | 'ENTAILMENT'
+    readonly scores?: Readonly<Record<'CONTRADICTION' | 'NEUTRAL' | 'ENTAILMENT', number>>
+    readonly premiseHash?: string
+    readonly hypothesisHash?: string
+    readonly truncated?: boolean
+    readonly evaluatedAt: number
+  }
 }
 export interface GraphRelationTaskPersistence {
   load: () => string | undefined
@@ -28,6 +38,9 @@ export interface GraphRelationTaskQueue {
     sourceText: (claim: GraphClaimRecord) => string,
     relations?: readonly GraphRelationRecord[]) => number
   complete: (key: string, result: NonNullable<GraphRelationJudgementTask['result']>) => void
+  fail: (key: string, error: string, nextAttemptAt: number) => void
+  ready: (now?: number) => readonly GraphRelationJudgementTask[]
+  nextRetryAt: () => number | undefined
 }
 
 export function graphRelationPairKey(a: GraphClaimRef, b: GraphClaimRef,
@@ -50,11 +63,32 @@ export function createGraphRelationTaskQueue(persistence: GraphRelationTaskPersi
   const persist = (): void => persistence.save(JSON.stringify({ version: 1, tasks: [...tasks.values()], processed: [...processed] }))
   return {
     snapshot: () => structuredClone([...tasks.values()]),
+    ready: (now = Date.now()) => structuredClone([...tasks.values()].filter(task => task.status === 'pending'
+      && (task.nextAttemptAt ?? 0) <= now)),
+    nextRetryAt: () => [...tasks.values()].filter(task => task.status === 'pending'
+      && (task.nextAttemptAt ?? 0) > Date.now()).reduce<number | undefined>((next, task) =>
+        next === undefined ? task.nextAttemptAt : Math.min(next, task.nextAttemptAt!), undefined),
+    fail(key, error, nextAttemptAt) {
+      const task = tasks.get(key)
+      if (!task || task.status !== 'pending') return
+      const next = { ...task, attempts: (task.attempts ?? 0) + 1,
+        nextAttemptAt, lastError: error.slice(0, 300) }
+      tasks.set(key, next)
+      try { persist() } catch (cause) { tasks.set(key, task); throw cause }
+    },
     complete(key, result) {
       const task = tasks.get(key)
       if (!task) throw new Error('Unknown graph relation judgement task')
       if (task.status === 'stale') throw new Error('Graph relation judgement task has stale Claim references')
       if (task.status === 'completed') return
+      if (result.scores) {
+        const scores = Object.values(result.scores)
+        if (scores.length !== 3 || scores.some(score => !Number.isFinite(score) || score < 0 || score > 1)
+          || Math.abs(scores.reduce((sum, score) => sum + score, 0) - 1) > 0.001)
+          throw new Error('Invalid NLI scores')
+        if (result.scores[result.label] < Math.max(...scores) - 1e-9)
+          throw new Error('NLI label differs from scores')
+      }
       const next = { ...task, status: 'completed' as const, result }
       const prior = tasks.get(key)
       tasks.set(key, next)
@@ -66,7 +100,9 @@ export function createGraphRelationTaskQueue(persistence: GraphRelationTaskPersi
       const byRef = new Map(active.map(claim => [refKey(claim.ref), claim]))
       let invalidated = false
       for (const [key, task] of tasks) {
-        const live = task.claims.every(ref => byRef.has(refKey(ref)))
+        const live = task.modelId === options.modelId && task.modelRevision === options.modelRevision
+          && task.preprocessingVersion === preprocessingVersion
+          && task.claims.every(ref => byRef.has(refKey(ref)))
         const nextStatus = live ? (task.result ? 'completed' : 'pending') : 'stale'
         if (task.status !== nextStatus) {
           tasks.set(key, { ...task, status: nextStatus })

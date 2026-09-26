@@ -1,8 +1,8 @@
 import { app, BrowserWindow, ipcMain, desktopCapturer, powerMonitor, safeStorage, shell } from 'electron'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createHmac, randomBytes } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { createHash, createHmac, randomBytes } from 'node:crypto'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 
 import { createAgentRuntime, createSessionManager, createChatHooks } from '@continuum-memory/core'
 import { createOpenAILlm } from '@continuum-memory/llm-openai'
@@ -123,6 +123,8 @@ import {
 } from './memory-v4-read-controller'
 import { createMemoryV4RuntimeObservability } from './memory-v4-runtime-observability'
 import { createLocalUieExtractor, uieGraphExtractionRun, uieReviewCandidates } from './uie-extractor'
+import { createLocalErlangshenNli, ERLANGSHEN_NLI_MODEL_ID,
+  ERLANGSHEN_NLI_PREPROCESSING_VERSION } from './local-erlangshen-nli'
 
 // Some Windows systems cannot initialize Electron's GPU subprocess. Disable
 // hardware acceleration before app readiness so the packaged app still starts.
@@ -169,6 +171,32 @@ function loadFileConfig() {
   return {}
 }
 const fileConfig = loadFileConfig()
+function discoverLocalNli(): { modelPath: string; pythonPath: string; dependenciesPath: string } | undefined {
+  const root = join(process.env.USERPROFILE ?? '', 'Documents', 'Codex')
+  const directories = (path: string): string[] => {
+    try { return readdirSync(path, { withFileTypes: true }).filter(item => item.isDirectory()).map(item => item.name) }
+    catch { return [] }
+  }
+  for (const date of directories(root)) {
+    for (const task of directories(join(root, date))) {
+      try {
+        const work = join(root, date, task, 'work')
+        const modelRoot = join(work, 'hf_cache', 'hub', 'models--IDEA-CCNL--Erlangshen-Roberta-330M-NLI')
+        const revisionFile = join(modelRoot, 'refs', 'main')
+        const pythonPath = join(work, 'uie_venv', 'Scripts', 'python.exe')
+        if (!existsSync(revisionFile) || !existsSync(pythonPath)) continue
+        const revision = readFileSync(revisionFile, 'utf8').trim()
+        const modelPath = join(modelRoot, 'snapshots', revision)
+        if (!existsSync(join(modelPath, 'pytorch_model.bin'))) continue
+        return { modelPath, pythonPath,
+          dependenciesPath: [join(work, 'model_deps'), join(work, 'gliner_deps')].join(';') }
+      }
+      catch { /* Continue to other local snapshots. */ }
+    }
+  }
+  return undefined
+}
+const discoveredNli = discoverLocalNli()
 const memoryEnabledEnvironment = environmentValue('CONTINUUM_MEMORY_ENABLED', 'DESKPET_MEMORY')
 const memoryV4ShadowEnvironment = environmentValue('CONTINUUM_MEMORY_V4_SHADOW', 'DESKPET_MEMORY_V4_SHADOW')
 const memoryV4InternalReviewEnvironment = environmentValue('CONTINUUM_MEMORY_V4_INTERNAL_REVIEW', 'DESKPET_MEMORY_V4_INTERNAL_REVIEW')
@@ -193,6 +221,12 @@ const config = {
   embeddingModel: environmentValue('CONTINUUM_MEMORY_EMBEDDING_MODEL', 'DESKPET_EMBEDDING_MODEL') || fileConfig.embeddingModel || LOCAL_HASH_EMBEDDING_MODEL,
   uiePythonPath: process.env.CONTINUUM_MEMORY_UIE_PYTHON || fileConfig.uiePythonPath || 'D:\\Models\\UIE-mini\\.venv-paddle\\Scripts\\python.exe',
   uieModelHome: process.env.CONTINUUM_MEMORY_UIE_MODEL_HOME || fileConfig.uieModelHome || 'D:\\Models\\UIE-mini',
+  nliPythonPath: process.env.CONTINUUM_MEMORY_NLI_PYTHON || fileConfig.nliPythonPath
+    || discoveredNli?.pythonPath || '',
+  nliModelPath: process.env.CONTINUUM_MEMORY_NLI_MODEL_PATH || fileConfig.nliModelPath
+    || discoveredNli?.modelPath || '',
+  nliDependenciesPath: process.env.CONTINUUM_MEMORY_NLI_DEPENDENCIES || fileConfig.nliDependenciesPath
+    || discoveredNli?.dependenciesPath || '',
 }
 
 // ── Persistence ─────────────────────────────────────────
@@ -405,6 +439,9 @@ let graphL1Store: GraphL1Store | undefined
 let graphL1Writer: GraphL1Writer | undefined
 let graphSemanticRepository: GraphSemanticRepository | undefined
 let graphRelationTaskQueue: GraphRelationTaskQueue | undefined
+let graphNliJudge: ReturnType<typeof createLocalErlangshenNli> | undefined
+let graphNliDraining = false
+let graphNliRetryTimer: ReturnType<typeof setTimeout> | undefined
 function syncGraphSemantic(): void {
   if (!graphSemanticRepository || !graphL1Store || !memoryV4Repository) return
   void graphSemanticRepository.syncFromClaims(graphL1Store, memoryV4Repository,
@@ -417,11 +454,73 @@ function syncGraphRelationTasks(): void {
   const bundle = graphSemanticRepository?.snapshot()
   if (!bundle || !graphRelationTaskQueue || !memoryV4Repository) return
   const episodes = new Map(memoryV4Repository.snapshot().episodes.map(episode => [episode.id, episode]))
-  graphRelationTaskQueue.sync(bundle.claims, bundle.predicates, localMemoryScope, claim =>
-    claim.provenance.sources.map(source => {
-      const text = episodes.get(source.episodeId)?.content ?? ''
-      return source.locator.kind === 'text-span' ? text.slice(source.locator.start, source.locator.end) : text
-    }).join('\n'))
+  graphRelationTaskQueue.sync(bundle.claims, bundle.predicates, localMemoryScope,
+    claim => graphClaimEvidenceText(claim, episodes))
+  scheduleGraphNliDrain()
+}
+function graphClaimEvidenceText(claim: { provenance: { sources: readonly { episodeId: string;
+  locator: { kind: string; start?: number; end?: number } }[] } },
+  episodes = new Map(memoryV4Repository?.snapshot().episodes.map(episode => [episode.id, episode]))): string {
+  return claim.provenance.sources.map(source => {
+    const text = episodes.get(source.episodeId)?.content ?? ''
+    return source.locator.kind === 'text-span'
+      ? text.slice(source.locator.start, source.locator.end) : text
+  }).join('\n')
+}
+function scheduleGraphNliDrain(): void {
+  if (graphNliRetryTimer) clearTimeout(graphNliRetryTimer)
+  graphNliRetryTimer = undefined
+  if (!graphNliJudge?.isReady() || !graphRelationTaskQueue || graphNliDraining) return
+  void drainGraphNli().catch(error => writeBootLog(`Graph NLI drain failed: ${errorMessage(error)}`))
+}
+async function drainGraphNli(): Promise<void> {
+  if (graphNliDraining || !graphNliJudge || !graphRelationTaskQueue) return
+  graphNliDraining = true
+  try {
+    while (true) {
+      const task = graphRelationTaskQueue.ready()[0]
+      if (!task) break
+      const claims = graphSemanticRepository?.snapshot()?.claims ?? []
+      const premise = claims.find(claim => claim.ref.id === task.claims[0].id
+        && claim.ref.version === task.claims[0].version)
+      const hypothesis = claims.find(claim => claim.ref.id === task.claims[1].id
+        && claim.ref.version === task.claims[1].version)
+      if (!premise || !hypothesis) { syncGraphRelationTasks(); continue }
+      const premiseText = graphClaimEvidenceText(premise)
+      const hypothesisText = graphClaimEvidenceText(hypothesis)
+      try {
+        if (!premiseText.trim() || !hypothesisText.trim()) throw new Error('Graph Claim evidence is unavailable')
+        const result = await graphNliJudge.judge({ premise: { kind: 'claim', ref: premise.ref, text: premiseText },
+          hypothesisText })
+        if (!result.ok) throw new Error(result.error.message)
+        if (result.value.modelId !== task.modelId || result.value.modelRevision !== task.modelRevision
+          || result.value.preprocessingVersion !== task.preprocessingVersion)
+          throw new Error('Graph NLI task and response versions differ')
+        const scores = result.value.scores
+        const label = (Object.keys(scores) as Array<keyof typeof scores>)
+          .reduce((best, next) => scores[next] > scores[best] ? next : best)
+        graphRelationTaskQueue.complete(task.key, { label, scores, truncated: result.value.truncated,
+          premiseHash: createHash('sha256').update(premiseText).digest('hex'),
+          hypothesisHash: createHash('sha256').update(hypothesisText).digest('hex'), evaluatedAt: Date.now() })
+      }
+      catch (error) {
+        const delay = Math.min(300_000, 5_000 * 2 ** Math.min(task.attempts ?? 0, 6))
+        graphRelationTaskQueue.fail(task.key, errorMessage(error), Date.now() + delay)
+        writeBootLog(`Graph NLI task deferred: ${errorMessage(error)}`)
+        break
+      }
+    }
+  }
+  finally {
+    graphNliDraining = false
+    if (graphRelationTaskQueue?.ready().length) {
+      graphNliRetryTimer = setTimeout(scheduleGraphNliDrain, 0)
+    }
+    else {
+      const next = graphRelationTaskQueue?.nextRetryAt()
+      if (next !== undefined) graphNliRetryTimer = setTimeout(scheduleGraphNliDrain, Math.max(100, next - Date.now()))
+    }
+  }
 }
 let memoryV4ShadowTaskQueue: MemoryV4ShadowTaskQueue<MemoryV4ShadowComparisonTask> | undefined
 let memoryV4ShadowGeneration = 0
@@ -735,6 +834,10 @@ function initializeMemory(): void {
   graphL1Writer = undefined
   graphSemanticRepository = undefined
   graphRelationTaskQueue = undefined
+  graphNliJudge?.close()
+  graphNliJudge = undefined
+  if (graphNliRetryTimer) clearTimeout(graphNliRetryTimer)
+  graphNliRetryTimer = undefined
   memoryV4InternalFeedbackStore = undefined
   memoryV4ShadowEvaluationError = ''
   memoryV4InternalFeedbackError = ''
@@ -945,13 +1048,24 @@ function initializeMemory(): void {
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
       })
       graphSemanticRepository = createGraphSemanticRepository(graphSemanticPersistence, v4Repository)
+      const nliRevision = config.nliModelPath ? basename(config.nliModelPath) : 'unavailable'
+      graphNliJudge = createLocalErlangshenNli({
+        pythonPath: config.nliPythonPath,
+        modelPath: config.nliModelPath,
+        dependenciesPath: config.nliDependenciesPath,
+        modelRevision: nliRevision,
+        scriptPath: app.isPackaged
+          ? join(process.resourcesPath, 'erlangshen_nli.py')
+          : join(app.getAppPath(), 'resources', 'erlangshen_nli.py'),
+      })
+      if (!graphNliJudge.isReady()) writeBootLog('Local Erlangshen NLI runtime is unavailable; relation tasks remain pending')
       graphRelationTaskQueue = createGraphRelationTaskQueue(createEncryptedFilePersistence({
         encryptedPath: join(userDataDir, 'graph-relation-tasks.enc'),
         keyPath: join(userDataDir, 'graph-relation-tasks-key.json'),
         protectKey: key => safeStorage.encryptString(key.toString('base64')),
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
-      }), { modelId: 'graph-nli', modelRevision: 'unconfigured',
-        preprocessingVersion: 'graph-relation-evidence-v1' })
+      }), { modelId: ERLANGSHEN_NLI_MODEL_ID, modelRevision: nliRevision,
+        preprocessingVersion: ERLANGSHEN_NLI_PREPROCESSING_VERSION })
       const predicateRegistry = createGraphPredicateRegistry()
       graphL1Writer = createGraphL1Writer(v4Repository, graphL1Store!, predicateRegistry, localMemoryScope, {
         syncFromClaims: async () => {
@@ -2312,6 +2426,8 @@ app.on('window-all-closed', () => {
 
 let memoryShutdownComplete = false
 app.on('before-quit', (event) => {
+  if (graphNliRetryTimer) clearTimeout(graphNliRetryTimer)
+  graphNliJudge?.close()
   memoryV4ConsolidationRunner?.stop()
   memoryV4ShadowGeneration += 1
   memoryV4ShadowTaskQueue?.stop()

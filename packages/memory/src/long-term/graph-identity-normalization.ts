@@ -70,11 +70,16 @@ export const DEFAULT_GRAPH_PREDICATES: readonly GraphPredicateRegistration[] = [
     ],
   },
   {
+    spec: spec('affiliatedWith', 'person', { entityType: 'person' }, 'organization', { entityType: 'organization' }, 'multiple'),
+    sourceRole: 'person', targetRole: 'organization',
+    labels: [{ text: '所属组织', direction: 'forward' }, { text: 'affiliated with', direction: 'forward' }],
+  },
+  {
     spec: spec('headquartersIn', 'organization', { entityType: 'organization' }, 'location', { entityType: 'location' }, 'single'),
     sourceRole: 'organization', targetRole: 'location',
     labels: [
       { text: 'headquartersIn', direction: 'forward' }, { text: 'headquartered in', direction: 'forward' },
-      { text: '总部位于', direction: 'forward' },
+      { text: '总部位于', direction: 'forward' }, { text: '总部地点', direction: 'forward' },
     ],
   },
   {

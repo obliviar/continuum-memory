@@ -24,7 +24,9 @@ SCHEMA = [
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--home-path", required=True)
+    location = parser.add_mutually_exclusive_group(required=True)
+    location.add_argument("--home-path")
+    location.add_argument("--model-path")
     args = parser.parse_args()
     request = json.load(sys.stdin)
     text = request.get("text")
@@ -33,11 +35,12 @@ def main():
 
     from paddlenlp import Taskflow
 
+    model_location = {"task_path": args.model_path} if args.model_path else {"home_path": args.home_path}
     extractor = Taskflow(
         "information_extraction",
         schema=SCHEMA,
         model="uie-base",
-        home_path=args.home_path,
+        **model_location,
         batch_size=8,
     )
     result = extractor(text)

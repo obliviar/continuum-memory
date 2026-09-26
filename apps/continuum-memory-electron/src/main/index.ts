@@ -171,16 +171,27 @@ function loadFileConfig() {
   return {}
 }
 const fileConfig = loadFileConfig()
-function discoverLocalNli(): { modelPath: string; pythonPath: string; dependenciesPath: string } | undefined {
+function localModelWorkDirectories(): string[] {
   const root = join(process.env.USERPROFILE ?? '', 'Documents', 'Codex')
   const directories = (path: string): string[] => {
     try { return readdirSync(path, { withFileTypes: true }).filter(item => item.isDirectory()).map(item => item.name) }
     catch { return [] }
   }
-  for (const date of directories(root)) {
-    for (const task of directories(join(root, date))) {
+  return directories(root).flatMap(date => directories(join(root, date))
+    .map(task => join(root, date, task, 'work')))
+}
+function discoverLocalUie(): { modelPath: string; pythonPath: string } | undefined {
+  for (const work of localModelWorkDirectories()) {
+    const modelPath = join(work, 'uie_base_model')
+    const pythonPath = join(work, 'uie_venv', 'Scripts', 'python.exe')
+    if (existsSync(join(modelPath, 'model_state.pdparams')) && existsSync(pythonPath))
+      return { modelPath, pythonPath }
+  }
+  return undefined
+}
+function discoverLocalNli(): { modelPath: string; pythonPath: string; dependenciesPath: string } | undefined {
+  for (const work of localModelWorkDirectories()) {
       try {
-        const work = join(root, date, task, 'work')
         const modelRoot = join(work, 'hf_cache', 'hub', 'models--IDEA-CCNL--Erlangshen-Roberta-330M-NLI')
         const revisionFile = join(modelRoot, 'refs', 'main')
         const pythonPath = join(work, 'uie_venv', 'Scripts', 'python.exe')
@@ -192,10 +203,10 @@ function discoverLocalNli(): { modelPath: string; pythonPath: string; dependenci
           dependenciesPath: [join(work, 'model_deps'), join(work, 'gliner_deps')].join(';') }
       }
       catch { /* Continue to other local snapshots. */ }
-    }
   }
   return undefined
 }
+const discoveredUie = discoverLocalUie()
 const discoveredNli = discoverLocalNli()
 const memoryEnabledEnvironment = environmentValue('CONTINUUM_MEMORY_ENABLED', 'DESKPET_MEMORY')
 const memoryV4ShadowEnvironment = environmentValue('CONTINUUM_MEMORY_V4_SHADOW', 'DESKPET_MEMORY_V4_SHADOW')
@@ -219,8 +230,11 @@ const config = {
   embeddingApiKey: environmentValue('CONTINUUM_MEMORY_EMBEDDING_API_KEY', 'DESKPET_EMBEDDING_API_KEY') || fileConfig.embeddingApiKey || process.env.CONTINUUM_MEMORY_API_KEY || process.env.OPENAI_API_KEY || fileConfig.apiKey || '',
   embeddingBaseURL: environmentValue('CONTINUUM_MEMORY_EMBEDDING_BASE_URL', 'DESKPET_EMBEDDING_BASE_URL') || fileConfig.embeddingBaseURL || process.env.CONTINUUM_MEMORY_BASE_URL || process.env.OPENAI_BASE_URL || fileConfig.baseURL || undefined,
   embeddingModel: environmentValue('CONTINUUM_MEMORY_EMBEDDING_MODEL', 'DESKPET_EMBEDDING_MODEL') || fileConfig.embeddingModel || LOCAL_HASH_EMBEDDING_MODEL,
-  uiePythonPath: process.env.CONTINUUM_MEMORY_UIE_PYTHON || fileConfig.uiePythonPath || 'D:\\Models\\UIE-mini\\.venv-paddle\\Scripts\\python.exe',
+  uiePythonPath: process.env.CONTINUUM_MEMORY_UIE_PYTHON || fileConfig.uiePythonPath
+    || discoveredUie?.pythonPath || 'D:\\Models\\UIE-mini\\.venv-paddle\\Scripts\\python.exe',
   uieModelHome: process.env.CONTINUUM_MEMORY_UIE_MODEL_HOME || fileConfig.uieModelHome || 'D:\\Models\\UIE-mini',
+  uieModelPath: process.env.CONTINUUM_MEMORY_UIE_MODEL_PATH || fileConfig.uieModelPath
+    || (process.env.CONTINUUM_MEMORY_UIE_MODEL_HOME || fileConfig.uieModelHome ? undefined : discoveredUie?.modelPath),
   nliPythonPath: process.env.CONTINUUM_MEMORY_NLI_PYTHON || fileConfig.nliPythonPath
     || discoveredNli?.pythonPath || '',
   nliModelPath: process.env.CONTINUUM_MEMORY_NLI_MODEL_PATH || fileConfig.nliModelPath
@@ -608,6 +622,7 @@ const imageMemory = createImageMemoryService(join(userDataDir, 'models', 'ocr'),
 const localUie = createLocalUieExtractor({
   pythonPath: config.uiePythonPath,
   modelHome: config.uieModelHome,
+  modelPath: config.uieModelPath,
   scriptPath: app.isPackaged
     ? join(process.resourcesPath, 'uie_extract.py')
     : join(app.getAppPath(), 'resources', 'uie_extract.py'),
@@ -959,7 +974,7 @@ function initializeMemory(): void {
         mode: memorySettings.extractionMode,
         remotePolicy: memorySettings.remotePolicy,
         imageMemoryEnabled: memorySettings.imageMemoryEnabled,
-        ...(memorySettings.extractionMode === 'uie' ? { uieModelHome: config.uieModelHome } : {}),
+        ...(memorySettings.extractionMode === 'uie' ? { uieModelHome: config.uieModelPath ?? config.uieModelHome } : {}),
         ...(memorySettings.extractionMode === 'smart' ? { model: apiConfig.model, baseURL: apiConfig.baseURL } : {}),
       })).digest('hex')}`,
       extractor: createConfiguredMemoryExtractor(),

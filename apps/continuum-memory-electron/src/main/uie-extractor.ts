@@ -39,12 +39,16 @@ export interface UieExtraction {
 export interface LocalUieOptions {
   pythonPath: string
   modelHome: string
+  /** Direct local Taskflow checkpoint directory, when it is not under modelHome/taskflow. */
+  modelPath?: string
   scriptPath: string
   timeoutMs?: number
 }
 
 export function createLocalUieExtractor(options: LocalUieOptions) {
-  const modelWeights = join(options.modelHome, 'taskflow', 'information_extraction', 'uie-base', 'model_state.pdparams')
+  const modelWeights = options.modelPath
+    ? join(options.modelPath, 'model_state.pdparams')
+    : join(options.modelHome, 'taskflow', 'information_extraction', 'uie-base', 'model_state.pdparams')
   return {
     isReady: () => existsSync(options.pythonPath) && existsSync(options.scriptPath) && existsSync(modelWeights),
     async extract(text: string): Promise<UieExtraction> {
@@ -60,7 +64,8 @@ export function createLocalUieExtractor(options: LocalUieOptions) {
 
 async function runPython(options: LocalUieOptions, text: string): Promise<unknown> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(options.pythonPath, [options.scriptPath, '--home-path', options.modelHome], {
+    const child = spawn(options.pythonPath, [options.scriptPath,
+      ...(options.modelPath ? ['--model-path', options.modelPath] : ['--home-path', options.modelHome])], {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
@@ -194,8 +199,8 @@ export function uieGraphExtractionRun(sourceId: string, sourceText: string, extr
 
 function entityType(label: string): string {
   if (label === '人物' || label === '历史人物') return 'person'
-  if (label === '组织机构' || label === '企业' || label === '学校') return 'organization'
-  if (label === '地点' || label === '国家' || label === '行政区') return 'location'
+  if (label === '组织机构' || label === '企业' || label === '学校' || label === '所属组织') return 'organization'
+  if (label === '地点' || label === '国家' || label === '行政区' || label === '总部地点') return 'location'
   return label
 }
 

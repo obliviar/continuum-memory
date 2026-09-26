@@ -1,7 +1,61 @@
 import { describe, expect, it } from 'vitest'
-import { parseUieOutput, uieGraphExtractionRun, uieReviewCandidates } from './uie-extractor'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { assessGraphClaim, confirmGraphClaim, confirmGraphFactIdentities,
+  createGraphL1Store, createGraphL1Writer, createGraphPredicateRegistry,
+  createMemoryV4Repository, normalizeGraphExtraction } from '@continuum-memory/memory'
+import { createLocalUieExtractor, parseUieOutput, uieGraphExtractionRun, uieReviewCandidates } from './uie-extractor'
 
 describe('local UIE-base output adapter', () => {
+  it.skipIf(!process.env.CONTINUUM_MEMORY_UIE_PYTHON || !process.env.CONTINUUM_MEMORY_UIE_MODEL_PATH)(
+    'loads the installed local model and extracts source-aligned mentions', async () => {
+      const extractor = createLocalUieExtractor({
+        pythonPath: process.env.CONTINUUM_MEMORY_UIE_PYTHON!,
+        modelPath: process.env.CONTINUUM_MEMORY_UIE_MODEL_PATH!,
+        modelHome: '',
+        scriptPath: join(dirname(fileURLToPath(import.meta.url)), '../../resources/uie_extract.py'),
+        timeoutMs: 120_000,
+      })
+      expect(extractor.isReady()).toBe(true)
+      const text = '张三在星河公司工作。'
+      const result = await extractor.extract(text)
+      expect(result.rawOutput).toBeDefined()
+      expect(result.entities.length).toBeGreaterThan(0)
+      for (const mention of result.entities)
+        expect(Array.from(text).slice(mention.start, mention.end).join('')).toBe(mention.text)
+      const run = uieGraphExtractionRun('test-message', text, result)
+      expect(run.status).not.toBe('failed')
+      expect((run.rawOutput as { uieRawOutput: unknown }).uieRawOutput).toEqual(result.rawOutput)
+      const affiliation = run.factCandidates.find(fact => fact.predicate === '所属组织')
+      expect(affiliation).toBeDefined()
+      const scope = { ownerId: 'test-owner', agentId: 'test-agent' }
+      const entities = [
+        { ref: { kind: 'entity' as const, id: 'person-zhang', version: 1 }, scope,
+          entityType: 'person', canonicalName: '张三', aliases: [] },
+        { ref: { kind: 'entity' as const, id: 'org-xinghe', version: 1 }, scope,
+          entityType: 'organization', canonicalName: '星河公司', aliases: [] },
+      ]
+      const normalized = normalizeGraphExtraction(run, { entities, scope,
+        explicitIdentityByMentionId: {
+          [affiliation!.subjectMentionId]: 'person-zhang',
+          ...('mentionId' in affiliation!.object ? { [affiliation!.object.mentionId]: 'org-xinghe' } : {}),
+        } })
+      const fact = normalized.facts.find(item => item.sourceFactId === affiliation!.id)!
+      expect(fact).toMatchObject({ status: 'ready', predicate: 'affiliatedWith' })
+      expect(assessGraphClaim(run, fact, { sensitivity: 'private', sharePolicy: 'local-only' }).status).toBe('pending')
+      const confirmed = confirmGraphFactIdentities(run, affiliation!.id,
+        { entities: [], aliases: [], scope })
+      const readyFact = confirmed.normalized.facts.find(item => item.sourceFactId === affiliation!.id)!
+      const review = confirmGraphClaim(assessGraphClaim(run, readyFact,
+        { sensitivity: 'private', sharePolicy: 'local-only' }), 'Source verified')
+      const v4 = createMemoryV4Repository()
+      const l1 = createGraphL1Store({ load: () => undefined, save: () => {} })
+      const publication = await createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
+        .submit(run, readyFact, review, confirmed.entities)
+      expect(publication?.state).toBe('published')
+      expect(v4.snapshot().factVersions).toHaveLength(1)
+      expect(l1.claims()[0]?.atom.predicate).toBe('affiliatedWith')
+    }, 150_000)
   it('deduplicates root spans and preserves nested relation evidence', () => {
     const text = '《雪满庭》由祝云舟主演。'
     const raw = {

@@ -90,7 +90,7 @@ interface MemoryItem {
 }
 
 interface MemorySettings {
-  extractionMode: 'rules' | 'smart'
+  extractionMode: 'rules' | 'smart' | 'uie'
   semanticEnabled: boolean
   imageMemoryEnabled: boolean
   remotePolicy: 'normal-only' | 'allow-private' | 'disabled'
@@ -225,6 +225,7 @@ const memoryStoragePath = ref('')
 const memoryItems = ref<MemoryItem[]>([])
 const memoryReviewItems = ref<MemoryReviewItem[]>([])
 const pendingCaptureSegments = ref(0)
+const captureStatus = ref<{ activeSources: number; tasks: { failed: number; succeeded: number }; retryable: number; awaitingProcessor: number } | null>(null)
 const manualMemoryInput = ref('')
 const memoryLoading = ref(false)
 const memoryMutating = ref(false)
@@ -245,6 +246,9 @@ const memorySettings = ref<MemorySettings>({
   remotePolicy: 'normal-only',
   v4RolloutStage: 'shadow',
 })
+const uiePreviewText = ref('')
+const uiePreviewBusy = ref(false)
+const uiePreviewResult = ref('')
 const memoryEncrypted = ref(false)
 const memoryV4RuntimeEnabled = ref(false)
 const memoryV4EffectiveRolloutStage = ref<'shadow' | 'internal'>('shadow')
@@ -501,6 +505,7 @@ async function refreshMemoryList() {
     memoryItems.value = Array.isArray(result.items) ? result.items : []
     memoryReviewItems.value = Array.isArray(result.reviewItems) ? result.reviewItems : []
     pendingCaptureSegments.value = Number(result.pendingCaptureSegments) || 0
+    captureStatus.value = result.capture || null
     applyMemoryRuntimeStatus(result)
     if (result.error) {
       memoryStatusError.value = true
@@ -588,6 +593,24 @@ async function flushMemoryCaptureQueue() {
   }
 }
 
+async function retryMemoryCaptureTasks() {
+  if (memoryMutating.value) return
+  memoryMutating.value = true
+  try {
+    const result = await ipcRenderer.invoke('memory:capture-retry')
+    memoryStatusError.value = !result?.ok
+    memoryStatusMessage.value = result?.ok ? '本轮重试已结束，请查看任务状态。' : result?.error || '捕获任务重试失败。'
+    await refreshMemoryList()
+  }
+  catch (error) {
+    memoryStatusError.value = true
+    memoryStatusMessage.value = error instanceof Error ? error.message : String(error)
+  }
+  finally {
+    memoryMutating.value = false
+  }
+}
+
 async function saveMemorySettings(patch: Partial<MemorySettings>) {
   if (memoryMutating.value) return
   memoryMutating.value = true
@@ -609,6 +632,24 @@ async function saveMemorySettings(patch: Partial<MemorySettings>) {
   }
   finally {
     memoryMutating.value = false
+  }
+}
+
+async function previewUieExtraction() {
+  if (uiePreviewBusy.value || !uiePreviewText.value.trim()) return
+  uiePreviewBusy.value = true
+  uiePreviewResult.value = ''
+  try {
+    const result = await ipcRenderer.invoke('memory:uie-extract', uiePreviewText.value)
+    uiePreviewResult.value = result?.ok
+      ? JSON.stringify(result.extraction, null, 2)
+      : (result?.error || '提取失败。')
+  }
+  catch (error) {
+    uiePreviewResult.value = error instanceof Error ? error.message : '提取失败。'
+  }
+  finally {
+    uiePreviewBusy.value = false
   }
 }
 
@@ -1379,6 +1420,7 @@ async function doReset() {
               <select v-model="memorySettings.extractionMode" :disabled="memoryMutating" @change="saveMemorySettings({ extractionMode: memorySettings.extractionMode })">
                 <option value="rules">本地规则（稳定、免费）</option>
                 <option value="smart">智能提取（调用当前聊天模型）</option>
+                <option value="uie">本地 UIE-base（实体与信息候选，需审核）</option>
               </select>
             </label>
             <label>
@@ -1390,6 +1432,14 @@ async function doReset() {
               </select>
             </label>
           </div>
+          <details class="uie-preview">
+            <summary>试提取实体与信息（仅本地预览，不写入记忆）</summary>
+            <textarea v-model="uiePreviewText" maxlength="4000" rows="3" placeholder="输入一段中文文本"></textarea>
+            <button class="secondary-btn" :disabled="uiePreviewBusy || !uiePreviewText.trim()" @click="previewUieExtraction">
+              {{ uiePreviewBusy ? '提取中…' : '运行 UIE-base' }}
+            </button>
+            <pre v-if="uiePreviewResult">{{ uiePreviewResult }}</pre>
+          </details>
           <label class="memory-check-row">
             <input v-model="memorySettings.imageMemoryEnabled" type="checkbox" :disabled="memoryMutating" @change="saveMemorySettings({ imageMemoryEnabled: memorySettings.imageMemoryEnabled })" />
             <span>仅在我明确说“记住图片/截图”时，本地 OCR 提取图片文字</span>
@@ -1449,6 +1499,18 @@ async function doReset() {
           </div>
           <div class="field-hint">按 Ctrl + Enter 可添加。疑似密钥、密码或指令注入内容会被拒绝。</div>
 
+          <section v-if="captureStatus?.activeSources" class="memory-review-panel">
+            <div class="memory-list-header">
+              <strong>原文捕获与抽取任务</strong>
+              <span>{{ captureStatus.activeSources }} 条加密原文</span>
+            </div>
+            <div class="field-hint">原文独立保存，不参与记忆召回。任务完成 {{ captureStatus.tasks.succeeded }} 个，失败 {{ captureStatus.tasks.failed }} 个；完成不代表已生成或审核通过记忆。</div>
+            <div v-if="captureStatus.awaitingProcessor" class="field-hint">{{ captureStatus.awaitingProcessor }} 个任务等待原抽取配置，不会使用当前配置自动重放。</div>
+            <div v-if="captureStatus.retryable" class="memory-queue-status">
+              <span>{{ captureStatus.retryable }} 个任务可处理或重试（每项最多尝试 3 次）</span>
+              <button class="secondary-btn" :disabled="memoryMutating" @click="retryMemoryCaptureTasks">处理 / 重试任务</button>
+            </div>
+          </section>
           <section v-if="memoryReviewItems.length > 0 || pendingCaptureSegments > 0" class="memory-review-panel">
             <div class="memory-list-header">
               <strong>待确认候选</strong>
@@ -1736,6 +1798,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 .memory-summary { display: flex; align-items: center; gap: 8px; }
 .memory-path { margin-top: 10px; padding: 8px 10px; overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text-muted); font-family: Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .memory-settings-panel { margin-top: 14px; padding: 13px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.uie-preview { margin-top: 12px; color: var(--text-muted); font-size: 11px; }
+.uie-preview textarea { display: block; box-sizing: border-box; width: 100%; margin: 8px 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); resize: vertical; }
+.uie-preview pre { max-height: 240px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
 .memory-settings-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; }
 .memory-encryption-state { color: #e76f61; font-size: 10px; }
 .memory-encryption-state.ready { color: var(--accent); }

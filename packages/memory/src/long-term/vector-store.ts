@@ -623,6 +623,11 @@ export function createVectorStore(options: VectorStoreOptions = {}) {
         activeByMemoryKey: cloneCommittedRecords(activeByMemoryKey),
       }
     },
+    get(id: string, scope: MemoryScope): MemoryFragment | undefined {
+      const record = secondary.byId.get(id)
+      return record && matchesScope(record.scope, normalizeScope(scope))
+        ? toMemoryFragment(cloneCommittedRecords([record])[0]!) : undefined
+    },
     async list(scope: MemoryScope, limit = 100): Promise<MemoryFragment[]> {
       const normalizedScope = normalizeScope(scope)
       const expired = markExpired(index, normalizedScope, secondary)

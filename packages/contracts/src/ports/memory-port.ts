@@ -1,3 +1,5 @@
+import type { AgentGraphMemoryPort } from './memory-graph-port'
+
 /**
  * Long-term memory boundary.
  *
@@ -205,6 +207,12 @@ export interface MemorySourceSyncResult {
 }
 
 export interface AgentMemoryPort {
+  /**
+   * Opt-in versioned graph protocol. Absence means unsupported, NOT an invitation
+   * to discard graph/time/proof requirements and call legacy recall instead.
+   * Existing V3/V4 adapters remain unchanged until they implement this boundary.
+   */
+  graph?: AgentGraphMemoryPort
   /** List memories inside a scope, ordered by most recently updated first. */
   list: (scope: MemoryScope, limit?: number) => Promise<MemoryFragment[]>
   /** Retrieve the top-K relevant memories inside an isolation scope. */

@@ -23,6 +23,20 @@ describe('evidence-first memory write policy', () => {
     expect(result.verificationScore).toBeGreaterThanOrEqual(0.9)
   })
 
+  it('keeps a high-confidence local UIE candidate in review rather than writing it', async () => {
+    const candidate = memoryCandidate('张三的父亲：李四', {
+      kind: 'other', predicate: 'uie.父亲', confidence: 0.99,
+      importance: 0.8, extractionChannel: 'uie-base-local', requiresReview: true,
+    })
+    const result = await verifier(candidate, {
+      turn: { userMessage: '张三的父亲是李四。', assistantMessage: '' },
+      scope,
+      matches: { activeByMemoryKey: [] },
+    })
+    expect(result).toMatchObject({ action: 'QUARANTINE', status: 'quarantined' })
+    expect(result.reasonCodes).toContain('model-candidate-requires-confirmation')
+  })
+
   it('quarantines an unsupported model claim instead of writing it', async () => {
     const candidate = memoryCandidate('用户住在火星', {
       kind: 'identity', memoryKey: 'profile.location', cardinality: 'single',

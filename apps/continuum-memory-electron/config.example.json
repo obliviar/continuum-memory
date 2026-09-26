@@ -6,5 +6,7 @@
   "memoryV4ShadowEnabled": true,
   "memoryV4InternalReviewEnabled": false,
   "memoryV4ReadMode": "auto",
-  "embeddingModel": "local-hash-v3"
+  "embeddingModel": "local-hash-v3",
+  "uiePythonPath": "D:\\Models\\UIE-mini\\.venv-paddle\\Scripts\\python.exe",
+  "uieModelHome": "D:\\Models\\UIE-mini"
 }

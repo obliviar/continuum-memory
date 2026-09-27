@@ -6,6 +6,8 @@ import { createGraphPredicateRegistry, normalizeGraphExtraction, type GraphEntit
 import { assessGraphClaim, confirmGraphClaim, rejectGraphClaim, deferGraphClaim,
   setGraphUseAssessment, createGraphL1Store, createGraphL1Writer } from './graph-l1-write'
 import { createGraphSemanticRepository } from '../graph-core/repository/semantic-repository'
+import { createGraphL1ProjectionRepository } from '../graph-core/repository/l1-projection-repository'
+import { reviewGraphAdmission } from './graph-admission-review'
 import { createV4GraphMemory, selectRetrievableGraphBundle, V4_GRAPH_BUDGET } from '../graph-core/adapters/v4-graph-memory'
 import type { GraphRecallRequest } from '@continuum-memory/contracts'
 
@@ -43,6 +45,86 @@ function memoryPersistence() {
 }
 
 describe('reviewed graph L1 publication', () => {
+  it('rejects an incomplete or imprecise admission decision before graph write', () => {
+    const { run, fact } = fixture()
+    expect(() => reviewGraphAdmission(run, fact.sourceFactId,
+      { negation: 'positive', condition: 'none', time: '2026-02-30', speaker: 'self' }, {}))
+      .toThrow('exact YYYY-MM-DD')
+    run.status = 'incomplete'
+    expect(() => reviewGraphAdmission(run, fact.sourceFactId,
+      { negation: 'positive', condition: 'none', time: 'unknown', speaker: 'self' }, {}))
+      .toThrow('complete extraction')
+  })
+  it('retries a failed stable-view save without duplicating the V4 Fact', async () => {
+    const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
+    const l1 = createGraphL1Store(memoryPersistence())
+    const registry = createGraphPredicateRegistry()
+    const semantic = createGraphSemanticRepository(memoryPersistence(), v4)
+    let failed = false
+    const storage = memoryPersistence()
+    const projection = createGraphL1ProjectionRepository({ load: storage.load, save(payload) {
+      if (!failed) { failed = true; throw new Error('projection save failed') }
+      storage.save(payload)
+    } }, semantic, v4)
+    const writer = createGraphL1Writer(v4, l1, registry, scope, { syncFromClaims: async () => {
+      const result = await semantic.syncFromClaims(l1, v4, registry, scope)
+      if (!result.ok || !projection.sync()) throw new Error('L1 view publication failed')
+    } })
+    const { run, fact } = fixture()
+    const review = assessGraphClaim(run, fact, { sensitivity: 'normal', sharePolicy: 'allow-remote' }, 1_800_000_000_000)
+    expect((await writer.submit(run, fact, review, entities))?.state).toBe('fact-persisted')
+    expect(projection.snapshot()).toBeUndefined()
+    await writer.retryPending()
+    expect(l1.tasks()[0]?.state).toBe('published')
+    expect(v4.snapshot().facts).toHaveLength(1)
+    expect(projection.snapshot()?.semanticBundle.claims).toHaveLength(1)
+  })
+  it('publishes reviewed context and a stable Claim-to-Entity L1 view without altering raw extraction', async () => {
+    const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
+    const l1 = createGraphL1Store(memoryPersistence())
+    const registry = createGraphPredicateRegistry()
+    const semantic = createGraphSemanticRepository(memoryPersistence(), v4)
+    const storage = memoryPersistence()
+    const projection = createGraphL1ProjectionRepository(storage, semantic, v4, l1)
+    const rawContext: FactContext = { negation: { value: null, resolution: 'unresolved' },
+      condition: { value: null, resolution: 'unresolved' }, time: { value: null, resolution: 'unresolved' },
+      speaker: { value: null, resolution: 'unresolved' } }
+    const { run, fact } = fixture(0.9, 'reviewed-source', rawContext)
+    const review = confirmGraphClaim(assessGraphClaim(run, fact,
+      { sensitivity: 'private', sharePolicy: 'local-only' }, 1_800_000_000_000), 'Checked original message', 1_800_000_000_000)
+    const admission = reviewGraphAdmission(run, fact.sourceFactId, { negation: 'negative', condition: 'none',
+      time: '2026-09-26', speaker: 'self' }, {})
+    const writer = createGraphL1Writer(v4, l1, registry, scope, { syncFromClaims: async () => {
+      const result = await semantic.syncFromClaims(l1, v4, registry, scope)
+      if (!result.ok || !projection.sync()) throw new Error('L1 view publication failed')
+    } })
+    expect((await writer.submit(run, fact, review, entities, admission))?.state).toBe('published')
+    expect(run.factCandidates[0]!.context).toEqual(rawContext)
+    expect(l1.claims()[0]).toMatchObject({ polarity: 'negative', modality: 'asserted',
+      validTime: { kind: 'interval' }, sensitivity: 'private' })
+    expect(v4.snapshot().facts[0]).toMatchObject({ polarity: 'negative', modality: 'asserted' })
+    const view = projection.snapshot()!
+    expect(view.manifest).toMatchObject({ state: 'ready', sourceBundleId: semantic.snapshot()!.bundleId })
+    expect(view.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'has-argument', role: 'person', from: l1.claims()[0]!.ref }),
+      expect.objectContaining({ kind: 'has-argument', role: 'organization', from: l1.claims()[0]!.ref }),
+    ]))
+    expect(projection.sync()?.manifest.manifestId).toBe(view.manifest.manifestId)
+    expect(createGraphL1ProjectionRepository(storage, semantic, v4, l1).snapshot()?.manifest.manifestId)
+      .toBe(view.manifest.manifestId)
+    storage.save(JSON.stringify({ ...view, edges: [] }))
+    const tampered = createGraphL1ProjectionRepository(storage, semantic, v4, l1)
+    expect(tampered.snapshot()).toBeUndefined()
+    expect(tampered.sync()?.edges).toHaveLength(2)
+    projection.invalidate()
+    expect(createGraphL1ProjectionRepository(storage, semantic, v4, l1).snapshot()).toBeUndefined()
+    expect(projection.sync()?.manifest.manifestId).toBe(view.manifest.manifestId)
+    l1.removeSources(['reviewed-source'])
+    expect(projection.snapshot()).toBeUndefined()
+    const removed = await semantic.syncFromClaims(l1, v4, registry, scope)
+    expect(removed.ok).toBe(true)
+    expect(projection.snapshot()).toBeUndefined()
+  })
   it('shares a normalized actual context across distinct sources and reconciles its provenance on removal', async () => {
     const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
     const l1 = createGraphL1Store(memoryPersistence())

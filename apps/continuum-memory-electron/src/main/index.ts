@@ -45,6 +45,8 @@ import {
   createGraphL1Store,
   createGraphL1Writer,
   createGraphSemanticRepository,
+  createGraphL1ProjectionRepository,
+  reviewGraphAdmission,
   createGraphRelationTaskQueue,
   createGraphPredicateRegistry,
   confirmGraphFactIdentities,
@@ -69,6 +71,8 @@ import type {
   GraphL1Store,
   GraphL1Writer,
   GraphSemanticRepository,
+  GraphL1ProjectionRepository,
+  GraphAdmissionChoices,
   GraphRelationTaskQueue,
   GraphExtractionRun,
   MemoryV4LifecycleService,
@@ -453,20 +457,28 @@ let graphNormalizationStore: GraphNormalizationStore | undefined
 let graphL1Store: GraphL1Store | undefined
 let graphL1Writer: GraphL1Writer | undefined
 let graphSemanticRepository: GraphSemanticRepository | undefined
+let graphL1ProjectionRepository: GraphL1ProjectionRepository | undefined
 let graphRelationTaskQueue: GraphRelationTaskQueue | undefined
 let graphNliJudge: ReturnType<typeof createLocalErlangshenNli> | undefined
 let graphNliDraining = false
 let graphNliRetryTimer: ReturnType<typeof setTimeout> | undefined
+function invalidateGraphL1Projection(): void {
+  try { graphL1ProjectionRepository?.invalidate() }
+  catch (error) { writeBootLog(`Graph L1 view invalidation was not persisted: ${errorMessage(error)}`) }
+}
 function syncGraphSemantic(): void {
   if (!graphSemanticRepository || !graphL1Store || !memoryV4Repository) return
   void graphSemanticRepository.syncFromClaims(graphL1Store, memoryV4Repository,
     createGraphPredicateRegistry(), localMemoryScope).then(result => {
     if (!result.ok) writeBootLog(`Graph semantic sync deferred: ${result.error.message}`)
-    else syncGraphRelationTasks()
+    else {
+      graphL1ProjectionRepository?.sync()
+      syncGraphRelationTasks()
+    }
   }).catch(error => writeBootLog(`Graph semantic sync deferred: ${errorMessage(error)}`))
 }
 function syncGraphRelationTasks(): void {
-  const bundle = graphSemanticRepository?.snapshot()
+  const bundle = graphL1ProjectionRepository?.snapshot()?.semanticBundle
   if (!bundle || !graphRelationTaskQueue || !memoryV4Repository) return
   const episodes = new Map(memoryV4Repository.snapshot().episodes.map(episode => [episode.id, episode]))
   graphRelationTaskQueue.sync(bundle.claims, bundle.predicates, localMemoryScope,
@@ -495,7 +507,7 @@ async function drainGraphNli(): Promise<void> {
     while (true) {
       const task = graphRelationTaskQueue.ready()[0]
       if (!task) break
-      const claims = graphSemanticRepository?.snapshot()?.claims ?? []
+      const claims = graphL1ProjectionRepository?.snapshot()?.semanticBundle.claims ?? []
       const premise = claims.find(claim => claim.ref.id === task.claims[0].id
         && claim.ref.version === task.claims[0].version)
       const hypothesis = claims.find(claim => claim.ref.id === task.claims[1].id
@@ -596,6 +608,8 @@ const graphL1StoragePath = join(userDataDir, 'graph-l1.enc')
 const graphL1KeyPath = join(userDataDir, 'graph-l1-key.json')
 const graphSemanticStoragePath = join(userDataDir, 'graph-semantic.enc')
 const graphSemanticKeyPath = join(userDataDir, 'graph-semantic-key.json')
+const graphL1ProjectionStoragePath = join(userDataDir, 'graph-l1-projection.enc')
+const graphL1ProjectionKeyPath = join(userDataDir, 'graph-l1-projection-key.json')
 const legacyMemoryStoragePath = join(userDataDir, 'memories.json')
 const memoryV4StoragePath = join(userDataDir, 'memory-v4.enc')
 const memoryV4BackupPath = join(userDataDir, 'memory-v4.enc.backup')
@@ -850,6 +864,7 @@ function initializeMemory(): void {
   graphL1Store = undefined
   graphL1Writer = undefined
   graphSemanticRepository = undefined
+  graphL1ProjectionRepository = undefined
   graphRelationTaskQueue = undefined
   graphNliJudge?.close()
   graphNliJudge = undefined
@@ -989,6 +1004,7 @@ function initializeMemory(): void {
         graphExtractionStore?.removeSources(commit.messageIds)
         graphNormalizationStore?.removeSources(commit.messageIds)
         graphL1Store?.removeSources(commit.messageIds)
+        invalidateGraphL1Projection()
         memoryV4Shadow?.enqueueSourceUnlink(commit)
         memoryV4Shadow?.flush()
         syncGraphSemantic()
@@ -1065,6 +1081,11 @@ function initializeMemory(): void {
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
       })
       graphSemanticRepository = createGraphSemanticRepository(graphSemanticPersistence, v4Repository)
+      graphL1ProjectionRepository = createGraphL1ProjectionRepository(createEncryptedFilePersistence({
+        encryptedPath: graphL1ProjectionStoragePath, keyPath: graphL1ProjectionKeyPath,
+        protectKey: key => safeStorage.encryptString(key.toString('base64')),
+        unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+      }), graphSemanticRepository, v4Repository, graphL1Store!)
       const nliRevision = config.nliModelPath ? basename(config.nliModelPath) : 'unavailable'
       graphNliJudge = createLocalErlangshenNli({
         pythonPath: config.nliPythonPath,
@@ -1089,6 +1110,7 @@ function initializeMemory(): void {
           const result = await graphSemanticRepository!.syncFromClaims(graphL1Store!, v4Repository,
             predicateRegistry, localMemoryScope)
           if (!result.ok) throw new Error(result.error.message)
+          if (!graphL1ProjectionRepository?.sync()) throw new Error('Stable L1 graph view is not ready')
           syncGraphRelationTasks()
         },
       })
@@ -1445,7 +1467,7 @@ function memoryForRemoteRuntime() {
         countTokens: countGraphTokens,
         includeOwnedSessions: true,
         utcOffsetMinutes: -new Date().getTimezoneOffset(),
-        acceptedBundle: () => selectRetrievableGraphBundle(graphSemanticRepository?.snapshot(),
+        acceptedBundle: () => selectRetrievableGraphBundle(graphL1ProjectionRepository?.snapshot()?.semanticBundle,
           graphL1Store?.tasks() ?? []),
       })
     : undefined
@@ -1974,18 +1996,36 @@ function setupIPC() {
     },
     items: memory ? await memory.list(localMemoryScope, Number(limit)) : [],
     reviewItems: memoryCandidateReview?.list(localMemoryScope, Number(limit)) ?? [],
+    graphL1View: (() => {
+      const view = graphL1ProjectionRepository?.snapshot()
+      return view ? { manifestId: view.manifest.manifestId, bundleId: view.manifest.sourceBundleId,
+        claims: view.semanticBundle.claims.length, argumentEdges: view.edges.length } : null
+    })(),
     graphReviewItems: graphL1Store?.reviews().filter(item => item.status === 'pending').slice(0, Number(limit)).map((review) => {
       const run = graphExtractionStore?.list().find(item => item.id === review.runId)
       const source = run?.factCandidates.find(item => item.id === review.sourceFactId)
+      const normalized = graphNormalizationStore?.results().find(item => item.runId === review.runId)
+      const mentionIds = source ? [source.subjectMentionId, ...('mentionId' in source.object ? [source.object.mentionId] : [])] : []
       return {
         review,
         predicate: source?.predicate ?? '',
         evidence: run && source ? run.sourceText.slice(source.evidenceSpan.start, source.evidenceSpan.end) : '',
+        context: source?.context,
+        mentions: mentionIds.map(id => {
+          const mention = run?.entityMentions.find(item => item.id === id)
+          const resolution = normalized?.resolutions.find(item => item.mentionId === id)
+          return { id, text: mention?.text ?? '', type: mention?.type ?? '',
+            resolvedEntityId: resolution?.status === 'resolved' ? resolution.entityId : undefined,
+            options: graphNormalizationStore?.entities().filter(entity => entity.entityType === mention?.type
+              && entity.scope.ownerId === localMemoryScope.ownerId && entity.scope.agentId === localMemoryScope.agentId
+              && entity.scope.sessionId === undefined && entity.review?.status !== 'rejected')
+              .map(entity => ({ id: entity.ref.id, name: entity.canonicalName })) ?? [] }
+        }),
       }
     }) ?? [],
     graphRelationReviewItems: graphRelationTaskQueue?.snapshot().filter(task => task.status === 'completed'
       && (!task.review || task.review.status === 'pending')).slice(0, Number(limit)).map(task => {
-      const claims = task.claims.map(ref => graphSemanticRepository?.snapshot()?.claims.find(claim =>
+      const claims = task.claims.map(ref => graphL1ProjectionRepository?.snapshot()?.semanticBundle.claims.find(claim =>
         claim.ref.id === ref.id && claim.ref.version === ref.version))
       return { key: task.key, claims: task.claims, routes: task.routes, result: task.result,
         modelId: task.modelId, modelRevision: task.modelRevision, review: task.review,
@@ -2017,7 +2057,8 @@ function setupIPC() {
 
   ipcMain.handle('memory:graph-review', async (
     _event,
-    input: { id?: unknown; outcome?: unknown; reason?: unknown; retrievalRetain?: unknown; proactivePreference?: unknown },
+    input: { id?: unknown; outcome?: unknown; reason?: unknown; retrievalRetain?: unknown; proactivePreference?: unknown;
+      context?: unknown; identities?: unknown; sourceRevision?: unknown },
   ) => {
     if (!graphL1Store || !graphL1Writer || !graphExtractionStore || !graphNormalizationStore)
       return { ok: false, error: 'Graph L1 审核当前不可用。' }
@@ -2028,6 +2069,12 @@ function setupIPC() {
     const current = graphL1Store.reviews().find(item => item.id === id)
     if (!current || graphL1Store.tasks().some(task => task.review.id === id))
       return { ok: false, error: '审核项不存在或已进入发布流程。' }
+    if (current.status !== 'pending') return { ok: false, error: '此候选已审核。' }
+    if (input.outcome === 'approved') {
+      if (!input.context || typeof input.context !== 'object' || !input.identities
+        || typeof input.identities !== 'object' || Array.isArray(input.identities))
+        return { ok: false, error: '确认入图前必须审核实体身份和语境。' }
+    }
     let review = input.outcome === 'approved' ? confirmGraphClaim(current, reason)
       : input.outcome === 'rejected' ? rejectGraphClaim(current, reason)
         : deferGraphClaim(current, reason)
@@ -2049,22 +2096,26 @@ function setupIPC() {
       ?.facts.find(item => item.sourceFactId === review.sourceFactId)
     if (!run || !fact)
       return { ok: false, error: '来源或抽取结果不可用。' }
-    if (fact.status !== 'ready') {
-      try {
-        const confirmed = confirmGraphFactIdentities(run, review.sourceFactId, {
-          entities: graphNormalizationStore.entities(), aliases: graphNormalizationStore.aliasDecisions(),
-          scope: localMemoryScope,
-        })
-        graphNormalizationStore.replaceCatalog(confirmed.entities, graphNormalizationStore.aliasDecisions())
-        graphNormalizationStore.appendResult(confirmed.normalized)
-        fact = confirmed.normalized.facts.find(item => item.sourceFactId === review.sourceFactId)
-      }
-      catch (error) { return { ok: false, error: errorMessage(error) } }
+    try {
+      if (input.sourceRevision !== run.sourceRevision || review.sourceRevision !== run.sourceRevision)
+        throw new Error('来源版本已变化，请刷新审核列表')
+      const identities = input.identities as Record<string, unknown>
+      if (Object.values(identities).some(value => typeof value !== 'string'))
+        throw new Error('实体身份选择无效')
+      const admission = reviewGraphAdmission(run, review.sourceFactId,
+        input.context as GraphAdmissionChoices, identities as Record<string, string>)
+      const confirmed = confirmGraphFactIdentities(run, review.sourceFactId, {
+        entities: graphNormalizationStore.entities(), aliases: graphNormalizationStore.aliasDecisions(),
+        scope: localMemoryScope, choicesByMentionId: admission.identities,
+      })
+      fact = confirmed.normalized.facts.find(item => item.sourceFactId === review.sourceFactId)
+      if (!fact || fact.status !== 'ready') throw new Error('来源或实体身份尚未完成解析')
+      graphNormalizationStore.replaceCatalog(confirmed.entities, graphNormalizationStore.aliasDecisions())
+      graphNormalizationStore.appendResult(confirmed.normalized)
+      const task = await graphL1Writer.submit(run, fact, review, confirmed.entities, admission)
+      return task?.state === 'published' ? { ok: true, published: true } : { ok: true, published: false }
     }
-    if (!fact || fact.status !== 'ready')
-      return { ok: false, error: '来源或实体身份尚未完成解析。' }
-    const task = await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
-    return task?.state === 'published' ? { ok: true, published: true } : { ok: true, published: false }
+    catch (error) { return { ok: false, error: errorMessage(error) } }
   })
 
   ipcMain.handle('memory:graph-relation-review', async (_event,
@@ -2318,6 +2369,7 @@ function setupIPC() {
     graphExtractionStore?.clear()
     graphNormalizationStore?.clear()
     graphL1Store?.clear()
+    invalidateGraphL1Projection()
     syncGraphSemantic()
     memoryV4ShadowEvaluationStore?.clear()
     memoryV4InternalFeedbackStore?.clear()
@@ -2339,6 +2391,7 @@ function setupIPC() {
     graphExtractionStore?.clear()
     graphNormalizationStore?.clear()
     graphL1Store?.clear()
+    invalidateGraphL1Projection()
     syncGraphSemantic()
     memoryV4ShadowEvaluationStore?.clear()
     sessionStore.getSessionMessages('default').splice(0)

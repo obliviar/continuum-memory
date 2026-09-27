@@ -128,6 +128,8 @@ export type {
 export { createGraphNormalizationStore } from './long-term/graph-normalization-store'
 export { graphEntityVectorCandidates } from './long-term/graph-entity-vector-candidates'
 export { confirmGraphFactIdentities } from './long-term/graph-confirmed-identity'
+export { reviewGraphAdmission } from './long-term/graph-admission-review'
+export type { GraphAdmissionChoices, GraphAdmissionDecision } from './long-term/graph-admission-review'
 export type { GraphNormalizationStore } from './long-term/graph-normalization-store'
 export {
   GRAPH_L1_WRITE_VERSION,

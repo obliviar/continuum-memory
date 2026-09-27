@@ -122,12 +122,17 @@ interface GraphReviewItem {
     reason: string
     modelScore: number
     sourceId: string
+    sourceRevision: string
     sensitivity: 'normal' | 'private' | 'secret'
     retrieval: { retain: boolean; reason: string }
     proactive: { useAsPreference: boolean; reason: string }
   }
   predicate: string
   evidence: string
+  context?: { negation: { value: boolean | null; resolution: string }; condition: { value: string | null; resolution: string };
+    time: { value: string | null; resolution: string }; speaker: { value: string | null; resolution: string } }
+  mentions: Array<{ id: string; text: string; type: string; resolvedEntityId?: string;
+    options: Array<{ id: string; name: string }> }>
 }
 
 interface GraphRelationReviewItem {
@@ -250,9 +255,21 @@ const memoryStoragePath = ref('')
 const memoryItems = ref<MemoryItem[]>([])
 const memoryReviewItems = ref<MemoryReviewItem[]>([])
 const graphReviewItems = ref<GraphReviewItem[]>([])
+const graphL1View = ref<{ manifestId: string; bundleId: string; claims: number; argumentEdges: number } | null>(null)
 const graphRelationReviewItems = ref<GraphRelationReviewItem[]>([])
 const graphRelationReviewReasons = ref<Record<string, string>>({})
 const graphReviewReasons = ref<Record<string, string>>({})
+const graphIdentityChoices = ref<Record<string, Record<string, string>>>({})
+const graphContextChoices = ref<Record<string, { negation: string; condition: string; conditionText: string;
+  time: string; speaker: string; speakerName: string }>>({})
+function graphIdentityChoice(id: string): Record<string, string> {
+  return graphIdentityChoices.value[id] ??= {}
+}
+function graphContextChoice(id: string) {
+  return graphContextChoices.value[id] ??= {
+    negation: '', condition: '', conditionText: '', time: '', speaker: '', speakerName: '',
+  }
+}
 const graphRetrievalRetain = ref<Record<string, boolean>>({})
 const graphProactivePreferences = ref<Record<string, boolean>>({})
 const pendingCaptureSegments = ref(0)
@@ -536,10 +553,16 @@ async function refreshMemoryList() {
     memoryItems.value = Array.isArray(result.items) ? result.items : []
     memoryReviewItems.value = Array.isArray(result.reviewItems) ? result.reviewItems : []
     graphReviewItems.value = Array.isArray(result.graphReviewItems) ? result.graphReviewItems : []
+    graphL1View.value = result.graphL1View ?? null
     graphRelationReviewItems.value = Array.isArray(result.graphRelationReviewItems) ? result.graphRelationReviewItems : []
     for (const item of graphReviewItems.value) {
       graphRetrievalRetain.value[item.review.id] ??= item.review.retrieval.retain
       graphProactivePreferences.value[item.review.id] ??= item.review.proactive.useAsPreference
+      graphIdentityChoices.value[item.review.id] ??= Object.fromEntries(item.mentions.map(mention =>
+        [mention.id, mention.resolvedEntityId ?? '']))
+      graphContextChoices.value[item.review.id] ??= {
+        negation: '', condition: '', conditionText: '', time: '', speaker: '', speakerName: '',
+      }
     }
     pendingCaptureSegments.value = Number(result.pendingCaptureSegments) || 0
     captureStatus.value = result.capture || null
@@ -594,6 +617,9 @@ async function reviewGraphCandidate(id: string, outcome: 'approved' | 'rejected'
       id, outcome, reason,
       retrievalRetain: graphRetrievalRetain.value[id] !== false,
       proactivePreference: graphProactivePreferences.value[id] === true,
+      sourceRevision: graphReviewItems.value.find(item => item.review.id === id)?.review.sourceRevision,
+      identities: graphIdentityChoices.value[id],
+      context: graphContextChoices.value[id],
     })
     if (!result?.ok) {
       memoryStatusError.value = true
@@ -613,6 +639,15 @@ async function reviewGraphCandidate(id: string, outcome: 'approved' | 'rejected'
   finally {
     memoryMutating.value = false
   }
+}
+
+function graphApprovalReady(item: GraphReviewItem): boolean {
+  const context = graphContextChoices.value[item.review.id]
+  const identities = graphIdentityChoices.value[item.review.id]
+  return !!context && !!identities && !!context.negation && !!context.condition && !!context.time && !!context.speaker
+    && (context.condition !== 'conditional' || !!context.conditionText.trim())
+    && (context.speaker !== 'reported' || !!context.speakerName.trim())
+    && item.mentions.every(mention => !!identities[mention.id])
 }
 
 async function reviewGraphRelation(key: string, outcome: 'accepted' | 'rejected' | 'pending') {
@@ -1497,6 +1532,7 @@ async function doReset() {
         </div>
 
         <div v-if="memoryStoragePath" class="memory-path" :title="memoryStoragePath">{{ memoryStoragePath }}</div>
+        <div v-if="graphL1View" class="field-hint" :title="graphL1View.manifestId">L1 图视图已就绪：{{ graphL1View.claims }} 条 Claim、{{ graphL1View.argumentEdges }} 条论元边</div>
 
         <div v-if="memoryStatusMessage" :class="['api-status-message', { error: memoryStatusError }]">{{ memoryStatusMessage }}</div>
 
@@ -1655,7 +1691,28 @@ async function doReset() {
                 </div>
                 <div class="memory-content">{{ item.evidence || '[来源证据不可用]' }}</div>
                 <div class="field-hint">原因：{{ item.review.reason }} · 来源：{{ item.review.sourceId }} · 隐私：{{ item.review.sensitivity }}</div>
-                <div class="field-hint">确认未解析的提及时，会为这条证据建立独立实体身份；同名实体不会自动合并。</div>
+                <div v-for="mention in item.mentions" :key="mention.id" class="field-hint">
+                  实体「{{ mention.text }}」（{{ mention.type }}）
+                  <select v-model="graphIdentityChoice(item.review.id)[mention.id]" class="settings-input">
+                    <option value="">请选择实体身份</option>
+                    <option value="new">建立独立实体（不按同名合并）</option>
+                    <option v-for="entity in mention.options" :key="entity.id" :value="entity.id">已有：{{ entity.name }} · {{ entity.id }}</option>
+                  </select>
+                </div>
+                <div class="field-hint">抽取语境：否定 {{ item.context?.negation?.value ?? '未判定' }}；条件 {{ item.context?.condition?.value ?? '未判定' }}；时间 {{ item.context?.time?.value ?? '未判定' }}；说话者 {{ item.context?.speaker?.value ?? '未判定' }}</div>
+                <div class="field-hint">请逐项确认语境；“未知”会保留不确定性，不会自动当作肯定事实。</div>
+                <select v-model="graphContextChoice(item.review.id).negation" class="settings-input">
+                  <option value="">选择肯定或否定</option><option value="positive">肯定</option><option value="negative">否定</option><option value="unknown">未知</option>
+                </select>
+                <select v-model="graphContextChoice(item.review.id).condition" class="settings-input">
+                  <option value="">选择条件</option><option value="none">无条件</option><option value="conditional">有条件 / 假设</option><option value="unknown">未知</option>
+                </select>
+                <input v-if="graphContextChoice(item.review.id).condition === 'conditional'" v-model="graphContextChoice(item.review.id).conditionText" class="settings-input" maxlength="500" placeholder="填写条件原文" />
+                <input v-model="graphContextChoice(item.review.id).time" class="settings-input" placeholder="时间：YYYY-MM-DD、none 或 unknown" />
+                <select v-model="graphContextChoice(item.review.id).speaker" class="settings-input">
+                  <option value="">选择说话者</option><option value="self">用户本人陈述</option><option value="reported">转述他人</option><option value="unknown">未知</option>
+                </select>
+                <input v-if="graphContextChoice(item.review.id).speaker === 'reported'" v-model="graphContextChoice(item.review.id).speakerName" class="settings-input" maxlength="200" placeholder="填写被转述者" />
                 <input v-model="graphReviewReasons[item.review.id]" class="settings-input" maxlength="500" placeholder="填写审核原因" />
                 <label class="memory-check-row">
                   <input v-model="graphRetrievalRetain[item.review.id]" type="checkbox" />
@@ -1667,7 +1724,7 @@ async function doReset() {
                 </label>
               </div>
               <div class="memory-item-actions">
-                <button class="memory-restore-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'approved')">确认</button>
+                <button class="memory-restore-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim() || !graphApprovalReady(item)" @click="reviewGraphCandidate(item.review.id, 'approved')">确认</button>
                 <button class="memory-delete-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'rejected')">拒绝</button>
                 <button class="secondary-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'pending')">继续待确认</button>
               </div>

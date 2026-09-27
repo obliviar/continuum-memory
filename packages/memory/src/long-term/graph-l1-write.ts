@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import type { MemoryV4Repository } from '../v4/repository/memory-v4-repository'
 import type { MemoryEpisodeV4, MemoryFactV4, MemoryFactVersionV4 } from '../v4/domain/types'
 import type { GraphExtractionRun, FactCandidate } from './graph-extraction-result'
+import type { FactContext } from './graph-extraction-result'
+import type { GraphAdmissionDecision } from './graph-admission-review'
 import type { GraphEntityRecord, GraphNormalizedFact, GraphPredicateRegistry, GraphTypedValue } from './graph-identity-normalization'
 import type { GraphContextFrame } from '../graph-core/domain/types'
 
@@ -148,6 +150,7 @@ export interface GraphPublicationTask {
   fact: GraphNormalizedFact
   review: GraphClaimReview
   entities: GraphEntityRecord[]
+  admission?: GraphAdmissionDecision
   state: 'queued' | 'fact-persisted' | 'published'
   factRef?: GraphFactRef
   attempts: number
@@ -191,7 +194,7 @@ export function createGraphL1Store(persistence: GraphL1Persistence): GraphL1Stor
   const migratedClaims = claims.map(claim => {
     const task = taskById.get(claim.ref.id)
     if (!task || claim.context.id !== stableId('graph-context', task.id)) return claim
-    const normalized = normalizedContext(task.run, task.fact.sourceFactId, claim.scope)
+    const normalized = normalizedContext(task.run, task.fact.sourceFactId, claim.scope, task.admission?.context)
     frames.set(normalized.ref.id, normalized.frame)
     return { ...claim, context: normalized.ref }
   })
@@ -248,7 +251,7 @@ export function createGraphL1Store(persistence: GraphL1Persistence): GraphL1Stor
 
 export interface GraphL1Writer {
   submit: (run: GraphExtractionRun, fact: GraphNormalizedFact, review: GraphClaimReview,
-    entities: readonly GraphEntityRecord[]) => Promise<GraphPublicationTask | undefined>
+    entities: readonly GraphEntityRecord[], admission?: GraphAdmissionDecision) => Promise<GraphPublicationTask | undefined>
   retryPending: () => Promise<void>
 }
 
@@ -295,12 +298,21 @@ export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
     return result
   }
   return {
-    submit: (run, fact, review, entities) => serialize(async () => {
-      l1.recordReview(review)
+    submit: (run, fact, review, entities, admission) => serialize(async () => {
       if (review.status !== 'approved' || fact.status !== 'ready')
         return undefined
+      if (review.runId !== run.id || review.sourceFactId !== fact.sourceFactId
+        || review.sourceId !== run.sourceId || review.sourceRevision !== run.sourceRevision)
+        throw new Error('Graph review does not match the exact source candidate')
+      if (admission && admission.sourceRevision !== run.sourceRevision)
+        throw new Error('Reviewed graph source revision changed')
       const id = stableId('graph-task', `${run.id}\0${fact.sourceFactId}`)
-      const task: GraphPublicationTask = { id, run, fact, review, entities: [...entities], state: 'queued', attempts: 0 }
+      const task: GraphPublicationTask = { id, run, fact, review, entities: [...entities],
+        ...(admission ? { admission } : {}), state: 'queued', attempts: 0 }
+      const existing = l1.tasks().find(item => item.id === id)
+      if (existing && JSON.stringify([existing.fact, existing.admission]) !== JSON.stringify([fact, admission]))
+        throw new Error('Graph publication task already has a different reviewed decision')
+      l1.recordReview(review)
       l1.enqueue(task)
       return runTask(task)
     }),
@@ -318,6 +330,7 @@ function persistV4Fact(v4: MemoryV4Repository, task: GraphPublicationTask, regis
   if (createHash('sha256').update(run.sourceText).digest('hex') !== run.sourceRevision)
     throw new Error('Graph source revision does not match exact text')
   const source = sourceFact(run, fact)
+  const context = task.admission?.context ?? source.context
   const registration = registry.registrations.find(item => item.spec.name === fact.predicate)
   if (!registration || !fact.arguments)
     throw new Error('Graph fact has no registered predicate arguments')
@@ -333,13 +346,14 @@ function persistV4Fact(v4: MemoryV4Repository, task: GraphPublicationTask, regis
   const object = objectTerm.kind === 'entity' ? objectTerm.entityId : objectTerm.value
   const objectType = objectTerm.kind === 'entity' ? 'entity' : objectTerm.kind
   const canonicalText = run.sourceText.slice(source.evidenceSpan.start, source.evidenceSpan.end)
-  const polarity = source.context.negation.resolution === 'resolved' && source.context.negation.value === true ? 'negative'
-    : source.context.negation.resolution === 'unresolved' ? 'unknown' : 'positive'
-  const modality = source.context.speaker.resolution === 'resolved' && source.context.speaker.value !== 'user'
-    ? 'reported' : source.context.condition.resolution === 'resolved' ? 'hypothetical' : 'asserted'
-  const condition = source.context.condition.resolution === 'resolved' && source.context.condition.value
-    ? source.context.condition.value : undefined
-  const validTime = parseDay(source.context.time.value)
+  const polarity = context.negation.resolution === 'resolved' && context.negation.value === true ? 'negative'
+    : context.negation.resolution === 'unresolved' ? 'unknown' : 'positive'
+  const modality = context.speaker.resolution === 'resolved' && context.speaker.value !== 'user'
+    ? 'reported' : context.condition.resolution === 'resolved' ? 'hypothetical'
+      : context.speaker.resolution === 'unresolved' || context.condition.resolution === 'unresolved' ? 'unknown' : 'asserted'
+  const condition = context.condition.resolution === 'resolved' && context.condition.value
+    ? context.condition.value : undefined
+  const validTime = parseDay(context.time.value)
   const priorSnapshot = v4.snapshot()
   if (priorSnapshot.episodes.some(item => item.sourceMessageId === run.sourceId && item.contentState === 'deleted'))
     throw new Error('Deleted source message cannot be republished')
@@ -387,7 +401,7 @@ function persistV4Fact(v4: MemoryV4Repository, task: GraphPublicationTask, regis
       metadata: { graphReviewId: review.id, graphTaskId: task.id, modelScore: review.modelScore,
         userConfirmed: review.userConfirmed, retrievalRetain: review.retrieval.retain,
         proactivePreference: review.proactive.useAsPreference,
-        sourceTime: source.context.time.value, timeResolution: source.context.time.resolution },
+        sourceTime: context.time.value, timeResolution: context.time.resolution },
       extractorVersion: run.modelId, verifierVersion: GRAPH_L1_WRITE_VERSION,
     }
     const version: MemoryFactVersionV4 = {
@@ -413,6 +427,7 @@ function buildClaim(task: GraphPublicationTask, factRef: GraphFactRef, registry:
     frame: GraphContextFrame } {
   const { run, fact, review } = task
   const source = sourceFact(run, fact)
+  const reviewedContext = task.admission?.context ?? source.context
   const registration = registry.registrations.find(item => item.spec.name === fact.predicate)
   if (!registration || !fact.arguments)
     throw new Error('Graph claim has no registered predicate arguments')
@@ -430,13 +445,14 @@ function buildClaim(task: GraphPublicationTask, factRef: GraphFactRef, registry:
   const sourceRef: GraphSourceRef = { episodeId: stableId('graph-episode', `${run.sourceId}\0${run.sourceRevision}`),
     contentHash: run.sourceRevision,
     locator: { kind: 'text-span', unit: 'utf16', ...source.evidenceSpan } }
-  const polarity = source.context.negation.resolution === 'resolved' && source.context.negation.value === true ? 'negative'
-    : source.context.negation.resolution === 'unresolved' ? 'unknown' : 'positive'
-  const modality = source.context.speaker.resolution === 'resolved' && source.context.speaker.value !== 'user'
-    ? 'reported' : source.context.condition.resolution === 'resolved' ? 'hypothetical' : 'asserted'
-  const validTime = parseDay(source.context.time.value)
+  const polarity = reviewedContext.negation.resolution === 'resolved' && reviewedContext.negation.value === true ? 'negative'
+    : reviewedContext.negation.resolution === 'unresolved' ? 'unknown' : 'positive'
+  const modality = reviewedContext.speaker.resolution === 'resolved' && reviewedContext.speaker.value !== 'user'
+    ? 'reported' : reviewedContext.condition.resolution === 'resolved' ? 'hypothetical'
+      : reviewedContext.speaker.resolution === 'unresolved' || reviewedContext.condition.resolution === 'unresolved' ? 'unknown' : 'asserted'
+  const validTime = parseDay(reviewedContext.time.value)
   const claimRef: GraphClaimRef = { kind: 'claim', id: task.id, version: 1 }
-  const context = normalizedContext(run, fact.sourceFactId, scope)
+  const context = normalizedContext(run, fact.sourceFactId, scope, reviewedContext)
   const claim: GraphClaimRecord = {
     ref: claimRef, fact: factRef, scope,
     transactionTime: { recordedAt: review.reviewedAt, closedAt: null },
@@ -445,12 +461,12 @@ function buildClaim(task: GraphPublicationTask, factRef: GraphFactRef, registry:
     review: { status: 'accepted', reviewedAt: review.reviewedAt, reviewer: review.reviewer },
     sensitivity: review.sensitivity, sharePolicy: review.sharePolicy,
     atom: { predicate: registration.spec.name, args }, polarity, modality,
-    condition: source.context.condition.resolution === 'resolved' && source.context.condition.value
-      ? { kind: 'unsupported', text: source.context.condition.value, reason: 'condition-not-parsed' }
+    condition: reviewedContext.condition.resolution === 'resolved' && reviewedContext.condition.value
+      ? { kind: 'unsupported', text: reviewedContext.condition.value, reason: 'condition-not-parsed' }
       : { kind: 'none' },
     context: context.ref,
     validTime: validTime ?? { kind: 'unknown' },
-    temporalSource: { value: source.context.time.value, resolution: source.context.time.resolution },
+    temporalSource: { value: reviewedContext.time.value, resolution: reviewedContext.time.resolution },
     evidence: [{ source: sourceRef, role: 'supports', strength: 'direct' }],
   }
   const from = args[registration.sourceRole]
@@ -465,19 +481,20 @@ function buildClaim(task: GraphPublicationTask, factRef: GraphFactRef, registry:
 
 /** Stable across distinct Claims only when the discourse frame is actually known. */
 function normalizedContext(run: GraphExtractionRun, sourceFactId: string,
-  scope: GraphClaimRecord['scope']): { ref: GraphClaimRecord['context']; frame: GraphContextFrame } {
+  scope: GraphClaimRecord['scope'], reviewedContext?: FactContext): { ref: GraphClaimRecord['context']; frame: GraphContextFrame } {
   const source = run.factCandidates.find(item => item.id === sourceFactId)
   if (!source) throw new Error('Graph context lost its extraction source')
-  const conditionText = source.context.condition.value?.normalize('NFKC').replace(/\s+/gu, ' ').trim()
-  const speakerName = source.context.speaker.value?.normalize('NFKC').replace(/\s+/gu, ' ').trim()
-  const condition: GraphContextFrame['condition'] = source.context.condition.resolution === 'absent'
+  const factsContext = reviewedContext ?? source.context
+  const conditionText = factsContext.condition.value?.normalize('NFKC').replace(/\s+/gu, ' ').trim()
+  const speakerName = factsContext.speaker.value?.normalize('NFKC').replace(/\s+/gu, ' ').trim()
+  const condition: GraphContextFrame['condition'] = factsContext.condition.resolution === 'absent'
     ? { kind: 'none' }
-    : source.context.condition.resolution === 'resolved' && conditionText
+    : factsContext.condition.resolution === 'resolved' && conditionText
       ? { kind: 'conditional', text: conditionText } : { kind: 'unknown' }
-  const speaker: GraphContextFrame['speaker'] = source.context.speaker.resolution === 'absent'
-    || source.context.speaker.resolution === 'resolved' && speakerName?.toLowerCase() === 'user'
+  const speaker: GraphContextFrame['speaker'] = factsContext.speaker.resolution === 'absent'
+    || factsContext.speaker.resolution === 'resolved' && speakerName?.toLowerCase() === 'user'
     ? { kind: 'self' }
-    : source.context.speaker.resolution === 'resolved' && speakerName
+    : factsContext.speaker.resolution === 'resolved' && speakerName
       ? { kind: 'reported', name: speakerName } : { kind: 'unknown' }
   const isolation = condition.kind === 'unknown' || speaker.kind === 'unknown' ? 'claim'
     : speaker.kind === 'reported' ? 'source' : 'shared'

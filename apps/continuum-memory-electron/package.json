@@ -39,6 +39,10 @@
       {
         "from": "resources/uie_extract.py",
         "to": "uie_extract.py"
+      },
+      {
+        "from": "resources/erlangshen_nli.py",
+        "to": "erlangshen_nli.py"
       }
     ],
     "win": {

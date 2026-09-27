@@ -1,8 +1,8 @@
 import { app, BrowserWindow, ipcMain, desktopCapturer, powerMonitor, safeStorage, shell } from 'electron'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createHmac, randomBytes } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { createHash, createHmac, randomBytes } from 'node:crypto'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 
 import { createAgentRuntime, createSessionManager, createChatHooks } from '@continuum-memory/core'
 import { createOpenAILlm } from '@continuum-memory/llm-openai'
@@ -10,6 +10,7 @@ import {
   createEncryptedFilePersistence,
   createEncryptedGraphL1Persistence,
   createV4GraphMemory,
+  selectRetrievableGraphBundle,
   V4_GRAPH_BUDGET,
   createEncryptedV4Persistence,
   createIdleConsolidationRunner,
@@ -32,6 +33,21 @@ import {
   createMemoryWriter,
   createCaptureRepository,
   createSmartMemoryExtractor,
+  createGraphExtractionResultStore,
+  createGraphNormalizationStore,
+  normalizeGraphExtraction,
+  graphEntityVectorCandidates,
+  assessGraphClaim,
+  confirmGraphClaim,
+  rejectGraphClaim,
+  deferGraphClaim,
+  setGraphUseAssessment,
+  createGraphL1Store,
+  createGraphL1Writer,
+  createGraphSemanticRepository,
+  createGraphRelationTaskQueue,
+  createGraphPredicateRegistry,
+  confirmGraphFactIdentities,
   createV4ShadowWriter,
   createVectorStore,
   extractMemoryCandidates,
@@ -48,6 +64,13 @@ import type {
   IdleConsolidationRunner,
   MemoryCandidate,
   MemoryExtractor,
+  GraphExtractionResultStore,
+  GraphNormalizationStore,
+  GraphL1Store,
+  GraphL1Writer,
+  GraphSemanticRepository,
+  GraphRelationTaskQueue,
+  GraphExtractionRun,
   MemoryV4LifecycleService,
   MemoryCandidateReviewService,
   MemoryEmbeddingIndex,
@@ -100,7 +123,9 @@ import {
   type MemoryV4ReadController,
 } from './memory-v4-read-controller'
 import { createMemoryV4RuntimeObservability } from './memory-v4-runtime-observability'
-import { createLocalUieExtractor, uieReviewCandidates } from './uie-extractor'
+import { createLocalUieExtractor, uieGraphExtractionRun, uieReviewCandidates } from './uie-extractor'
+import { createLocalErlangshenNli, ERLANGSHEN_NLI_MODEL_ID,
+  ERLANGSHEN_NLI_PREPROCESSING_VERSION } from './local-erlangshen-nli'
 
 // Some Windows systems cannot initialize Electron's GPU subprocess. Disable
 // hardware acceleration before app readiness so the packaged app still starts.
@@ -147,6 +172,43 @@ function loadFileConfig() {
   return {}
 }
 const fileConfig = loadFileConfig()
+function localModelWorkDirectories(): string[] {
+  const root = join(process.env.USERPROFILE ?? '', 'Documents', 'Codex')
+  const directories = (path: string): string[] => {
+    try { return readdirSync(path, { withFileTypes: true }).filter(item => item.isDirectory()).map(item => item.name) }
+    catch { return [] }
+  }
+  return directories(root).flatMap(date => directories(join(root, date))
+    .map(task => join(root, date, task, 'work')))
+}
+function discoverLocalUie(): { modelPath: string; pythonPath: string } | undefined {
+  for (const work of localModelWorkDirectories()) {
+    const modelPath = join(work, 'uie_base_model')
+    const pythonPath = join(work, 'uie_venv', 'Scripts', 'python.exe')
+    if (existsSync(join(modelPath, 'model_state.pdparams')) && existsSync(pythonPath))
+      return { modelPath, pythonPath }
+  }
+  return undefined
+}
+function discoverLocalNli(): { modelPath: string; pythonPath: string; dependenciesPath: string } | undefined {
+  for (const work of localModelWorkDirectories()) {
+      try {
+        const modelRoot = join(work, 'hf_cache', 'hub', 'models--IDEA-CCNL--Erlangshen-Roberta-330M-NLI')
+        const revisionFile = join(modelRoot, 'refs', 'main')
+        const pythonPath = join(work, 'uie_venv', 'Scripts', 'python.exe')
+        if (!existsSync(revisionFile) || !existsSync(pythonPath)) continue
+        const revision = readFileSync(revisionFile, 'utf8').trim()
+        const modelPath = join(modelRoot, 'snapshots', revision)
+        if (!existsSync(join(modelPath, 'pytorch_model.bin'))) continue
+        return { modelPath, pythonPath,
+          dependenciesPath: [join(work, 'model_deps'), join(work, 'gliner_deps')].join(';') }
+      }
+      catch { /* Continue to other local snapshots. */ }
+  }
+  return undefined
+}
+const discoveredUie = discoverLocalUie()
+const discoveredNli = discoverLocalNli()
 const memoryEnabledEnvironment = environmentValue('CONTINUUM_MEMORY_ENABLED', 'DESKPET_MEMORY')
 const memoryV4ShadowEnvironment = environmentValue('CONTINUUM_MEMORY_V4_SHADOW', 'DESKPET_MEMORY_V4_SHADOW')
 const memoryV4InternalReviewEnvironment = environmentValue('CONTINUUM_MEMORY_V4_INTERNAL_REVIEW', 'DESKPET_MEMORY_V4_INTERNAL_REVIEW')
@@ -169,8 +231,17 @@ const config = {
   embeddingApiKey: environmentValue('CONTINUUM_MEMORY_EMBEDDING_API_KEY', 'DESKPET_EMBEDDING_API_KEY') || fileConfig.embeddingApiKey || process.env.CONTINUUM_MEMORY_API_KEY || process.env.OPENAI_API_KEY || fileConfig.apiKey || '',
   embeddingBaseURL: environmentValue('CONTINUUM_MEMORY_EMBEDDING_BASE_URL', 'DESKPET_EMBEDDING_BASE_URL') || fileConfig.embeddingBaseURL || process.env.CONTINUUM_MEMORY_BASE_URL || process.env.OPENAI_BASE_URL || fileConfig.baseURL || undefined,
   embeddingModel: environmentValue('CONTINUUM_MEMORY_EMBEDDING_MODEL', 'DESKPET_EMBEDDING_MODEL') || fileConfig.embeddingModel || LOCAL_HASH_EMBEDDING_MODEL,
-  uiePythonPath: process.env.CONTINUUM_MEMORY_UIE_PYTHON || fileConfig.uiePythonPath || 'D:\\Models\\UIE-mini\\.venv-paddle\\Scripts\\python.exe',
+  uiePythonPath: process.env.CONTINUUM_MEMORY_UIE_PYTHON || fileConfig.uiePythonPath
+    || discoveredUie?.pythonPath || 'D:\\Models\\UIE-mini\\.venv-paddle\\Scripts\\python.exe',
   uieModelHome: process.env.CONTINUUM_MEMORY_UIE_MODEL_HOME || fileConfig.uieModelHome || 'D:\\Models\\UIE-mini',
+  uieModelPath: process.env.CONTINUUM_MEMORY_UIE_MODEL_PATH || fileConfig.uieModelPath
+    || (process.env.CONTINUUM_MEMORY_UIE_MODEL_HOME || fileConfig.uieModelHome ? undefined : discoveredUie?.modelPath),
+  nliPythonPath: process.env.CONTINUUM_MEMORY_NLI_PYTHON || fileConfig.nliPythonPath
+    || discoveredNli?.pythonPath || '',
+  nliModelPath: process.env.CONTINUUM_MEMORY_NLI_MODEL_PATH || fileConfig.nliModelPath
+    || discoveredNli?.modelPath || '',
+  nliDependenciesPath: process.env.CONTINUUM_MEMORY_NLI_DEPENDENCIES || fileConfig.nliDependenciesPath
+    || discoveredNli?.dependenciesPath || '',
 }
 
 // ── Persistence ─────────────────────────────────────────
@@ -377,6 +448,95 @@ let memoryV4ShadowEvaluationPersistence: EncryptedMemoryPersistence | undefined
 let memoryV4ShadowEvaluationStore: MemoryV4ShadowEvaluationStore | undefined
 let memoryV4InternalFeedbackPersistence: EncryptedMemoryPersistence | undefined
 let memoryV4InternalFeedbackStore: MemoryV4InternalFeedbackStore | undefined
+let graphExtractionStore: GraphExtractionResultStore | undefined
+let graphNormalizationStore: GraphNormalizationStore | undefined
+let graphL1Store: GraphL1Store | undefined
+let graphL1Writer: GraphL1Writer | undefined
+let graphSemanticRepository: GraphSemanticRepository | undefined
+let graphRelationTaskQueue: GraphRelationTaskQueue | undefined
+let graphNliJudge: ReturnType<typeof createLocalErlangshenNli> | undefined
+let graphNliDraining = false
+let graphNliRetryTimer: ReturnType<typeof setTimeout> | undefined
+function syncGraphSemantic(): void {
+  if (!graphSemanticRepository || !graphL1Store || !memoryV4Repository) return
+  void graphSemanticRepository.syncFromClaims(graphL1Store, memoryV4Repository,
+    createGraphPredicateRegistry(), localMemoryScope).then(result => {
+    if (!result.ok) writeBootLog(`Graph semantic sync deferred: ${result.error.message}`)
+    else syncGraphRelationTasks()
+  }).catch(error => writeBootLog(`Graph semantic sync deferred: ${errorMessage(error)}`))
+}
+function syncGraphRelationTasks(): void {
+  const bundle = graphSemanticRepository?.snapshot()
+  if (!bundle || !graphRelationTaskQueue || !memoryV4Repository) return
+  const episodes = new Map(memoryV4Repository.snapshot().episodes.map(episode => [episode.id, episode]))
+  graphRelationTaskQueue.sync(bundle.claims, bundle.predicates, localMemoryScope,
+    claim => graphClaimEvidenceText(claim, episodes))
+  scheduleGraphNliDrain()
+}
+function graphClaimEvidenceText(claim: { provenance: { sources: readonly { episodeId: string;
+  locator: { kind: string; start?: number; end?: number } }[] } },
+  episodes = new Map(memoryV4Repository?.snapshot().episodes.map(episode => [episode.id, episode]))): string {
+  return claim.provenance.sources.map(source => {
+    const text = episodes.get(source.episodeId)?.content ?? ''
+    return source.locator.kind === 'text-span'
+      ? text.slice(source.locator.start, source.locator.end) : text
+  }).join('\n')
+}
+function scheduleGraphNliDrain(): void {
+  if (graphNliRetryTimer) clearTimeout(graphNliRetryTimer)
+  graphNliRetryTimer = undefined
+  if (!graphNliJudge?.isReady() || !graphRelationTaskQueue || graphNliDraining) return
+  void drainGraphNli().catch(error => writeBootLog(`Graph NLI drain failed: ${errorMessage(error)}`))
+}
+async function drainGraphNli(): Promise<void> {
+  if (graphNliDraining || !graphNliJudge || !graphRelationTaskQueue) return
+  graphNliDraining = true
+  try {
+    while (true) {
+      const task = graphRelationTaskQueue.ready()[0]
+      if (!task) break
+      const claims = graphSemanticRepository?.snapshot()?.claims ?? []
+      const premise = claims.find(claim => claim.ref.id === task.claims[0].id
+        && claim.ref.version === task.claims[0].version)
+      const hypothesis = claims.find(claim => claim.ref.id === task.claims[1].id
+        && claim.ref.version === task.claims[1].version)
+      if (!premise || !hypothesis) { syncGraphRelationTasks(); continue }
+      const premiseText = graphClaimEvidenceText(premise)
+      const hypothesisText = graphClaimEvidenceText(hypothesis)
+      try {
+        if (!premiseText.trim() || !hypothesisText.trim()) throw new Error('Graph Claim evidence is unavailable')
+        const result = await graphNliJudge.judge({ premise: { kind: 'claim', ref: premise.ref, text: premiseText },
+          hypothesisText })
+        if (!result.ok) throw new Error(result.error.message)
+        if (result.value.modelId !== task.modelId || result.value.modelRevision !== task.modelRevision
+          || result.value.preprocessingVersion !== task.preprocessingVersion)
+          throw new Error('Graph NLI task and response versions differ')
+        const scores = result.value.scores
+        const label = (Object.keys(scores) as Array<keyof typeof scores>)
+          .reduce((best, next) => scores[next] > scores[best] ? next : best)
+        graphRelationTaskQueue.complete(task.key, { label, scores, truncated: result.value.truncated,
+          premiseHash: createHash('sha256').update(premiseText).digest('hex'),
+          hypothesisHash: createHash('sha256').update(hypothesisText).digest('hex'), evaluatedAt: Date.now() })
+      }
+      catch (error) {
+        const delay = Math.min(300_000, 5_000 * 2 ** Math.min(task.attempts ?? 0, 6))
+        graphRelationTaskQueue.fail(task.key, errorMessage(error), Date.now() + delay)
+        writeBootLog(`Graph NLI task deferred: ${errorMessage(error)}`)
+        break
+      }
+    }
+  }
+  finally {
+    graphNliDraining = false
+    if (graphRelationTaskQueue?.ready().length) {
+      graphNliRetryTimer = setTimeout(scheduleGraphNliDrain, 0)
+    }
+    else {
+      const next = graphRelationTaskQueue?.nextRetryAt()
+      if (next !== undefined) graphNliRetryTimer = setTimeout(scheduleGraphNliDrain, Math.max(100, next - Date.now()))
+    }
+  }
+}
 let memoryV4ShadowTaskQueue: MemoryV4ShadowTaskQueue<MemoryV4ShadowComparisonTask> | undefined
 let memoryV4ShadowGeneration = 0
 let memoryV4ShadowEvaluationError = ''
@@ -428,6 +588,14 @@ const memoryStoragePath = join(userDataDir, 'memories.enc')
 const memoryKeyPath = join(userDataDir, 'memory-key.json')
 const memoryEmbeddingStoragePath = join(userDataDir, 'memory-embeddings.enc')
 const memoryEmbeddingKeyPath = join(userDataDir, 'memory-embedding-key.json')
+const graphExtractionStoragePath = join(userDataDir, 'graph-extractions.enc')
+const graphExtractionKeyPath = join(userDataDir, 'graph-extractions-key.json')
+const graphNormalizationStoragePath = join(userDataDir, 'graph-normalization.enc')
+const graphNormalizationKeyPath = join(userDataDir, 'graph-normalization-key.json')
+const graphL1StoragePath = join(userDataDir, 'graph-l1.enc')
+const graphL1KeyPath = join(userDataDir, 'graph-l1-key.json')
+const graphSemanticStoragePath = join(userDataDir, 'graph-semantic.enc')
+const graphSemanticKeyPath = join(userDataDir, 'graph-semantic-key.json')
 const legacyMemoryStoragePath = join(userDataDir, 'memories.json')
 const memoryV4StoragePath = join(userDataDir, 'memory-v4.enc')
 const memoryV4BackupPath = join(userDataDir, 'memory-v4.enc.backup')
@@ -455,6 +623,7 @@ const imageMemory = createImageMemoryService(join(userDataDir, 'models', 'ocr'),
 const localUie = createLocalUieExtractor({
   pythonPath: config.uiePythonPath,
   modelHome: config.uieModelHome,
+  modelPath: config.uieModelPath,
   scriptPath: app.isPackaged
     ? join(process.resourcesPath, 'uie_extract.py')
     : join(app.getAppPath(), 'resources', 'uie_extract.py'),
@@ -521,9 +690,32 @@ function mergeMemoryCandidates(candidates: MemoryCandidate[]): MemoryCandidate[]
 function createConfiguredMemoryExtractor(): MemoryExtractor {
   const captureSettings = { ...memorySettings }
   const captureApiConfig = { ...apiConfig }
+  const saveGraphExtraction = async (run: GraphExtractionRun) => {
+    graphExtractionStore?.append(run)
+    if (graphNormalizationStore && run.status !== 'failed') {
+      const normalized = normalizeGraphExtraction(run, {
+        entities: graphNormalizationStore.entities(),
+        aliasDecisions: graphNormalizationStore.aliasDecisions(),
+        vectorCandidatesByMentionId: graphEntityVectorCandidates(run, graphNormalizationStore.entities(), localMemoryScope),
+        scope: localMemoryScope,
+      })
+      graphNormalizationStore.appendResult(normalized)
+      for (const fact of normalized.facts) {
+        const evidence = run.factCandidates.find(item => item.id === fact.sourceFactId)
+        if (!evidence) continue
+        const privacy = inferMemoryPrivacy(run.sourceText)
+        const review = assessGraphClaim(run, fact, privacy)
+        if (graphL1Writer)
+          await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
+        else
+          graphL1Store?.recordReview(review)
+      }
+    }
+  }
   const smartExtractor = createSmartMemoryExtractor({
     getConfig: () => captureApiConfig,
     fallback: extractMemoryCandidates,
+    saveGraphExtraction,
   })
   return async (turn) => {
     let candidates: MemoryCandidate[]
@@ -531,6 +723,10 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
       const local = await extractMemoryCandidates(turn)
       try {
         const structured = await localUie.extract(turn.userMessage)
+        const sourceIds = turn.metadata?.sourceMessageIds
+        const sourceId = Array.isArray(sourceIds) && typeof sourceIds[0] === 'string'
+          ? sourceIds[0] : String(turn.metadata?.memoryCaptureId ?? 'unknown-source')
+        await saveGraphExtraction(uieGraphExtractionRun(sourceId, turn.userMessage, structured))
         const existing = new Set(local.map(candidate => candidate.content.toLocaleLowerCase()))
         candidates = [
           ...local,
@@ -649,6 +845,16 @@ function initializeMemory(): void {
   memoryV4ShadowEvaluationPersistence = undefined
   memoryV4ShadowEvaluationStore = undefined
   memoryV4InternalFeedbackPersistence = undefined
+  graphExtractionStore = undefined
+  graphNormalizationStore = undefined
+  graphL1Store = undefined
+  graphL1Writer = undefined
+  graphSemanticRepository = undefined
+  graphRelationTaskQueue = undefined
+  graphNliJudge?.close()
+  graphNliJudge = undefined
+  if (graphNliRetryTimer) clearTimeout(graphNliRetryTimer)
+  graphNliRetryTimer = undefined
   memoryV4InternalFeedbackStore = undefined
   memoryV4ShadowEvaluationError = ''
   memoryV4InternalFeedbackError = ''
@@ -676,6 +882,27 @@ function initializeMemory(): void {
       unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
     })
     memoryPersistence = persistence
+    const graphPersistence = createEncryptedFilePersistence({
+      encryptedPath: graphExtractionStoragePath,
+      keyPath: graphExtractionKeyPath,
+      protectKey: key => safeStorage.encryptString(key.toString('base64')),
+      unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+    })
+    graphExtractionStore = createGraphExtractionResultStore(graphPersistence)
+    const graphNormalizationPersistence = createEncryptedFilePersistence({
+      encryptedPath: graphNormalizationStoragePath,
+      keyPath: graphNormalizationKeyPath,
+      protectKey: key => safeStorage.encryptString(key.toString('base64')),
+      unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+    })
+    graphNormalizationStore = createGraphNormalizationStore(graphNormalizationPersistence)
+    const graphClaimPersistence = createEncryptedFilePersistence({
+      encryptedPath: graphL1StoragePath,
+      keyPath: graphL1KeyPath,
+      protectKey: key => safeStorage.encryptString(key.toString('base64')),
+      unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+    })
+    graphL1Store = createGraphL1Store(graphClaimPersistence)
     let embeddingIndex: MemoryEmbeddingIndex | undefined
     try {
       const embeddingPersistence = createEncryptedFilePersistence({
@@ -749,7 +976,7 @@ function initializeMemory(): void {
         mode: memorySettings.extractionMode,
         remotePolicy: memorySettings.remotePolicy,
         imageMemoryEnabled: memorySettings.imageMemoryEnabled,
-        ...(memorySettings.extractionMode === 'uie' ? { uieModelHome: config.uieModelHome } : {}),
+        ...(memorySettings.extractionMode === 'uie' ? { uieModelHome: config.uieModelPath ?? config.uieModelHome } : {}),
         ...(memorySettings.extractionMode === 'smart' ? { model: apiConfig.model, baseURL: apiConfig.baseURL } : {}),
       })).digest('hex')}`,
       extractor: createConfiguredMemoryExtractor(),
@@ -759,8 +986,12 @@ function initializeMemory(): void {
       },
       onCaptureObserverError: error => writeBootLog(`Memory V4 capture enqueue failed: ${errorMessage(error)}`),
       onSourcesUnlinked: (commit) => {
+        graphExtractionStore?.removeSources(commit.messageIds)
+        graphNormalizationStore?.removeSources(commit.messageIds)
+        graphL1Store?.removeSources(commit.messageIds)
         memoryV4Shadow?.enqueueSourceUnlink(commit)
         memoryV4Shadow?.flush()
+        syncGraphSemantic()
       },
       onSourceUnlinkObserverError: error => writeBootLog(`Memory V4 source unlink enqueue failed: ${errorMessage(error)}`),
       onRecallFeedback: (report) => {
@@ -827,6 +1058,40 @@ function initializeMemory(): void {
         if (existsSync(l1Persistence.storagePath!)) l1Persistence.save('{}')
       }) })
       memoryV4Repository = v4Repository
+      const graphSemanticPersistence = createEncryptedFilePersistence({
+        encryptedPath: graphSemanticStoragePath,
+        keyPath: graphSemanticKeyPath,
+        protectKey: key => safeStorage.encryptString(key.toString('base64')),
+        unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+      })
+      graphSemanticRepository = createGraphSemanticRepository(graphSemanticPersistence, v4Repository)
+      const nliRevision = config.nliModelPath ? basename(config.nliModelPath) : 'unavailable'
+      graphNliJudge = createLocalErlangshenNli({
+        pythonPath: config.nliPythonPath,
+        modelPath: config.nliModelPath,
+        dependenciesPath: config.nliDependenciesPath,
+        modelRevision: nliRevision,
+        scriptPath: app.isPackaged
+          ? join(process.resourcesPath, 'erlangshen_nli.py')
+          : join(app.getAppPath(), 'resources', 'erlangshen_nli.py'),
+      })
+      if (!graphNliJudge.isReady()) writeBootLog('Local Erlangshen NLI runtime is unavailable; relation tasks remain pending')
+      graphRelationTaskQueue = createGraphRelationTaskQueue(createEncryptedFilePersistence({
+        encryptedPath: join(userDataDir, 'graph-relation-tasks.enc'),
+        keyPath: join(userDataDir, 'graph-relation-tasks-key.json'),
+        protectKey: key => safeStorage.encryptString(key.toString('base64')),
+        unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+      }), { modelId: ERLANGSHEN_NLI_MODEL_ID, modelRevision: nliRevision,
+        preprocessingVersion: ERLANGSHEN_NLI_PREPROCESSING_VERSION })
+      const predicateRegistry = createGraphPredicateRegistry()
+      graphL1Writer = createGraphL1Writer(v4Repository, graphL1Store!, predicateRegistry, localMemoryScope, {
+        syncFromClaims: async () => {
+          const result = await graphSemanticRepository!.syncFromClaims(graphL1Store!, v4Repository,
+            predicateRegistry, localMemoryScope)
+          if (!result.ok) throw new Error(result.error.message)
+          syncGraphRelationTasks()
+        },
+      })
       memoryV4Lifecycle = createMemoryV4LifecycleService(v4Repository)
       memoryCandidateReview = createMemoryCandidateReviewService(v4Repository)
       memoryV4Persistence = v4Persistence
@@ -855,6 +1120,7 @@ function initializeMemory(): void {
         writeBootLog(`Memory V4 dual-write ready: ${memoryV4Reconciliation.mirroredCount}/${memoryV4Reconciliation.sourceCount} facts reconciled, ${memoryV4Reconciliation.deletedCount} tombstoned`)
         writeBootLog(`Memory V4 diff audit: ${(memoryV4Audit.consistency * 100).toFixed(4)}% exact, ${memoryV4Audit.issues.length} issues`)
       }
+      void graphL1Writer.retryPending().catch(error => writeBootLog(`Graph L1 publication retry failed: ${errorMessage(error)}`))
       if (memorySemanticActive && embeddingIndex) {
         try {
           const semanticGeneration = memoryV4ShadowGeneration
@@ -1179,6 +1445,8 @@ function memoryForRemoteRuntime() {
         countTokens: countGraphTokens,
         includeOwnedSessions: true,
         utcOffsetMinutes: -new Date().getTimezoneOffset(),
+        acceptedBundle: () => selectRetrievableGraphBundle(graphSemanticRepository?.snapshot(),
+          graphL1Store?.tasks() ?? []),
       })
     : undefined
   const readController = createMemoryV4ReadController({
@@ -1706,6 +1974,25 @@ function setupIPC() {
     },
     items: memory ? await memory.list(localMemoryScope, Number(limit)) : [],
     reviewItems: memoryCandidateReview?.list(localMemoryScope, Number(limit)) ?? [],
+    graphReviewItems: graphL1Store?.reviews().filter(item => item.status === 'pending').slice(0, Number(limit)).map((review) => {
+      const run = graphExtractionStore?.list().find(item => item.id === review.runId)
+      const source = run?.factCandidates.find(item => item.id === review.sourceFactId)
+      return {
+        review,
+        predicate: source?.predicate ?? '',
+        evidence: run && source ? run.sourceText.slice(source.evidenceSpan.start, source.evidenceSpan.end) : '',
+      }
+    }) ?? [],
+    graphRelationReviewItems: graphRelationTaskQueue?.snapshot().filter(task => task.status === 'completed'
+      && (!task.review || task.review.status === 'pending')).slice(0, Number(limit)).map(task => {
+      const claims = task.claims.map(ref => graphSemanticRepository?.snapshot()?.claims.find(claim =>
+        claim.ref.id === ref.id && claim.ref.version === ref.version))
+      return { key: task.key, claims: task.claims, routes: task.routes, result: task.result,
+        modelId: task.modelId, modelRevision: task.modelRevision, review: task.review,
+        evidence: claims.map(claim => claim ? graphClaimEvidenceText(claim) : ''),
+        sensitivity: claims.some(claim => claim?.sensitivity === 'secret') ? 'secret'
+          : claims.some(claim => claim?.sensitivity === 'private') ? 'private' : 'normal' }
+    }) ?? [],
     pendingCaptureSegments: memory?.pendingCaptureCount() ?? 0,
   }))
 
@@ -1726,6 +2013,68 @@ function setupIPC() {
       : memoryCandidateReview.reject(id, localMemoryScope, note)
     memoryV4Shadow?.flush()
     return changed ? { ok: true } : { ok: false, error: '候选不存在、已审核或不属于当前作用域。' }
+  })
+
+  ipcMain.handle('memory:graph-review', async (
+    _event,
+    input: { id?: unknown; outcome?: unknown; reason?: unknown; retrievalRetain?: unknown; proactivePreference?: unknown },
+  ) => {
+    if (!graphL1Store || !graphL1Writer || !graphExtractionStore || !graphNormalizationStore)
+      return { ok: false, error: 'Graph L1 审核当前不可用。' }
+    const id = typeof input?.id === 'string' ? input.id.trim() : ''
+    const reason = typeof input?.reason === 'string' ? input.reason.trim() : ''
+    if (!id || !reason || !['approved', 'rejected', 'pending'].includes(String(input.outcome)))
+      return { ok: false, error: '无效的 Graph L1 审核操作。' }
+    const current = graphL1Store.reviews().find(item => item.id === id)
+    if (!current || graphL1Store.tasks().some(task => task.review.id === id))
+      return { ok: false, error: '审核项不存在或已进入发布流程。' }
+    let review = input.outcome === 'approved' ? confirmGraphClaim(current, reason)
+      : input.outcome === 'rejected' ? rejectGraphClaim(current, reason)
+        : deferGraphClaim(current, reason)
+    if (review.status === 'approved'
+      && (typeof input.retrievalRetain === 'boolean' || typeof input.proactivePreference === 'boolean')) {
+      review = setGraphUseAssessment(review, {
+        retrievalRetain: typeof input.retrievalRetain === 'boolean' ? input.retrievalRetain : review.retrieval.retain,
+        proactivePreference: typeof input.proactivePreference === 'boolean'
+          ? input.proactivePreference : review.proactive.useAsPreference,
+        reason,
+      })
+    }
+    if (review.status !== 'approved') {
+      graphL1Store.recordReview(review)
+      return { ok: true }
+    }
+    const run = graphExtractionStore.list().find(item => item.id === review.runId)
+    let fact = graphNormalizationStore.results().find(item => item.runId === review.runId)
+      ?.facts.find(item => item.sourceFactId === review.sourceFactId)
+    if (!run || !fact)
+      return { ok: false, error: '来源或抽取结果不可用。' }
+    if (fact.status !== 'ready') {
+      try {
+        const confirmed = confirmGraphFactIdentities(run, review.sourceFactId, {
+          entities: graphNormalizationStore.entities(), aliases: graphNormalizationStore.aliasDecisions(),
+          scope: localMemoryScope,
+        })
+        graphNormalizationStore.replaceCatalog(confirmed.entities, graphNormalizationStore.aliasDecisions())
+        graphNormalizationStore.appendResult(confirmed.normalized)
+        fact = confirmed.normalized.facts.find(item => item.sourceFactId === review.sourceFactId)
+      }
+      catch (error) { return { ok: false, error: errorMessage(error) } }
+    }
+    if (!fact || fact.status !== 'ready')
+      return { ok: false, error: '来源或实体身份尚未完成解析。' }
+    const task = await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
+    return task?.state === 'published' ? { ok: true, published: true } : { ok: true, published: false }
+  })
+
+  ipcMain.handle('memory:graph-relation-review', async (_event,
+    input: { key?: unknown; outcome?: unknown; reason?: unknown }) => {
+    const key = typeof input?.key === 'string' ? input.key.trim() : ''
+    const reason = typeof input?.reason === 'string' ? input.reason.trim() : ''
+    if (!graphRelationTaskQueue || !key || !reason || !['accepted', 'rejected', 'pending'].includes(String(input.outcome)))
+      return { ok: false, error: '无效的信息关系审核操作。' }
+    const changed = graphRelationTaskQueue.review(key, input.outcome as 'accepted' | 'rejected' | 'pending', reason)
+    return changed ? { ok: true } : { ok: false, error: '候选不存在或 NLI 判断尚未完成。' }
   })
 
   ipcMain.handle('memory:v4-internal-feedback', async (
@@ -1966,6 +2315,10 @@ function setupIPC() {
       return { ok: false, error: '长期记忆已关闭。' }
     invalidateMemoryV4ShadowComparisons()
     await memory.clear(localMemoryScope)
+    graphExtractionStore?.clear()
+    graphNormalizationStore?.clear()
+    graphL1Store?.clear()
+    syncGraphSemantic()
     memoryV4ShadowEvaluationStore?.clear()
     memoryV4InternalFeedbackStore?.clear()
     return { ok: true, count: 0 }
@@ -1983,6 +2336,10 @@ function setupIPC() {
   ipcMain.handle('app:reset', async () => {
     invalidateMemoryV4ShadowComparisons()
     await memory?.clear(localMemoryScope)
+    graphExtractionStore?.clear()
+    graphNormalizationStore?.clear()
+    graphL1Store?.clear()
+    syncGraphSemantic()
     memoryV4ShadowEvaluationStore?.clear()
     sessionStore.getSessionMessages('default').splice(0)
     sessionPersistence?.save('{}')
@@ -2106,6 +2463,8 @@ app.on('window-all-closed', () => {
 
 let memoryShutdownComplete = false
 app.on('before-quit', (event) => {
+  if (graphNliRetryTimer) clearTimeout(graphNliRetryTimer)
+  graphNliJudge?.close()
   memoryV4ConsolidationRunner?.stop()
   memoryV4ShadowGeneration += 1
   memoryV4ShadowTaskQueue?.stop()

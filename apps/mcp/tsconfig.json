@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "typeRoots": ["../../packages/memory/node_modules/@types"]
+  },
+  "include": ["server.ts"]
+}

@@ -139,9 +139,11 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         const claims: GraphEvidenceClaim[] = []
         let tokens = 0
         let stopReason: GraphRecallResult['trace']['stopReason'] = hits.length ? 'exhausted-within-scope' : 'no-eligible-seeds'
+        const contextById = new Map(acceptedBundle?.contexts.map(context => [context.ref.id, context]) ?? [])
         let incomplete = gathered.rejected.some(item => item.reason !== 'access-denied')
           || accepted.some(({ claim }) => claim.validTime.kind === 'unknown'
-            || claim.polarity === 'unknown' || claim.modality !== 'asserted' || claim.condition.kind !== 'none')
+            || claim.polarity === 'unknown' || claim.modality !== 'asserted' || claim.condition.kind !== 'none'
+            || contextById.get(claim.context.id)?.scenario !== 'actual')
         for (const hit of hits) {
           if (claims.length >= Math.min(request.budget.maxSeeds, request.budget.maxNodes)) {
             stopReason = request.budget.maxNodes <= request.budget.maxSeeds ? 'node-budget' : 'coverage-satisfied'; incomplete = true; break

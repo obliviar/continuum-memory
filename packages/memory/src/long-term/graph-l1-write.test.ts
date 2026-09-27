@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { createMemoryV4Repository } from '../v4/repository/memory-v4-repository'
-import { createGraphExtractionRun } from './graph-extraction-result'
+import { createGraphExtractionRun, type FactContext } from './graph-extraction-result'
 import { createGraphPredicateRegistry, normalizeGraphExtraction, type GraphEntityRecord } from './graph-identity-normalization'
 import { assessGraphClaim, confirmGraphClaim, rejectGraphClaim, deferGraphClaim,
   setGraphUseAssessment, createGraphL1Store, createGraphL1Writer } from './graph-l1-write'
@@ -13,23 +14,23 @@ const entities: GraphEntityRecord[] = [
   { ref: { kind: 'entity', id: 'person-alex', version: 3 }, scope, entityType: 'person', canonicalName: 'Alexander', aliases: ['Alex'] },
   { ref: { kind: 'entity', id: 'org-acme', version: 2 }, scope, entityType: 'organization', canonicalName: 'Acme Corporation', aliases: ['Acme'] },
 ]
-const context = {
+const context: FactContext = {
   negation: { value: false, resolution: 'resolved' },
   condition: { value: null, resolution: 'absent' },
   time: { value: '2026-09-26', resolution: 'resolved' },
   speaker: { value: null, resolution: 'absent' },
 }
 
-function fixture(score = 0.91) {
+function fixture(score = 0.91, sourceId = 'message-1', factContext: FactContext = context) {
   const sourceText = 'Alex works at Acme'
-  const run = createGraphExtractionRun({ sourceId: 'message-1', sourceText, modelId: 'uie-test', rawOutput: {
+  const run = createGraphExtractionRun({ sourceId, sourceText, modelId: 'uie-test', rawOutput: {
     graph: {
       entities: [
         { id: 'person', type: 'person', text: 'Alex', span: { start: 0, end: 4 }, modelScore: score },
         { id: 'org', type: 'organization', text: 'Acme', span: { start: 14, end: 18 }, modelScore: score },
       ],
       facts: [{ id: 'fact-1', subjectMentionId: 'person', predicate: 'works at',
-        object: { mentionId: 'org' }, evidenceSpan: { start: 0, end: 18 }, modelScore: score, context }],
+        object: { mentionId: 'org' }, evidenceSpan: { start: 0, end: 18 }, modelScore: score, context: factContext }],
     },
   } })
   const normalized = normalizeGraphExtraction(run, { entities, scope })
@@ -42,6 +43,110 @@ function memoryPersistence() {
 }
 
 describe('reviewed graph L1 publication', () => {
+  it('shares a normalized actual context across distinct sources and reconciles its provenance on removal', async () => {
+    const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
+    const l1 = createGraphL1Store(memoryPersistence())
+    const writer = createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
+    const first = fixture(0.91, 'message-1')
+    const second = fixture(0.91, 'message-2')
+    const approve = (item: ReturnType<typeof fixture>, sensitivity: 'normal' | 'private') =>
+      assessGraphClaim(item.run, item.fact, { sensitivity, sharePolicy: sensitivity === 'private'
+        ? 'local-only' : 'allow-remote' }, 1_800_000_000_000)
+    expect((await writer.submit(first.run, first.fact, approve(first, 'normal'), entities))?.state).toBe('published')
+    expect((await writer.submit(second.run, second.fact, approve(second, 'private'), entities))?.state).toBe('published')
+    expect(l1.claims()).toHaveLength(2)
+    expect(l1.claims()[0]!.context).toEqual(l1.claims()[1]!.context)
+    expect(l1.contexts()).toHaveLength(1)
+    expect(l1.contexts()[0]).toMatchObject({ scenario: 'actual', sensitivity: 'private',
+      sharePolicy: 'local-only', frame: { speaker: { kind: 'self' }, condition: { kind: 'none' },
+        isolation: 'shared' } })
+    expect(l1.contexts()[0]!.provenance.sources).toHaveLength(2)
+    l1.removeSources(['message-1'])
+    expect(l1.claims()).toHaveLength(1)
+    expect(l1.contexts()).toHaveLength(1)
+    expect(l1.contexts()[0]!.provenance.sources).toHaveLength(1)
+    expect(l1.contexts()[0]!.provenance.sources[0]!.contentHash).toBe(second.run.sourceRevision)
+    l1.removeSources(['message-2'])
+    expect(l1.contexts()).toHaveLength(0)
+  })
+
+  it('separates reported speakers, conditions, unresolved frames, and memory scopes', async () => {
+    const l1 = createGraphL1Store(memoryPersistence())
+    const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
+    const writer = createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
+    const speaker = (value: string) => ({ ...context, speaker: { value, resolution: 'resolved' as const } })
+    const inputs = [fixture(0.91, 'speaker-a', speaker('Alice')),
+      fixture(0.91, 'speaker-a-again', speaker('Alice')),
+      fixture(0.91, 'speaker-b', speaker('Bob')),
+      fixture(0.91, 'condition-a', { ...context, condition: { value: 'if it rains', resolution: 'resolved' as const } }),
+      fixture(0.91, 'condition-b', { ...context, condition: { value: 'if it snows', resolution: 'resolved' as const } }),
+      fixture(0.91, 'condition-unknown', { ...context, condition: { value: null, resolution: 'unresolved' as const } }),
+      fixture(0.91, 'unknown-a', { ...context, speaker: { value: null, resolution: 'unresolved' as const } }),
+      fixture(0.91, 'unknown-b', { ...context, speaker: { value: null, resolution: 'unresolved' as const } })]
+    for (const item of inputs) {
+      const assessed = assessGraphClaim(item.run, item.fact,
+        { sensitivity: 'normal', sharePolicy: 'allow-remote' }, 1_800_000_000_000)
+      const review = assessed.status === 'approved' ? assessed
+        : confirmGraphClaim(assessed, 'Reviewed the uncertain context', 1_800_000_000_000)
+      expect((await writer.submit(item.run, item.fact, review, entities))?.state).toBe('published')
+    }
+    expect(new Set(l1.claims().map(claim => claim.context.id)).size).toBe(inputs.length)
+    expect(l1.contexts().filter(item => item.scenario === 'unknown')).toHaveLength(1)
+    expect(l1.contexts().filter(item => item.scenario === 'hypothetical')).toHaveLength(2)
+    const anotherScope = { ownerId: 'another-owner', agentId: 'agent' }
+    const separate = fixture(0.91, 'other-owner')
+    const review = assessGraphClaim(separate.run, separate.fact,
+      { sensitivity: 'normal', sharePolicy: 'allow-remote' }, 1_800_000_000_000)
+    const otherEntities = entities.map(entity => ({ ...entity, scope: anotherScope }))
+    expect((await createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), anotherScope)
+      .submit(separate.run, separate.fact, review, otherEntities))?.state).toBe('published')
+    expect(l1.claims().at(-1)!.context.id).not.toBe(l1.claims()[0]!.context.id)
+  })
+
+  it('normalizes equivalent condition text without merging different conditions', async () => {
+    const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
+    const l1 = createGraphL1Store(memoryPersistence())
+    const writer = createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
+    for (const [sourceId, conditionText] of [['condition-one', 'if   it rains'],
+      ['condition-two', 'if it rains']] as const) {
+      const item = fixture(0.91, sourceId, { ...context,
+        condition: { value: conditionText, resolution: 'resolved' } })
+      const confirmed = confirmGraphClaim(assessGraphClaim(item.run, item.fact,
+        { sensitivity: 'normal', sharePolicy: 'allow-remote' }, 1_800_000_000_000),
+      'Confirmed the condition', 1_800_000_000_000)
+      expect((await writer.submit(item.run, item.fact, confirmed, entities))?.state).toBe('published')
+    }
+    expect(l1.claims()[0]!.context).toEqual(l1.claims()[1]!.context)
+    expect(l1.contexts()).toMatchObject([{ scenario: 'hypothetical', frame: {
+      condition: { kind: 'conditional', text: 'if it rains' }, isolation: 'shared' } }])
+  })
+
+  it('migrates published per-task contexts into one shared frame on store load', async () => {
+    const persistence = memoryPersistence()
+    const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
+    const l1 = createGraphL1Store(persistence)
+    const writer = createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
+    for (const sourceId of ['old-one', 'old-two']) {
+      const { run, fact } = fixture(0.91, sourceId)
+      await writer.submit(run, fact, assessGraphClaim(run, fact,
+        { sensitivity: 'normal', sharePolicy: 'allow-remote' }, 1_800_000_000_000), entities)
+    }
+    const stored = JSON.parse(persistence.load()!) as { claims: Array<{ ref: { id: string }; context: { id: string } }>;
+      contexts: Array<{ ref: { id: string } }> }
+    stored.claims.forEach(claim => {
+      claim.context.id = `graph-context:${createHash('sha256').update(claim.ref.id).digest('hex').slice(0, 32)}`
+    })
+    stored.contexts = stored.claims.map((claim, index) => ({ ...l1.contexts()[0]!, ref: {
+      ...l1.contexts()[0]!.ref, id: claim.context.id }, frame: undefined,
+      provenance: { ...l1.contexts()[0]!.provenance, sources: [l1.claims()[index]!.provenance.sources[0]!] },
+    }))
+    persistence.save(JSON.stringify(stored))
+    const migrated = createGraphL1Store(persistence)
+    expect(migrated.claims()[0]!.context).toEqual(migrated.claims()[1]!.context)
+    expect(migrated.contexts()).toHaveLength(1)
+    expect(migrated.contexts()[0]!.provenance.sources).toHaveLength(2)
+  })
+
   it('writes V4 Fact and version first, then a sourced Claim and claim-backed edge', async () => {
     const v4Persistence = memoryPersistence()
     const l1Persistence = memoryPersistence()
@@ -246,5 +351,31 @@ describe('reviewed graph L1 publication', () => {
       mode: 'direct-only', budget: { ...V4_GRAPH_BUDGET }, sharePolicies: ['allow-remote'],
       sensitivities: ['normal'] })).toMatchObject({ ok: true, value: { evidence: { claims: [
         { polarity: 'unknown', validTime: { kind: 'unknown' } }] }, trace: { completeness: 'incomplete' } } })
+  })
+
+  it('keeps a confirmed but unresolved condition outside complete actual-context recall', async () => {
+    const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
+    const l1 = createGraphL1Store(memoryPersistence())
+    const registry = createGraphPredicateRegistry()
+    const semantic = createGraphSemanticRepository(memoryPersistence(), v4)
+    const item = fixture(0.91, 'uncertain-condition', { ...context,
+      condition: { value: null, resolution: 'unresolved' } })
+    const review = confirmGraphClaim(assessGraphClaim(item.run, item.fact,
+      { sensitivity: 'normal', sharePolicy: 'allow-remote' }, 1_800_000_000_000),
+    'Reviewed the cited text', 1_800_000_000_000)
+    const writer = createGraphL1Writer(v4, l1, registry, scope, { syncFromClaims: async () => {
+      const result = await semantic.syncFromClaims(l1, v4, registry, scope)
+      if (!result.ok) throw new Error(result.error.message)
+    } })
+    expect((await writer.submit(item.run, item.fact, review, entities))?.state).toBe('published')
+    expect(semantic.snapshot()?.contexts[0]?.scenario).toBe('unknown')
+    const graph = createV4GraphMemory({ repository: v4, persistence: memoryPersistence(),
+      authorizeScope: () => true, canRead: () => true, countTokens: text => Buffer.byteLength(text),
+      now: () => 1_800_000_000_000, acceptedBundle: () => semantic.snapshot() })
+    expect(await graph.recall({ protocolVersion: 'memory-graph/v1', recallId: 'unresolved-condition',
+      query: 'Acme', scope, temporal: { knownAt: 1_800_000_000_000,
+        valid: { kind: 'at', at: Date.UTC(2026, 8, 26, 12) } }, mode: 'direct-only',
+      budget: { ...V4_GRAPH_BUDGET }, sharePolicies: ['allow-remote'], sensitivities: ['normal'] }))
+      .toMatchObject({ ok: true, value: { trace: { completeness: 'incomplete' } } })
   })
 })

@@ -3,6 +3,7 @@ import type { MemoryV4Repository } from '../v4/repository/memory-v4-repository'
 import type { MemoryEpisodeV4, MemoryFactV4, MemoryFactVersionV4 } from '../v4/domain/types'
 import type { GraphExtractionRun, FactCandidate } from './graph-extraction-result'
 import type { GraphEntityRecord, GraphNormalizedFact, GraphPredicateRegistry, GraphTypedValue } from './graph-identity-normalization'
+import type { GraphContextFrame } from '../graph-core/domain/types'
 
 export const GRAPH_L1_WRITE_VERSION = 'graph-l1-write-v1'
 export type GraphEntityRef = { kind: 'entity'; id: string; version: number }
@@ -49,7 +50,8 @@ export interface GraphContextRecord {
   sensitivity: GraphClaimRecord['sensitivity']
   sharePolicy: GraphClaimRecord['sharePolicy']
   domain: 'conversation'
-  scenario: 'actual' | 'hypothetical'
+  scenario: 'actual' | 'hypothetical' | 'unknown'
+  frame?: GraphContextFrame
   parent: null
 }
 
@@ -163,7 +165,8 @@ export interface GraphL1Store {
   recordReview: (review: GraphClaimReview) => void
   enqueue: (task: GraphPublicationTask) => void
   updateTask: (task: GraphPublicationTask) => void
-  publish: (claim: GraphClaimRecord, edge: GraphEntityRelationEdge | undefined, factExists: (ref: GraphFactRef) => boolean) => void
+  publish: (claim: GraphClaimRecord, edge: GraphEntityRelationEdge | undefined,
+    frame: GraphContextFrame, factExists: (ref: GraphFactRef) => boolean) => void
   removeSources: (sourceIds: readonly string[]) => void
   clear: () => void
 }
@@ -181,6 +184,24 @@ export function createGraphL1Store(persistence: GraphL1Persistence): GraphL1Stor
   let contexts = (parsed?.contexts ?? []) as GraphContextRecord[]
   let tasks = (parsed?.tasks ?? []) as GraphPublicationTask[]
   let reviews = (parsed?.reviews ?? []) as GraphClaimReview[]
+  // Old L1 claims used a per-task context. Rebase only those exact legacy IDs;
+  // the semantic bundle is rebuilt from this store during the startup retry.
+  const taskById = new Map(tasks.map(task => [task.id, task]))
+  const frames = new Map<string, GraphContextFrame>()
+  const migratedClaims = claims.map(claim => {
+    const task = taskById.get(claim.ref.id)
+    if (!task || claim.context.id !== stableId('graph-context', task.id)) return claim
+    const normalized = normalizedContext(task.run, task.fact.sourceFactId, claim.scope)
+    frames.set(normalized.ref.id, normalized.frame)
+    return { ...claim, context: normalized.ref }
+  })
+  if (migratedClaims.some((claim, index) => claim !== claims[index])) {
+    const migratedContexts = reconcileContexts(migratedClaims, contexts, frames)
+    persistence.save(JSON.stringify({ version: 1, claims: migratedClaims, edges, contexts: migratedContexts,
+      tasks, reviews }))
+    claims = migratedClaims
+    contexts = migratedContexts
+  }
   const save = (nextClaims: GraphClaimRecord[], nextEdges: GraphEntityRelationEdge[], nextContexts: GraphContextRecord[],
     nextTasks: GraphPublicationTask[], nextReviews: GraphClaimReview[]): void => {
     persistence.save(JSON.stringify({ version: 1, claims: nextClaims, edges: nextEdges, contexts: nextContexts,
@@ -198,7 +219,7 @@ export function createGraphL1Store(persistence: GraphL1Persistence): GraphL1Stor
         save(claims, edges, contexts, [...tasks, task], reviews)
     },
     updateTask(task) { save(claims, edges, contexts, tasks.map(item => item.id === task.id ? task : item), reviews) },
-    publish(claim, edge, factExists) {
+    publish(claim, edge, frame, factExists) {
       if (!factExists(claim.fact))
         throw new Error('Cannot publish L1 Claim before exact V4 Fact version exists')
       const existing = claims.find(item => item.ref.id === claim.ref.id)
@@ -207,12 +228,9 @@ export function createGraphL1Store(persistence: GraphL1Persistence): GraphL1Stor
           throw new Error('L1 Claim ID already refers to different content')
         return
       }
-      const context: GraphContextRecord = { ref: claim.context, scope: claim.scope,
-        transactionTime: claim.transactionTime, provenance: claim.provenance, review: claim.review,
-        sensitivity: claim.sensitivity, sharePolicy: claim.sharePolicy, domain: 'conversation',
-        scenario: claim.modality === 'hypothetical' ? 'hypothetical' : 'actual', parent: null }
-      save([...claims, claim], edge ? [...edges, edge] : edges,
-        contexts.some(item => item.ref.id === context.ref.id) ? contexts : [...contexts, context], tasks, reviews)
+      const nextClaims = [...claims, claim]
+      save(nextClaims, edge ? [...edges, edge] : edges,
+        reconcileContexts(nextClaims, contexts, new Map([[claim.context.id, frame]])), tasks, reviews)
     },
     removeSources(sourceIds) {
       const removed = new Set(sourceIds)
@@ -220,9 +238,8 @@ export function createGraphL1Store(persistence: GraphL1Persistence): GraphL1Stor
       const nextTasks = tasks.filter(task => !removed.has(task.run.sourceId))
       const nextClaims = claims.filter(claim => !removedClaimIds.has(claim.ref.id))
       const claimIds = new Set(nextClaims.map(claim => claim.ref.id))
-      const contextIds = new Set(nextClaims.map(claim => claim.context.id))
       save(nextClaims, edges.filter(edge => claimIds.has(edge.claimRef.id)),
-        contexts.filter(context => contextIds.has(context.ref.id)), nextTasks,
+        reconcileContexts(nextClaims, contexts), nextTasks,
         reviews.filter(review => !removed.has(review.sourceId)))
     },
     clear() { save([], [], [], [], []) },
@@ -250,8 +267,8 @@ export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
       const factRef = current.factRef ?? persistV4Fact(v4, current, registry, scope)
       persisted = { ...current, state: 'fact-persisted', factRef, attempts: current.attempts + 1 }
       l1.updateTask(persisted)
-      const { claim, edge } = buildClaim(persisted, factRef, registry, scope)
-      l1.publish(claim, edge, (ref) => {
+      const { claim, edge, frame } = buildClaim(persisted, factRef, registry, scope)
+      l1.publish(claim, edge, frame, (ref) => {
         const snapshot = v4.snapshot()
         return snapshot.factVersions.some(version => version.factId === ref.id && version.version === ref.version)
           && snapshot.facts.some(fact => fact.id === ref.id && fact.status === 'active')
@@ -392,7 +409,8 @@ function persistV4Fact(v4: MemoryV4Repository, task: GraphPublicationTask, regis
 }
 
 function buildClaim(task: GraphPublicationTask, factRef: GraphFactRef, registry: GraphPredicateRegistry,
-  scope: GraphClaimRecord['scope']): { claim: GraphClaimRecord; edge?: GraphEntityRelationEdge } {
+  scope: GraphClaimRecord['scope']): { claim: GraphClaimRecord; edge?: GraphEntityRelationEdge;
+    frame: GraphContextFrame } {
   const { run, fact, review } = task
   const source = sourceFact(run, fact)
   const registration = registry.registrations.find(item => item.spec.name === fact.predicate)
@@ -418,6 +436,7 @@ function buildClaim(task: GraphPublicationTask, factRef: GraphFactRef, registry:
     ? 'reported' : source.context.condition.resolution === 'resolved' ? 'hypothetical' : 'asserted'
   const validTime = parseDay(source.context.time.value)
   const claimRef: GraphClaimRef = { kind: 'claim', id: task.id, version: 1 }
+  const context = normalizedContext(run, fact.sourceFactId, scope)
   const claim: GraphClaimRecord = {
     ref: claimRef, fact: factRef, scope,
     transactionTime: { recordedAt: review.reviewedAt, closedAt: null },
@@ -429,7 +448,7 @@ function buildClaim(task: GraphPublicationTask, factRef: GraphFactRef, registry:
     condition: source.context.condition.resolution === 'resolved' && source.context.condition.value
       ? { kind: 'unsupported', text: source.context.condition.value, reason: 'condition-not-parsed' }
       : { kind: 'none' },
-    context: { kind: 'context', id: stableId('graph-context', task.id), version: 1 },
+    context: context.ref,
     validTime: validTime ?? { kind: 'unknown' },
     temporalSource: { value: source.context.time.value, resolution: source.context.time.resolution },
     evidence: [{ source: sourceRef, role: 'supports', strength: 'direct' }],
@@ -441,7 +460,76 @@ function buildClaim(task: GraphPublicationTask, factRef: GraphFactRef, registry:
         predicate: registration.spec.name, claimRef,
         roles: { from: registration.sourceRole, to: registration.targetRole } }
     : undefined
-  return { claim, ...(edge ? { edge } : {}) }
+  return { claim, frame: context.frame, ...(edge ? { edge } : {}) }
+}
+
+/** Stable across distinct Claims only when the discourse frame is actually known. */
+function normalizedContext(run: GraphExtractionRun, sourceFactId: string,
+  scope: GraphClaimRecord['scope']): { ref: GraphClaimRecord['context']; frame: GraphContextFrame } {
+  const source = run.factCandidates.find(item => item.id === sourceFactId)
+  if (!source) throw new Error('Graph context lost its extraction source')
+  const conditionText = source.context.condition.value?.normalize('NFKC').replace(/\s+/gu, ' ').trim()
+  const speakerName = source.context.speaker.value?.normalize('NFKC').replace(/\s+/gu, ' ').trim()
+  const condition: GraphContextFrame['condition'] = source.context.condition.resolution === 'absent'
+    ? { kind: 'none' }
+    : source.context.condition.resolution === 'resolved' && conditionText
+      ? { kind: 'conditional', text: conditionText } : { kind: 'unknown' }
+  const speaker: GraphContextFrame['speaker'] = source.context.speaker.resolution === 'absent'
+    || source.context.speaker.resolution === 'resolved' && speakerName?.toLowerCase() === 'user'
+    ? { kind: 'self' }
+    : source.context.speaker.resolution === 'resolved' && speakerName
+      ? { kind: 'reported', name: speakerName } : { kind: 'unknown' }
+  const isolation = condition.kind === 'unknown' || speaker.kind === 'unknown' ? 'claim'
+    : speaker.kind === 'reported' ? 'source' : 'shared'
+  const frame: GraphContextFrame = { speaker, condition, isolation }
+  const key = JSON.stringify(['conversation-context-v2', scope.ownerId, scope.agentId, scope.sessionId ?? null,
+    frame, isolation === 'claim' ? [run.id, sourceFactId]
+      : isolation === 'source' ? [run.sourceId, run.sourceRevision] : null])
+  return { ref: { kind: 'context', id: stableId('graph-context', key), version: 1 }, frame }
+}
+
+/** Context metadata is a derived aggregate of its live member Claims, not a second fact authority. */
+function reconcileContexts(claims: readonly GraphClaimRecord[], previous: readonly GraphContextRecord[],
+  frames: ReadonlyMap<string, GraphContextFrame> = new Map()): GraphContextRecord[] {
+  const groups = new Map<string, GraphClaimRecord[]>()
+  for (const claim of claims) {
+    const key = `${claim.context.id}\0${claim.context.version}`
+    const group = groups.get(key) ?? []
+    group.push(claim)
+    groups.set(key, group)
+  }
+  const old = new Map(previous.map(context => [`${context.ref.id}\0${context.ref.version}`, context]))
+  return [...groups].sort(([a], [b]) => a.localeCompare(b)).map(([key, members]) => {
+    const ordered = [...members].sort((a, b) => a.transactionTime.recordedAt - b.transactionTime.recordedAt
+      || a.ref.id.localeCompare(b.ref.id))
+    const first = ordered[0]!
+    if (ordered.some(claim => claim.scope.ownerId !== first.scope.ownerId
+      || claim.scope.agentId !== first.scope.agentId || claim.scope.sessionId !== first.scope.sessionId))
+      throw new Error('Shared graph context crossed memory scopes')
+    const prior = old.get(key)
+    const frame = frames.get(first.context.id) ?? prior?.frame
+    if (!frame && !prior) throw new Error('Graph context frame is unavailable')
+    if (frame && prior?.frame && JSON.stringify(frame) !== JSON.stringify(prior.frame))
+      throw new Error('Graph context ID refers to different discourse frames')
+    const sources = [...new Map(ordered.flatMap(claim => claim.provenance.sources)
+      .map(source => [JSON.stringify(source), source])).values()] as GraphClaimRecord['provenance']['sources']
+    const sensitivityOrder = ['normal', 'private', 'secret'] as const
+    const shareOrder = ['allow-remote', 'ask', 'local-only'] as const
+    const sensitivity = ordered.reduce<GraphClaimRecord['sensitivity']>((value, claim) =>
+      sensitivityOrder.indexOf(claim.sensitivity) > sensitivityOrder.indexOf(value) ? claim.sensitivity : value,
+    'normal')
+    const sharePolicy = ordered.reduce<GraphClaimRecord['sharePolicy']>((value, claim) =>
+      shareOrder.indexOf(claim.sharePolicy) > shareOrder.indexOf(value) ? claim.sharePolicy : value,
+    'allow-remote')
+    return { ref: first.context, scope: first.scope,
+      transactionTime: { recordedAt: first.transactionTime.recordedAt, closedAt: null },
+      provenance: { ...first.provenance, sources,
+        normalizerVersion: frame ? 'graph-context-v2' : first.provenance.normalizerVersion },
+      review: first.review, sensitivity, sharePolicy, domain: 'conversation',
+      scenario: frame ? frame.condition.kind === 'conditional' ? 'hypothetical'
+        : frame.condition.kind === 'unknown' ? 'unknown' : 'actual'
+        : prior!.scenario, ...(frame ? { frame } : {}), parent: null }
+  })
 }
 
 function sourceFact(run: GraphExtractionRun, fact: GraphNormalizedFact): FactCandidate {

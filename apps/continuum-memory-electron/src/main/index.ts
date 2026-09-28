@@ -48,6 +48,11 @@ import {
   createGraphL1ProjectionRepository,
   reviewGraphAdmission,
   createGraphRelationTaskQueue,
+  createGraphRelationRepository,
+  createEncryptedGraphRelationPersistence,
+  rebaseGraphRelations,
+  stageGraphRelationTasks,
+  publishReviewedGraphRelation,
   createGraphPredicateRegistry,
   confirmGraphFactIdentities,
   createV4ShadowWriter,
@@ -74,6 +79,7 @@ import type {
   GraphL1ProjectionRepository,
   GraphAdmissionChoices,
   GraphRelationTaskQueue,
+  GraphRelationRepository,
   GraphExtractionRun,
   MemoryV4LifecycleService,
   MemoryCandidateReviewService,
@@ -92,6 +98,7 @@ import { createToolRegistry, webSearchTool, fileReadTool, httpFetchTool } from '
 import { createPersistence } from './persist'
 import { withGraphSourceInvalidation } from './graph-source-invalidation'
 import { createSettingsManager } from './settings'
+import { createRulesWithGraphExtractor } from './graph-rules-extractor'
 import { setupVoiceIPC } from './voice'
 import { createImageMemoryService, isExplicitImageMemoryRequest } from './image-memory'
 import {
@@ -387,6 +394,8 @@ const memoryV4InternalReviewEnvironmentOverride
 
 interface MemorySettings {
   extractionMode: MemoryExtractionMode
+  /** Run local UIE graph capture alongside the stable rules memory extractor. */
+  graphExtractionEnabled: boolean
   semanticEnabled: boolean
   imageMemoryEnabled: boolean
   remotePolicy: MemoryRemotePolicy
@@ -396,6 +405,7 @@ interface MemorySettings {
 
 const defaultMemorySettings: MemorySettings = {
   extractionMode: 'rules',
+  graphExtractionEnabled: true,
   semanticEnabled: false,
   imageMemoryEnabled: true,
   remotePolicy: 'normal-only',
@@ -405,6 +415,7 @@ const defaultMemorySettings: MemorySettings = {
 function normalizeMemorySettings(value: Partial<MemorySettings> | undefined): MemorySettings {
   return {
     extractionMode: value?.extractionMode === 'smart' || value?.extractionMode === 'uie' ? value.extractionMode : 'rules',
+    graphExtractionEnabled: value?.graphExtractionEnabled !== false,
     semanticEnabled: value?.semanticEnabled === true,
     imageMemoryEnabled: value?.imageMemoryEnabled !== false,
     remotePolicy: value?.remotePolicy === 'allow-private' || value?.remotePolicy === 'disabled'
@@ -453,18 +464,55 @@ let memoryV4ShadowEvaluationStore: MemoryV4ShadowEvaluationStore | undefined
 let memoryV4InternalFeedbackPersistence: EncryptedMemoryPersistence | undefined
 let memoryV4InternalFeedbackStore: MemoryV4InternalFeedbackStore | undefined
 let graphExtractionStore: GraphExtractionResultStore | undefined
+let graphExtractionError = ''
 let graphNormalizationStore: GraphNormalizationStore | undefined
 let graphL1Store: GraphL1Store | undefined
 let graphL1Writer: GraphL1Writer | undefined
 let graphSemanticRepository: GraphSemanticRepository | undefined
 let graphL1ProjectionRepository: GraphL1ProjectionRepository | undefined
 let graphRelationTaskQueue: GraphRelationTaskQueue | undefined
+let graphRelationRepository: GraphRelationRepository | undefined
+let graphL2SyncChain: Promise<void> = Promise.resolve()
+let graphL2Generation = 0
 let graphNliJudge: ReturnType<typeof createLocalErlangshenNli> | undefined
 let graphNliDraining = false
 let graphNliRetryTimer: ReturnType<typeof setTimeout> | undefined
 function invalidateGraphL1Projection(): void {
   try { graphL1ProjectionRepository?.invalidate() }
   catch (error) { writeBootLog(`Graph L1 view invalidation was not persisted: ${errorMessage(error)}`) }
+  const repository = graphRelationRepository
+  const current = repository?.snapshot()
+  if (repository && current?.manifest.state === 'ready') {
+    const nextManifestId = `l2-stale:${createHash('sha256').update(`${current.manifest.manifestId}:${Date.now()}`).digest('hex')}`
+    void repository.invalidate({ operationId: nextManifestId, scope: current.manifest.scope,
+      expectedManifestId: current.manifest.manifestId, nextManifestId, reason: 'core-changed' })
+      .then(result => { if (!result.ok) writeBootLog(`Graph L2 invalidation deferred: ${result.error.message}`) })
+      .catch(error => writeBootLog(`Graph L2 invalidation failed: ${errorMessage(error)}`))
+  }
+}
+function purgeGraphL2ForMessageIds(messageIds: readonly string[]): void {
+  const repository = graphRelationRepository
+  const episodes = memoryV4Repository?.snapshot().episodes
+  if (!repository || !episodes || messageIds.length === 0) return
+  const ids = new Set(episodes.filter(episode => episode.sourceMessageId
+    && messageIds.includes(episode.sourceMessageId)).map(episode => episode.id))
+  if (ids.size === 0) return
+  const current = repository.snapshot()
+  const refs = [...current.candidates.flatMap(candidate => candidate.sourceHints),
+    ...current.relations.flatMap(relation => [...relation.provenance.sources,
+      ...relation.evidence.map(item => item.source)]),
+    ...current.observations.flatMap(observation => observation.premise.kind === 'source'
+      ? [observation.premise.ref] : [])]
+    .filter(source => ids.has(source.episodeId))
+  if (refs.length === 0) return
+  const sourceVersions = [...new Map(refs.map(ref => [`${ref.episodeId}\0${ref.contentHash}`, ref])).values()]
+  const nextManifestId = `l2-source-purge:${createHash('sha256').update(JSON.stringify([
+    current.manifest.manifestId, sourceVersions])).digest('hex')}`
+  void repository.purge({ operationId: nextManifestId, scope: current.manifest.scope,
+    expectedManifestId: current.manifest.manifestId, nextManifestId,
+    sourceVersions, claimVersions: [] })
+    .then(result => { if (!result.ok) writeBootLog(`Graph L2 source purge deferred: ${result.error.message}`) })
+    .catch(error => writeBootLog(`Graph L2 source purge failed: ${errorMessage(error)}`))
 }
 function syncGraphSemantic(): void {
   if (!graphSemanticRepository || !graphL1Store || !memoryV4Repository) return
@@ -478,12 +526,75 @@ function syncGraphSemantic(): void {
   }).catch(error => writeBootLog(`Graph semantic sync deferred: ${errorMessage(error)}`))
 }
 function syncGraphRelationTasks(): void {
-  const bundle = graphL1ProjectionRepository?.snapshot()?.semanticBundle
-  if (!bundle || !graphRelationTaskQueue || !memoryV4Repository) return
+  const view = graphL1ProjectionRepository?.snapshot()
+  const bundle = view?.semanticBundle
+  if (!view || !bundle || !graphRelationTaskQueue || !memoryV4Repository) return
   const episodes = new Map(memoryV4Repository.snapshot().episodes.map(episode => [episode.id, episode]))
+  const l2 = graphRelationRepository?.snapshot()
   graphRelationTaskQueue.sync(bundle.claims, bundle.predicates, localMemoryScope,
-    claim => graphClaimEvidenceText(claim, episodes))
+    claim => graphClaimEvidenceText(claim, episodes),
+    l2?.manifest.state === 'ready' && l2.manifest.coreManifestId === view.manifest.manifestId
+      ? l2.relations : [])
+  void queueGraphL2Sync().catch(error => writeBootLog(`Graph L2 sync deferred: ${errorMessage(error)}`))
   scheduleGraphNliDrain()
+}
+function queueGraphL2Sync(): Promise<void> {
+  const generation = graphL2Generation
+  return queueGraphL2Work(() => syncGraphL2Once(generation))
+}
+function queueGraphL2Work<T>(work: () => Promise<T>): Promise<T> {
+  const next = graphL2SyncChain.catch(() => {}).then(work)
+  graphL2SyncChain = next.then(() => {}, () => {})
+  return next
+}
+async function syncGraphL2Once(generation: number): Promise<void> {
+  if (generation !== graphL2Generation) return
+  const core = graphL1ProjectionRepository?.snapshot()
+  if (!core || !graphRelationTaskQueue || !memoryV4Repository) return
+  if (!graphRelationRepository) {
+    const initialCore = core
+    graphRelationRepository = createGraphRelationRepository({
+      coreSnapshot: () => graphL1ProjectionRepository?.snapshot()
+        ?? { ...initialCore, manifest: { ...initialCore.manifest, state: 'stale' } },
+      persistence: createEncryptedGraphRelationPersistence({
+        encryptedPath: graphRelationStoragePath, keyPath: graphRelationKeyPath,
+        protectKey: key => safeStorage.encryptString(key.toString('base64')),
+        unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+      }),
+      verifySources: async (refs, scope, relations) => {
+        const episodes = new Map(memoryV4Repository?.snapshot().episodes.map(item => [item.id, item]))
+        for (const ref of refs) {
+          const episode = episodes.get(ref.episodeId)
+          if (!episode || episode.contentState !== 'available' || episode.deletedAt !== undefined
+            || !episode.content || episode.contentHash !== ref.contentHash
+            || createHash('sha256').update(episode.content, 'utf8').digest('hex') !== ref.contentHash
+            || episode.scope.ownerId !== scope.ownerId || episode.scope.agentId !== scope.agentId
+            || (scope.sessionId !== undefined && episode.scope.sessionId !== scope.sessionId)
+            || (ref.locator.kind === 'text-span' && (ref.locator.start < 0
+              || ref.locator.end > episode.content.length || ref.locator.start >= ref.locator.end)))
+            return { ok: false, error: { code: 'source-unavailable', message: 'L2 source is no longer exact and available' } }
+          for (const relation of relations) {
+            if (!relation.provenance.sources.some(item => item.episodeId === ref.episodeId
+              && item.contentHash === ref.contentHash)) continue
+            if (['normal', 'private', 'secret'].indexOf(relation.sensitivity)
+                < ['normal', 'private', 'secret'].indexOf(episode.sensitivity)
+              || ['allow-remote', 'ask', 'local-only'].indexOf(relation.sharePolicy)
+                < ['allow-remote', 'ask', 'local-only'].indexOf(episode.sharePolicy))
+              return { ok: false, error: { code: 'source-unavailable', message: 'L2 relation weakens source policy' } }
+          }
+        }
+        return { ok: true, value: undefined }
+      },
+    })
+  }
+  const repository = graphRelationRepository
+  const rebound = await rebaseGraphRelations({ repository, core })
+  if (!rebound.ok) throw new Error(rebound.error.message)
+  if (generation !== graphL2Generation) return
+  const episodes = new Map(memoryV4Repository.snapshot().episodes.map(episode => [episode.id, episode]))
+  const staged = await stageGraphRelationTasks({ repository, core,
+    tasks: graphRelationTaskQueue.snapshot(), evidenceText: claim => graphClaimEvidenceText(claim, episodes) })
+  if (!staged.ok) throw new Error(staged.error.message)
 }
 function graphClaimEvidenceText(claim: { provenance: { sources: readonly { episodeId: string;
   locator: { kind: string; start?: number; end?: number } }[] } },
@@ -529,6 +640,7 @@ async function drainGraphNli(): Promise<void> {
         graphRelationTaskQueue.complete(task.key, { label, scores, truncated: result.value.truncated,
           premiseHash: createHash('sha256').update(premiseText).digest('hex'),
           hypothesisHash: createHash('sha256').update(hypothesisText).digest('hex'), evaluatedAt: Date.now() })
+        void queueGraphL2Sync().catch(error => writeBootLog(`Graph L2 staging deferred: ${errorMessage(error)}`))
       }
       catch (error) {
         const delay = Math.min(300_000, 5_000 * 2 ** Math.min(task.attempts ?? 0, 6))
@@ -610,6 +722,8 @@ const graphSemanticStoragePath = join(userDataDir, 'graph-semantic.enc')
 const graphSemanticKeyPath = join(userDataDir, 'graph-semantic-key.json')
 const graphL1ProjectionStoragePath = join(userDataDir, 'graph-l1-projection.enc')
 const graphL1ProjectionKeyPath = join(userDataDir, 'graph-l1-projection-key.json')
+const graphRelationStoragePath = join(userDataDir, 'graph-relations.enc')
+const graphRelationKeyPath = join(userDataDir, 'graph-relations-key.json')
 const legacyMemoryStoragePath = join(userDataDir, 'memories.json')
 const memoryV4StoragePath = join(userDataDir, 'memory-v4.enc')
 const memoryV4BackupPath = join(userDataDir, 'memory-v4.enc.backup')
@@ -705,7 +819,8 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
   const captureSettings = { ...memorySettings }
   const captureApiConfig = { ...apiConfig }
   const saveGraphExtraction = async (run: GraphExtractionRun) => {
-    graphExtractionStore?.append(run)
+    if (!graphExtractionStore) throw new Error('Graph extraction persistence is unavailable')
+    graphExtractionStore.append(run)
     if (graphNormalizationStore && run.status !== 'failed') {
       const normalized = normalizeGraphExtraction(run, {
         entities: graphNormalizationStore.entities(),
@@ -731,16 +846,29 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
     fallback: extractMemoryCandidates,
     saveGraphExtraction,
   })
+  const extractLocalGraph = async (turn: Parameters<MemoryExtractor>[0]) => {
+    const structured = await localUie.extract(turn.userMessage)
+    const sourceIds = turn.metadata?.sourceMessageIds
+    const sourceId = Array.isArray(sourceIds) && typeof sourceIds[0] === 'string'
+      ? sourceIds[0] : String(turn.metadata?.memoryCaptureId ?? 'unknown-source')
+    await saveGraphExtraction(uieGraphExtractionRun(sourceId, turn.userMessage, structured))
+    graphExtractionError = ''
+    return structured
+  }
+  const rulesWithGraph = createRulesWithGraphExtractor({
+    rules: extractMemoryCandidates,
+    captureGraph: async turn => { await extractLocalGraph(turn) },
+    onGraphError: error => {
+      graphExtractionError = errorMessage(error)
+      writeBootLog(`Local UIE-base graph capture failed; rules memory remains active: ${graphExtractionError}`)
+    },
+  })
   return async (turn) => {
     let candidates: MemoryCandidate[]
     if (captureSettings.extractionMode === 'uie' && memoryV4Shadow && memoryCandidateReview) {
       const local = await extractMemoryCandidates(turn)
       try {
-        const structured = await localUie.extract(turn.userMessage)
-        const sourceIds = turn.metadata?.sourceMessageIds
-        const sourceId = Array.isArray(sourceIds) && typeof sourceIds[0] === 'string'
-          ? sourceIds[0] : String(turn.metadata?.memoryCaptureId ?? 'unknown-source')
-        await saveGraphExtraction(uieGraphExtractionRun(sourceId, turn.userMessage, structured))
+        const structured = await extractLocalGraph(turn)
         const existing = new Set(local.map(candidate => candidate.content.toLocaleLowerCase()))
         candidates = [
           ...local,
@@ -749,9 +877,14 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
         ]
       }
       catch (error) {
+        graphExtractionError = errorMessage(error)
         writeBootLog(`Local UIE-base extraction failed, using rules: ${errorMessage(error)}`)
         candidates = local
       }
+    }
+    else if (captureSettings.extractionMode === 'rules') {
+      candidates = captureSettings.graphExtractionEnabled && localUie.isReady()
+        ? await rulesWithGraph(turn) : await extractMemoryCandidates(turn)
     }
     else {
       candidates = captureSettings.extractionMode === 'smart' && captureSettings.remotePolicy !== 'disabled'
@@ -860,12 +993,15 @@ function initializeMemory(): void {
   memoryV4ShadowEvaluationStore = undefined
   memoryV4InternalFeedbackPersistence = undefined
   graphExtractionStore = undefined
+  graphExtractionError = ''
   graphNormalizationStore = undefined
   graphL1Store = undefined
   graphL1Writer = undefined
   graphSemanticRepository = undefined
   graphL1ProjectionRepository = undefined
   graphRelationTaskQueue = undefined
+  graphRelationRepository = undefined
+  graphL2Generation++
   graphNliJudge?.close()
   graphNliJudge = undefined
   if (graphNliRetryTimer) clearTimeout(graphNliRetryTimer)
@@ -989,9 +1125,12 @@ function initializeMemory(): void {
       }),
       captureProcessorVersion: `capture-v1:${createHmac('sha256', 'capture-profile-v1').update(JSON.stringify({
         mode: memorySettings.extractionMode,
+        graphExtractionEnabled: memorySettings.graphExtractionEnabled,
         remotePolicy: memorySettings.remotePolicy,
         imageMemoryEnabled: memorySettings.imageMemoryEnabled,
-        ...(memorySettings.extractionMode === 'uie' ? { uieModelHome: config.uieModelPath ?? config.uieModelHome } : {}),
+        ...(memorySettings.extractionMode === 'uie'
+          || memorySettings.extractionMode === 'rules' && memorySettings.graphExtractionEnabled
+          ? { uieModelHome: config.uieModelPath ?? config.uieModelHome } : {}),
         ...(memorySettings.extractionMode === 'smart' ? { model: apiConfig.model, baseURL: apiConfig.baseURL } : {}),
       })).digest('hex')}`,
       extractor: createConfiguredMemoryExtractor(),
@@ -1001,6 +1140,7 @@ function initializeMemory(): void {
       },
       onCaptureObserverError: error => writeBootLog(`Memory V4 capture enqueue failed: ${errorMessage(error)}`),
       onSourcesUnlinked: (commit) => {
+        purgeGraphL2ForMessageIds(commit.messageIds)
         graphExtractionStore?.removeSources(commit.messageIds)
         graphNormalizationStore?.removeSources(commit.messageIds)
         graphL1Store?.removeSources(commit.messageIds)
@@ -1104,6 +1244,8 @@ function initializeMemory(): void {
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
       }), { modelId: ERLANGSHEN_NLI_MODEL_ID, modelRevision: nliRevision,
         preprocessingVersion: ERLANGSHEN_NLI_PREPROCESSING_VERSION })
+      graphL1ProjectionRepository.sync()
+      syncGraphRelationTasks()
       const predicateRegistry = createGraphPredicateRegistry()
       graphL1Writer = createGraphL1Writer(v4Repository, graphL1Store!, predicateRegistry, localMemoryScope, {
         syncFromClaims: async () => {
@@ -2001,6 +2143,15 @@ function setupIPC() {
       return view ? { manifestId: view.manifest.manifestId, bundleId: view.manifest.sourceBundleId,
         claims: view.semanticBundle.claims.length, argumentEdges: view.edges.length } : null
     })(),
+    graphExtraction: {
+      enabled: !!graphExtractionStore && (memorySettings.extractionMode === 'uie'
+        || memorySettings.extractionMode === 'rules' && memorySettings.graphExtractionEnabled),
+      modelReady: localUie.isReady(),
+      error: graphExtractionError || null,
+      runs: graphExtractionStore?.list().length ?? 0,
+      pendingReviews: graphL1Store?.reviews().filter(item => item.status === 'pending').length ?? 0,
+      claims: graphL1Store?.claims().length ?? 0,
+    },
     graphReviewItems: graphL1Store?.reviews().filter(item => item.status === 'pending').slice(0, Number(limit)).map((review) => {
       const run = graphExtractionStore?.list().find(item => item.id === review.runId)
       const source = run?.factCandidates.find(item => item.id === review.sourceFactId)
@@ -2033,6 +2184,37 @@ function setupIPC() {
         sensitivity: claims.some(claim => claim?.sensitivity === 'secret') ? 'secret'
           : claims.some(claim => claim?.sensitivity === 'private') ? 'private' : 'normal' }
     }) ?? [],
+    graphL2View: (() => {
+      const view = graphL1ProjectionRepository?.snapshot()
+      const l2 = graphRelationRepository?.snapshot()
+      return view && l2?.manifest.state === 'ready' && l2.manifest.coreManifestId === view.manifest.manifestId
+        ? { manifestId: l2.manifest.manifestId, candidates: l2.candidates.length,
+          relations: l2.relations.filter(item => item.transactionTime.closedAt === null).length }
+        : null
+    })(),
+    graphL2Candidates: (() => {
+      const view = graphL1ProjectionRepository?.snapshot()
+      const l2 = graphRelationRepository?.snapshot()
+      if (!view || !l2 || l2.manifest.state !== 'ready'
+        || l2.manifest.coreManifestId !== view.manifest.manifestId) return []
+      return l2.candidates.filter(item => item.resolution.status === 'pending'
+        && (item.kind === 'entails' || item.kind === 'contradicts'))
+        .slice(0, Number(limit)).map(candidate => {
+          const from = view.semanticBundle.claims.find(claim => claim.ref.id === candidate.from.id
+            && claim.ref.version === candidate.from.version)
+          const to = view.semanticBundle.claims.find(claim => claim.ref.id === candidate.to.id
+            && claim.ref.version === candidate.to.version)
+          const observations = l2.observations.filter(item => item.candidateId === candidate.id)
+          return { id: candidate.id, kind: candidate.kind, from: candidate.from, to: candidate.to,
+            fromEvidence: from ? graphClaimEvidenceText(from) : '',
+            toEvidence: to ? graphClaimEvidenceText(to) : '',
+            context: candidate.context, observations: observations.map(item => ({
+              predicted: item.predicted, scores: item.scores, truncated: item.truncated,
+              modelId: item.modelId, modelRevision: item.modelRevision })),
+            sensitivity: from?.sensitivity === 'secret' || to?.sensitivity === 'secret' ? 'secret'
+              : from?.sensitivity === 'private' || to?.sensitivity === 'private' ? 'private' : 'normal' }
+        })
+    })(),
     pendingCaptureSegments: memory?.pendingCaptureCount() ?? 0,
   }))
 
@@ -2125,7 +2307,31 @@ function setupIPC() {
     if (!graphRelationTaskQueue || !key || !reason || !['accepted', 'rejected', 'pending'].includes(String(input.outcome)))
       return { ok: false, error: '无效的信息关系审核操作。' }
     const changed = graphRelationTaskQueue.review(key, input.outcome as 'accepted' | 'rejected' | 'pending', reason)
+    if (changed) await queueGraphL2Sync()
     return changed ? { ok: true } : { ok: false, error: '候选不存在或 NLI 判断尚未完成。' }
+  })
+
+  ipcMain.handle('memory:graph-l2-publish', async (_event,
+    input: { candidateId?: unknown; reason?: unknown }) => {
+    const candidateId = typeof input?.candidateId === 'string' ? input.candidateId.trim() : ''
+    const reason = typeof input?.reason === 'string' ? input.reason.trim() : ''
+    if (!candidateId || !reason || reason.length > 500)
+      return { ok: false, error: '请指定候选并填写核实关系语义的原因。' }
+    try {
+      const generation = graphL2Generation
+      return await queueGraphL2Work(async () => {
+        await syncGraphL2Once(generation)
+        const core = graphL1ProjectionRepository?.snapshot()
+        if (generation !== graphL2Generation || !core || !graphRelationRepository)
+          return { ok: false, error: '稳定的 L1/L2 图视图尚未就绪。' }
+        const result = await publishReviewedGraphRelation({ repository: graphRelationRepository,
+          core, candidateId, reason, reviewer: 'local-user', evidenceText: graphClaimEvidenceText })
+        if (!result.ok) return { ok: false, error: result.error.message }
+        syncGraphRelationTasks()
+        return { ok: true, relation: result.value.relationRef }
+      })
+    }
+    catch (error) { return { ok: false, error: errorMessage(error) } }
   })
 
   ipcMain.handle('memory:v4-internal-feedback', async (
@@ -2315,6 +2521,9 @@ function setupIPC() {
     if (nextSettings.extractionMode === 'uie' && !localUie.isReady()) {
       return { ok: false, error: '本地 UIE-base 模型或 Python 环境不可用，请检查 config.json 中的 uiePythonPath 和 uieModelHome。', settings: memorySettings }
     }
+    if (input.graphExtractionEnabled === true && nextSettings.extractionMode === 'rules' && !localUie.isReady()) {
+      return { ok: false, error: '本地 UIE-base 模型或 Python 环境不可用，无法在 rules 模式下开启图提取。', settings: memorySettings }
+    }
     if (nextSettings.extractionMode === 'uie' && (!memoryV4Shadow || !memoryCandidateReview)) {
       return { ok: false, error: 'UIE-base 候选需要 V4 影子存储与审核服务；当前不可用。', settings: memorySettings }
     }
@@ -2338,7 +2547,11 @@ function setupIPC() {
     if (typeof text !== 'string' || !text.trim() || text.length > 4000)
       return { ok: false, error: '请输入不超过 4000 字的文本。' }
     try {
-      return { ok: true, extraction: await localUie.extract(text) }
+      const extraction = await localUie.extract(text)
+      const graph = uieGraphExtractionRun('local-preview', text, extraction)
+      return { ok: true, extraction,
+        graphPreview: { status: graph.status, entityMentions: graph.entityMentions,
+          factCandidates: graph.factCandidates } }
     }
     catch (error) {
       return { ok: false, error: `本地 UIE-base 提取失败：${errorMessage(error)}` }

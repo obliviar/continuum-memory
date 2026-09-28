@@ -73,6 +73,8 @@ export interface GraphRelationRecord extends GraphSemanticRecord {
   readonly context: GraphContextRef
   readonly validTime: GraphTimeExtent
   readonly assertionBasis: 'source-explicit' | 'user-confirmed'
+  /** The explicit admission decision; model scores remain separate observations. */
+  readonly reviewReason?: string
   readonly evidence: NonEmptyReadonlyArray<GraphRelationEvidence>
   readonly candidateId?: string
   readonly nliObservationIds: readonly string[]

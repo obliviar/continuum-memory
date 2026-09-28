@@ -10,8 +10,10 @@ import {
   createEncryptedFilePersistence,
   createEncryptedGraphL1Persistence,
   createV4GraphMemory,
-  selectRetrievableGraphBundle,
+  createEncryptedGraphRelationPersistence,
+  diagnoseV4GraphInputs,
   V4_GRAPH_BUDGET,
+  selectRetrievableGraphBundle,
   createEncryptedV4Persistence,
   createIdleConsolidationRunner,
   createJournaledV4Persistence,
@@ -49,7 +51,6 @@ import {
   reviewGraphAdmission,
   createGraphRelationTaskQueue,
   createGraphRelationRepository,
-  createEncryptedGraphRelationPersistence,
   rebaseGraphRelations,
   stageGraphRelationTasks,
   publishReviewedGraphRelation,
@@ -97,6 +98,7 @@ import { createToolRegistry, webSearchTool, fileReadTool, httpFetchTool } from '
 
 import { createPersistence } from './persist'
 import { withGraphSourceInvalidation } from './graph-source-invalidation'
+import { prepareGraphRecallInputs } from './graph-l1-recall-barrier'
 import { createSettingsManager } from './settings'
 import { createRulesWithGraphExtractor } from './graph-rules-extractor'
 import { setupVoiceIPC } from './voice'
@@ -1558,7 +1560,7 @@ async function prepareMemoryV4SemanticQuery(
   catch (error) {
     const message = errorMessage(error)
     if (message !== memoryV4SemanticError)
-      writeBootLog(`Memory V4 learned semantic query fell back to local hash: ${message}`)
+      writeBootLog(`Memory V4 learned semantic query unavailable; caller fallback will apply: ${message}`)
     memoryV4SemanticError = message
     return undefined
   }
@@ -1593,26 +1595,55 @@ function invalidateMemoryV4ShadowComparisons(): void {
   memoryV4ShadowWorkerClient?.cancelAll()
 }
 
-function memoryForRemoteRuntime() {
-  if (!memory)
-    return undefined
-  const localMemory = memory
-  const worker = memoryV4ShadowWorkerClient
-  const graph = graphMemoryEnabled && memoryV4Repository && graphL1Persistence
+async function prepareDesktopGraphRecall(flushCaptures: () => Promise<void>): Promise<void> {
+  const repository = memoryV4Repository, semantic = graphSemanticRepository, projection = graphL1ProjectionRepository
+  const store = graphL1Store, shadow = memoryV4Shadow
+  await prepareGraphRecallInputs({ flushCaptures, flushV4: () => { shadow?.flush() },
+    isCurrent: () => repository === memoryV4Repository && semantic === graphSemanticRepository
+      && projection === graphL1ProjectionRepository && store === graphL1Store && shadow === memoryV4Shadow,
+    syncL1: async () => {
+      if (!repository || !semantic || !projection || !store) return
+      const result = await semantic.syncFromClaims(store, repository, createGraphPredicateRegistry(), localMemoryScope)
+      if (!result.ok || !projection.sync()) throw new Error('Current accepted L1 publication unavailable')
+    } })
+}
+
+function createDesktopGraphMemory() {
+  const repository = memoryV4Repository, l1Persistence = graphL1Persistence
+  return repository && l1Persistence
     ? createV4GraphMemory({
-        repository: memoryV4Repository, persistence: graphL1Persistence,
-        authorizeScope: scope => scope.ownerId === localMemoryScope.ownerId
+        repository, persistence: l1Persistence,
+        includeOwnedSessions: true,
+        acceptedBundle: () => selectRetrievableGraphBundle(graphL1ProjectionRepository?.snapshot()?.semanticBundle, graphL1Store?.tasks() ?? []),
+        authorizeScope: scope => memoryV4Repository === repository
+          && graphL1Persistence === l1Persistence
+          && scope.ownerId === localMemoryScope.ownerId
           && scope.agentId === localMemoryScope.agentId && scope.sessionId === undefined,
         canRead: record => memorySettings.remotePolicy !== 'disabled' && record.sharePolicy === 'allow-remote'
           && (record.sensitivity === 'normal'
             || (record.sensitivity === 'private' && memorySettings.remotePolicy === 'allow-private')),
         countTokens: countGraphTokens,
-        includeOwnedSessions: true,
         utcOffsetMinutes: -new Date().getTimezoneOffset(),
-        acceptedBundle: () => selectRetrievableGraphBundle(graphL1ProjectionRepository?.snapshot()?.semanticBundle,
-          graphL1Store?.tasks() ?? []),
+        ...(memorySemanticActive && memoryV4EmbeddingIndex ? {
+          semantic: {
+            model: SEMANTIC_MEMORY_FINGERPRINT,
+            dimensions: SEMANTIC_MEMORY_EXPECTED_DIMENSION,
+            // Exact canonical text lookup rejects cached vectors for old fact contents.
+            index: { get: (id: string, model: string, content: string) =>
+              memorySemanticActive ? memoryV4EmbeddingIndex?.get(id, model, content) : undefined },
+            embedQuery: prepareMemoryV4SemanticQuery,
+          },
+        } : {}),
       })
     : undefined
+}
+
+function memoryForRemoteRuntime() {
+  if (!memory)
+    return undefined
+  const localMemory = memory
+  const worker = memoryV4ShadowWorkerClient
+  const graph = graphMemoryEnabled ? createDesktopGraphMemory() : undefined
   const readController = createMemoryV4ReadController({
     mode: config.memoryV4ReadMode,
     recallV3: (query, scope, options) => localMemory.recallAdaptive!(query, scope, options),
@@ -1746,7 +1777,7 @@ function rebuildRuntime() {
     resolveMemoryScope: () => localMemoryScope,
     ...(graphMemoryEnabled && remoteMemory?.graph ? { graphRecall: {
       countTokens: countGraphTokens,
-      awaitCaptureWrites: () => remoteMemory.flushPendingCaptures(),
+      awaitCaptureWrites: () => prepareDesktopGraphRecall(() => remoteMemory.flushPendingCaptures()),
       createRequest: (query: string) => {
         const timestamp = Date.now()
         return { protocolVersion: 'memory-graph/v1' as const, recallId: crypto.randomUUID(), query,
@@ -2014,6 +2045,23 @@ function setupIPC() {
       await memory.unlinkSources(removedMessageIds, localMemoryScope)
     saveSessions()
     return { ok: true }
+  })
+
+  ipcMain.handle('memory:graph-diagnostics', () => {
+    if (!memoryV4Repository) return { ok: false, error: 'V4 仓库尚未就绪。' }
+    try {
+      const report = diagnoseV4GraphInputs(memoryV4Repository, {
+        scope: localMemoryScope, expectedRevision: memoryV4Repository.snapshot().revision, now: Date.now(),
+        authorizeScope: scope => scope.ownerId === localMemoryScope.ownerId
+          && scope.agentId === localMemoryScope.agentId && scope.sessionId === undefined,
+        canRead: record => memorySettings.remotePolicy !== 'disabled' && record.sharePolicy === 'allow-remote'
+          && (record.sensitivity === 'normal'
+            || (record.sensitivity === 'private' && memorySettings.remotePolicy === 'allow-private')),
+      })
+      return { ok: true, graphEnabled: graphMemoryEnabled, pendingWrites: memoryV4Shadow?.pendingCount() ?? 0, report }
+    } catch {
+      return { ok: false, error: '诊断未完成：数据可能已更新、不符合结构校验或超过扫描上限，请刷新后重试。' }
+    }
   })
 
   ipcMain.handle('memory:status', async () => ({

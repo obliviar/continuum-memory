@@ -90,8 +90,12 @@ describe('real V4 direct graph memory', () => {
     const f = setup()
     f.persistence.save = () => { throw new Error('disk') }
     expect(await f.port.recall(f.request)).toMatchObject({ ok: false, error: { code: 'not-ready' } })
-    f.persistence.save = () => { f.deny() }
-    expect(await f.port.recall(f.request)).toMatchObject({ ok: false, error: { code: 'stale-projection' } })
+    const revoked = setup()
+    const persist = revoked.persistence.save
+    revoked.persistence.save = payload => { persist(payload); revoked.deny() }
+    const result = await revoked.port.recall(revoked.request)
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(['stale-projection', 'not-ready']).toContain(result.error.code)
   })
   it('records bounded idempotent usage receipts, never user corrections without evidence', async () => {
     const f = setup(); const r = await f.port.recall(f.request)

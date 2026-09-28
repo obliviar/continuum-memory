@@ -202,6 +202,19 @@ export interface GraphAnswerEvidenceBundle {
   readonly rules: readonly GraphEvidenceRule[]
   readonly proofs: readonly GraphEvidenceProof[]
   readonly groups: readonly GraphEvidenceGroup[]
+  /** Optional source-asserted L2 evidence. These edges are not logical proofs. */
+  readonly relationManifestId?: string
+  readonly relations?: readonly GraphEvidenceRelation[]
+}
+
+export interface GraphEvidenceRelation extends GraphEvidenceSemantics {
+  readonly ref: GraphRelationRef
+  readonly citation: string
+  readonly from: GraphClaimRef
+  readonly to: GraphClaimRef
+  readonly kind: 'entails' | 'contradicts' | 'causes' | 'precedes' | 'explains'
+  readonly assertionBasis: 'source-explicit' | 'user-confirmed'
+  readonly sources: NonEmptyReadonlyArray<GraphSourceRef>
 }
 
 export interface GraphRecallResult {

@@ -1,13 +1,20 @@
 import { createHash } from 'node:crypto'
-import type { GraphSourceRef } from '@continuum-memory/contracts'
+import type { GraphClaimRef, GraphSourceRef } from '@continuum-memory/contracts'
 import { MEMORY_GRAPH_PROTOCOL_VERSION } from '@continuum-memory/contracts'
 import type { GraphClaimRecord, GraphLiteral, GraphPredicateSpec, GraphProjectionSnapshot, GraphSemanticRecord } from '../domain/types'
 import type { V4RecallInput } from './v4-recall-input'
 import type { MemoryV4Scope } from '../../v4/domain/types'
 
-export const V4_SCALAR_MAPPING_POLICY = 'v4-verified-scalar-v1'
+export const V4_SCALAR_MAPPING_POLICY = 'v4-verified-scalar-v2'
 export const graphHash = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 export const sourceHash = (text: string): string => createHash('sha256').update(text, 'utf8').digest('hex')
+
+/** Decode only this adapter's exact identity, including fact IDs containing colons.
+ * Used for deletion across older checkpoints after their L1 projection has been erased.
+ */
+export function v4FactIdFromClaim(ref: GraphClaimRef): string | undefined {
+  return ref.kind === 'claim' ? /^v4:([\s\S]+):[a-f0-9]{64}$/.exec(ref.id)?.[1] : undefined
+}
 
 /** Mechanical mapping of verified typed V4 fields, no natural-language parsing or entity merges. */
 export function projectV4ScalarInputs(inputs: readonly V4RecallInput[], scope: MemoryV4Scope, revision: number): GraphProjectionSnapshot {
@@ -42,10 +49,13 @@ export function projectV4ScalarInputs(inputs: readonly V4RecallInput[], scope: M
       cardinality: fact.cardinality, keyRoles: ['subject'], valueRole: 'value', symmetry: 'none',
       transitivity: 'none', inferenceAllowed: false, world: 'open' })
     // A source edit or policy tightening without a new V4 fact version must not reuse an exact L1 identity.
-    const identity = graphHash([fact.scope, fact.id, version.version, fact.subjectId, fact.predicate,
+    // Sharing an exact source context is not evidence of a relationship between the claims.
+    // Different provenance, policies or recording/review times remain separate contexts.
+    const context = { kind: 'context' as const, id: `v4-source:${graphHash([fact.scope, sourceRefs,
+      base.sensitivity, base.sharePolicy, base.transactionTime, base.review])}`, version: 1 }
+    const identity = graphHash([context, fact.scope, fact.id, version.version, fact.subjectId, fact.predicate,
       fact.normalizedValue, fact.canonicalText, fact.polarity, fact.modality, fact.validFrom, fact.validTo,
       fact.cardinality, sourceRefs, sources.map(s => [s.link.role, s.link.strength]), base.sensitivity, base.sharePolicy])
-    const context = { kind: 'context' as const, id: `v4:${identity}`, version: version.version }
     contexts.set(context.id, { ...base, ref: context, domain: 'v4-direct-scalar', scenario: 'actual', parent: null })
     return { ...base, ref: { kind: 'claim', id: `v4:${fact.id}:${identity}`, version: version.version },
       fact: { kind: 'v4-fact', id: fact.id, version: version.version },

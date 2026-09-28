@@ -1,5 +1,10 @@
 # 图关系开发：样例、校验、种子检索与受限多跳召回
 
+> 2026-09-28：实体 L1 已接入统一固定视图和直接召回，支持精确实体读取、名称/别名候选、
+> 检索许可撤回与未知语义标记。审核规则沿用上游、尚未定案。上游关系审核仓库与聊天 L2
+> 仓库仍独立，不能将界面采纳等同于已进入聊天。当前边界与后续步骤见
+> [实体 L1 接入说明](../../../../docs/l1-recall-integration.md)。
+
 > **更新后请先读本节。** 权威 L2 类型以 `domain/relation-types.ts` 为准，存储使用上游新增的独立 `GraphRelationRepository`。下文第 1–5 步中的 `causal / contributes-to / before`、组合 bundle、assertion/status/support 字段属于旧样例与内部召回投影，不是当前 L2 持久化格式；它们已隔离到 `domain/recall-types.ts`，不可直接发布为 L2 快照。
 
 ## 与更新后的 L2 分支对齐
@@ -545,6 +550,7 @@ maxEvidenceTokens 目前计量证据读取内容，不等于将整个 JSON 序�
 更新后的分支已提供权威 L2 持久化与 CAS 发布，本次新增了召回到该读取层的适配。后续仍需对接真实 V4/L1 与宿主来源、种子检索和生命周期事件，再将证据包接入 Agent Runtime 和使用反馈。
 
 
+
 ### V4 current-state staging input
 
 `collectV4RecallInputs` (`adapters/v4-recall-input.ts`) reads a pinned V4 repository snapshot.
@@ -564,6 +570,7 @@ This is a staging boundary only. Persisted semantic decisions (predicate roles, 
 context, review), L1 publication, source hashing, query-time lifecycle/authorization rechecks,
 V4 query seed wiring and runtime injection are still required. A successful collection is not a
 live read view and must never be served as an enduring authorization grant.
+
 
 
 ## Desktop V4 → L1 → Agent direct-fact route
@@ -626,3 +633,160 @@ This first host route is **direct L1 only**. The independent bounded L2 traversa
 in `l2-recall-adapter.ts` but is not automatically connected to this scoped scalar checkpoint.
 There is no real-user-memory quality claim: tests use synthetic V4 records, a real repository,
 encrypted temporary files and a stub LLM. No user corpus or paid model API is accessed by tests.
+
+
+## 接入诊断与回归测评（第二阶段起点）
+
+开发版长期记忆管理页面增加“检查图记忆接入”按钮。它调用本地只读诊断，显示当前宿主
+范围内的可接入数、排除数和首个失败原因计数，不输出事实 ID、正文或其他用户的数据。
+诊断应用与远程问答相同的分享策略；远程记忆禁用时会显示策略排除，而不是将数据判成损坏。
+结果有版本号和检查时间，记忆修改或权限变化后需重新检查。未绑定会话是首版的精确范围，
+并不代表跨会话全量统计。结构校验失败、版本变化或超过 10,000 事实扫描上限时返回错误，不伪造零条。
+
+“可接入”只说明通过输入门槛，不意味着在具体问题的时间、词法和预算筛选后必然被选中。
+使用 `eval/run-direct-recall.mjs` 的固定问题进一步区分被排除、漏召回和多召回；
+测评范围、严格质量门禁及首轮 7/12 基线详见 `eval/README.md`。
+
+
+### 直接事实入口的弱相关匹配修复
+
+`recall/direct-lexical.ts` 仅为直接 V4 图召回配置独立分词。普通多字查询不再凭单汉字
+重合选中事实；英文问句虚词不参与排名，字符边界得到保留。原有 12 题证据集合匹配
+由 7/12 提高到 11/12，剩余语义改写缺口继续如实报告。新增 11 项词法保护检查。
+每次召回 trace 的 searchScope 带有 `direct-lexical-bigram-v1`，可识别使用的检索策略。
+
+### 直接事实入口的本地向量候选
+
+`recall/direct-semantic.ts` 复用内容寻址的 V4 向量缓存与现有 dense vector index，
+只搜索已通过 L1 输入检查的事实。`V4GraphMemoryOptions.semantic` 为可选宿主配置；
+桌面入口在本地语义模型启用且缓存可用时接入，模型关闭时保留原有词法入口。
+BM25 与向量候选经 RRF 合并去重，然后继续执行来源回读、版本校验与证据预算。
+向量等待期间的仓库或授权变化返回 stale-projection，不发布混合版本证据。
+
+trace 记录 `direct-hybrid-rrf-v1`、模型指纹、暂定阈值、可用向量数及回退原因。
+该实现只扩充直接事实候选，不创建关系边、不提升事实置信度、不开放规则证明。
+测试向量的接线检查与真实模型召回质量分开记录，详见 `eval/README.md`。
+
+### 当前 V4 的 L1 固定发布与读取
+
+`repository/v4-l1-store.ts` 提供 `createV4L1Store`：完整宿主可读范围的 V4 合格数据通过
+`publishCurrent` 发布到已有独立加密检查点，按 expectedManifestId 和已加载检查点内容
+执行单宿主 CAS 检查。存储成功后才发布内存版本；另一个实例写入后，旧实例必须重载。
+这是单宿主同步写入约束，不提供跨进程数据库事务。旧的按问题生成的快照必须从 V4 重建。
+
+查询时间和请求级分享策略仅过滤固定视图，不参与发布集合。不同时间问法不会再因筛选
+不同而改变同一来源版本的 manifest。仍按整个 V4 revision 保守失效，包括计数等无关更新；
+暂未拆分语义 revision，不承诺历史事务版本持续可读。
+
+`openView` 实现正式 `GraphReadPort`，`evidenceReader` 提供精确 Claim/Fact/Source 回读。
+授权由宿主 accessContextId 注册表解析，每次读取重查授权版本、当前来源、删除状态、
+权限与时效；关闭、过期、发布变化或来源变化的旧视图不能继续提供证据。
+返回值为副本，视图元数据被冻结；伪造视图对象不能使用证据读取接口。
+视图限制节点、证据和时间预算，宿主须在 finally 中关闭视图。
+
+`createV4GraphMemory` 已使用该发布器和固定读取路径，并暴露 `l1` 给后续宿主接线。
+外部 L2 宿主需通过 `resolveGraphAccess` 提供真实授权注册表，再使用 `l1.openView`、
+`l1.evidenceReader`、`l1.isViewLive` 绑定关系读取器。19 项回归中包含真实 L1 与空 L2
+仓库的绑定/关闭测试。下面的 L2 宿主路径仅是隔离实现，当前桌面没有启用。
+
+L1 本轮不支持规则、证明、邻接遍历或冲突审计；这些调用明确返回 unsupported-capability。
+
+### 隔离的 L2 宿主路径（当前桌面未接入）
+
+`adapters/v4-l2-memory.ts` 现将直接事实入口、正式关系仓库、受控读取器、L2 适配器和
+受限遍历器组合到同一 AgentGraphMemoryPort。桌面运行时仅接入直接 L1；
+`CONTINUUM_GRAPH_MEMORY=1` 不启用本节的 L2 宿主，也不创建第二份 L2 关系文件。
+桌面权威关系仍存于 `graph-relations.enc`，需先统一 L1 manifest 和固定读取接口。
+普通问题沿原有直接召回；关系问题按有限问句规则确定目标、类型和方向，默认最多 2 跳、
+32 条扫描边、4 个入口。模糊目标返回需澄清的错误，不猜事件身份。
+
+`prepareRelations(scope)` 是受信宿主的关系发布入口：先发布 L1，再返回正式关系仓库。
+仓库只采纳符合协议、权限和真实来源检查的关系。源文线索、向量相似和 NLI 观察仍是
+候选；本轮没有增加自动关系抽取/自动采纳或桌面人工审核界面。
+已有用户数据若尚无采纳关系，关系问题不会自动获得因果答案。
+
+关系发布在异步来源校验前复制输入，并在保存前重查持久化版本；同一宿主内多个实例
+竞争时只允许一个成功，旧实例读取标为 stale，不能覆盖或清除新版本。此保障依赖同一
+事件循环中的同步 load/save；跨进程共享写入仍需持久层锁或原子 CAS，不在本轮承诺内。
+
+映射策略升为 `v4-verified-scalar-v2`：仅来源版本集合、权限、记录与审核时间一致的事实
+共享来源上下文；不同来源不合并。这只让关系端点具备可校验的共同上下文，不证明关系。
+v1 L1 检查点会重建；旧 L2 不自动改绑新的 Claim。普通 V4 写入先将 L2 标成 stale，保留
+记录待明确复核/重建；这一保守策略包含无关 V4 更新。删除联动见下一节。
+
+Agent 证据包新增可选 relations / relationManifestId，每条关系带精确端点、方向、类型、
+断言依据、来源和 R 引用；提示词校验端点存在，转义所有数据并明确“来源陈述，不是证明”。
+整个 L2 证据包作为一个组返回，输出预算不足时拒绝整组，不留下孤立关系。
+当前冲突审计未接通，因此覆盖状态保守标为 incomplete，不宣称已穷尽解释。
+
+`eval/l2-host-regression.ts` 用合成、明确标注的关系验证真实 V4→L1→L2→提示词链路。
+它不是实际用户数据或在线 LLM 回答质量测试；尚未启动桌面 UI 进行人工验收。
+
+### V4 删除与 L2 级联清理
+
+`adapters/v4-relation-lifecycle.ts` 的 `reconcileV4RelationLifecycle` 在桌面 V4 持久化包装器
+中同步执行，接收即将保存的完整 V4 快照。先擦除 L1，再清理 L2，最后才发布 V4；即使
+图问答开关关闭，生命周期操作、后台同步和其他 V4 写入也经过同一入口。
+
+已删除/缺失的事实及来源会触发依赖闭包清理：关系、相关候选（含 hypothesisText）、NLI
+观察一并从当前加密 L2 检查点移除。保留的关系仍标为 stale；只有权威关系实际删除才增加
+relationRevision，候选或观察实际删除才增加 candidateRevision。底层复用显式 purge 的
+`domain/relation-purge.ts`，没有另写一套级联规则。此处不承诺磁盘扇区或外部备份安全擦除。
+
+普通编辑、权限变化和 suppress 只撤销视图，不清除待复核记录。事实删除即清理关系，所以
+恢复一个已删除事实不会自动恢复旧关系。共用来源时按精确 V4 Claim 身份定位删除端点，
+不因一个事实删除而清空整个关系库；端点当前仍依赖已删除来源时也会被清理。
+
+启动时执行一次只清理的检查（invalidate=false），处理旧版本留下的已删除记录；不需要
+旧 L1 检查点，也不会把 stale 关系重新变成 ready。V4 Claim 身份只按本适配器固定格式
+解析，支持事实 ID 中含冒号；任意其他图身份不被当作 V4 事实 ID 猜测。
+
+L2 保存失败会阻止后续 V4 保存；若 L2 清理成功但 V4 保存失败，关系不会回滚恢复。
+这是跨文件的保守失效顺序，不是跨文件事务。重试/重启可继续清理，已清理关系须重新审核。
+显式复核入口见下一节；桌面审核界面、变更端点后的人工重建及真实问答验收仍待实现。
+
+### 失效关系的显式复核与重新发布
+
+`createV4L2Memory` 现在额外提供宿主接口 `reviewRelations(scope)` 和
+`republishRelations({ reviewId, scope, operationId, reviewer, reason })`。
+这些接口不属于 AgentGraphMemoryPort，不注册为模型可调用工具；由受信宿主调用。
+
+1. `reviewRelations` 准备当前 L1，返回旧关系版本、目标 L1 版本、关系方向/端点文字、
+   候选与观察数量、逐条可用性及整体阻塞原因。精确端点、上下文、时间、来源版本和权限
+   必须仍满足协议；任何一条不合格都阻止整组重新发布，不静默丢弃记录。报告只说明技术
+   上是否可以保留原关系，不代替对因果等语义的人工判断。预览可能更新 L1/撤销旧 L2，
+   但不会将 L2 变成 ready。
+2. 可发布的报告附带 5 分钟有效、单次使用的 reviewId。同一宿主实例持有最多 32 份
+   报告，重启后失效；每份快照最多 500 条关系/候选/观察，超限明确拒绝。
+3. 宿主提供操作者与复核说明后，`republishRelations` 重新检查权限、L1/L2 版本和来源，
+   使用原仓库的校验及 CAS 发布。报告后任何输入变化都要求重新预览；不能篡改返回报告
+   来修改发布内容。写入失败消耗确认凭据，需重新预览后重试。
+
+只有固定版本 Claim 及来源仍有效的记录可以原样迁移到新的 L1 发布版本，例如仅访问
+计数变化。正文/事实更新造成精确端点消失时仅报告阻塞，不猜测替代端点；已清除关系
+不会复活，未采纳候选保持未采纳。更改端点或新关系采纳仍须另行构造、审核和发布。
+数组内容不变时 relationRevision/candidateRevision 保持不变，manifestId 更新。
+
+L2 检查点的可选 `lastRevalidation` 保存最近一次操作 ID、操作者、说明、时间及前后
+版本标识。它不是完整审计历史，也不是操作者身份认证；身份应由后续桌面宿主确认。
+隐私清理不保留该说明，以免说明中的自由文本成为被删除记忆的残留。
+
+桌面现已连接预览/确认按钮，操作方式见下一节；尚未执行真实用户的关系复核。
+
+### 桌面关系复核操作
+
+入口在“长期记忆管理 → 关系复核”：点击“查看复核报告”，逐条查看关系端点、方向及
+阻塞原因；所有记录通过且已有采纳关系时，填写复核说明、勾选确认，再点击“确认重新
+发布”。报告过期、数据变化或失败后需重新查看。空库会说明不会自动创建关系。
+
+`GraphRelationReview.vue` 负责显示和确认状态；主进程的 `graph-relation-review-controller.ts`
+保留报告所属的宿主实例，只允许最新报告发布。前端不能传入发布内容、范围或操作者；
+操作者固定记录为 desktop-local-user，表示本地桌面操作，不是实名认证。IPC 只接受
+主窗口的主框架；仓库重载和页面导航会撤销待确认报告，旧仓库实例也会失去授权。
+
+复核和问答共用 `createDesktopGraphMemory`，沿用当前“发送给聊天模型”的权限过滤；
+预览和确认前同步 V4 待写入队列。复核不会调用模型、放宽分享权限或切换图问答开关。
+未启用图问答时可复核，但界面会提示发布不等于启用图问答。
+
+已通过主进程/界面类型检查、真实复核服务的控制器回归，以及编译后 Vue 组件的无窗口
+交互测试；尚未进行 Electron 实际窗口的布局/点击验收，也未打包更新已有安装版。

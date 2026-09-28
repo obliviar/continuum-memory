@@ -5,5 +5,10 @@
     "composite": true,
     "types": ["node"]
   },
-  "include": ["src/main/**/*", "src/preload/**/*", "electron.vite.config.ts"]
+  "include": ["src/main/**/*", "src/preload/**/*", "electron.vite.config.ts"],
+  "exclude": [
+    "src/main/graph-memory-runtime.test.ts",
+    "src/main/graph-relation-review-controller.test.ts",
+    "src/main/graph-relation-review-regression.ts"
+  ]
 }

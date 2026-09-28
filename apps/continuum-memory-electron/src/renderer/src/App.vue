@@ -296,6 +296,24 @@ const memoryLoading = ref(false)
 const memoryMutating = ref(false)
 const memoryStatusMessage = ref('')
 const memoryStatusError = ref(false)
+const graphDiagnosticLoading = ref(false)
+const graphDiagnosticMessage = ref('')
+async function inspectGraphInputs() {
+  graphDiagnosticLoading.value = true
+  graphDiagnosticMessage.value = ''
+  try {
+    const result = await ipcRenderer.invoke('memory:graph-diagnostics')
+    if (!result?.ok) { graphDiagnosticMessage.value = result?.error || '诊断失败'; return }
+    const report = result.report
+    const reasons = report.reasons.filter((item: { count: number }) => item.count > 0)
+      .map((item: { label: string; count: number }) => `${item.label}：${item.count}`).join('；')
+    graphDiagnosticMessage.value = `图模式${result.graphEnabled ? '已启用' : '未启用'}；待写入 ${result.pendingWrites} 条。`
+      + `当前用户和 Agent 的未绑定会话记录共 ${report.inScope} 条，可接入 ${report.eligible} 条，排除 ${report.excluded} 条。`
+      + (reasons ? `排除原因：${reasons}。` : '') + report.note
+      + `（数据版本 ${report.revision}；检查时间 ${new Date(report.checkedAt).toLocaleString()}，修改记忆后请重新检查。）`
+  } catch { graphDiagnosticMessage.value = '无法获取诊断结果，请稍后重试。' }
+  finally { graphDiagnosticLoading.value = false }
+}
 const pendingDeleteMemoryId = ref<string | null>(null)
 const pendingPurgeMemoryId = ref<string | null>(null)
 const purgeToken = ref('')
@@ -1579,6 +1597,12 @@ async function doReset() {
         <div v-if="graphL2View" class="field-hint" :title="graphL2View.manifestId">L2 关系快照已就绪：{{ graphL2View.candidates }} 条候选、{{ graphL2View.relations }} 条已发布关系（尚未接入聊天召回）</div>
 
         <div v-if="memoryStatusMessage" :class="['api-status-message', { error: memoryStatusError }]">{{ memoryStatusMessage }}</div>
+        <div class="api-status-message">
+          <button class="secondary-btn" :disabled="graphDiagnosticLoading" @click="inspectGraphInputs">{{ graphDiagnosticLoading ? '检查中…' : '检查图记忆接入' }}</button>
+          <p v-if="graphDiagnosticMessage">{{ graphDiagnosticMessage }}</p>
+        </div>
+
+        <div class="field-hint">聊天图召回目前仅支持已审核 L1 的直接证据；L2 仍以本地关系快照为准，尚不参与聊天遍历。</div>
 
         <section class="memory-settings-panel">
           <div class="memory-settings-title">

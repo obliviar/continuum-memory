@@ -2,6 +2,7 @@ import type { GraphClaimRef, GraphResult, GraphScope, GraphSourceRef } from '@co
 import { MEMORY_GRAPH_PROTOCOL_VERSION } from '@continuum-memory/contracts'
 import type { GraphProjectionSnapshot } from '../domain/types'
 import { assertGraphRelationSnapshot } from '../domain/relation-core'
+import { pruneGraphRelationDependencies } from '../domain/relation-purge'
 import { GRAPH_RELATION_SCHEMA_VERSION } from '../domain/relation-types'
 import type { GraphRelationRecord, GraphRelationSnapshot } from '../domain/relation-types'
 
@@ -48,35 +49,52 @@ export interface GraphRelationRepository {
 /** Separate L2 store. No V4 payload or graph navigation snapshot is rewritten. */
 export function createGraphRelationRepository(options: GraphRelationRepositoryOptions): GraphRelationRepository {
   const core = options.coreSnapshot()
-  const persisted = options.persistence?.load()
+  let persisted = options.persistence?.load()
   let current = persisted === undefined
     ? createEmptyGraphRelationSnapshot(core, options.now?.() ?? Date.now())
     : parsePersisted(persisted, core)
   let writing = false
+  const unchanged = () => options.persistence?.load() === persisted
+  // Synchronous load/save protects instances in this host event loop. Cross-process
+  // writers require a persistence-level lock/CAS; atomic replacement alone is insufficient.
+  function persist(next: GraphRelationSnapshot): boolean {
+    if (!unchanged()) return false
+    const payload = JSON.stringify(next)
+    options.persistence?.save(payload)
+    if (options.persistence && options.persistence.load() !== payload) return false
+    persisted = options.persistence ? payload : undefined
+    current = JSON.parse(payload) as GraphRelationSnapshot
+    return true
+  }
 
   return {
-    snapshot: () => clone(current),
+    snapshot: () => {
+      const snapshot = clone(current)
+      return unchanged() ? snapshot : { ...snapshot, manifest: { ...snapshot.manifest, state: 'stale' } }
+    },
     async publish(request) {
       if (writing)
         return error('not-ready', 'A relation publication is in progress')
       if (!request.operationId.trim())
         return error('invalid-request', 'Relation operation ID is empty')
-      if (request.expectedManifestId !== current.manifest.manifestId)
+      if (request.expectedManifestId !== current.manifest.manifestId || !unchanged())
         return error('version-mismatch', 'Relation manifest changed')
       writing = true
       try {
         const nextCore = options.coreSnapshot()
+        let next: GraphRelationSnapshot
         try {
-          assertGraphRelationSnapshot(request.snapshot, nextCore)
-          assertPublishTransition(current, request.snapshot)
+          next = clone(request.snapshot)
+          assertGraphRelationSnapshot(next, nextCore)
+          assertPublishTransition(current, next)
         }
         catch (cause) {
           return error('invalid-request', message(cause))
         }
-        const refs = gatherSources(request.snapshot)
+        const refs = gatherSources(next)
         let verified: GraphResult<void>
         try {
-          verified = await options.verifySources(refs, request.snapshot.manifest.scope, request.snapshot.relations)
+          verified = await options.verifySources(refs, clone(next.manifest.scope), clone(next.relations))
         }
         catch {
           return error('source-unavailable', 'Relation sources could not be verified')
@@ -86,9 +104,8 @@ export function createGraphRelationRepository(options: GraphRelationRepositoryOp
         const liveCore = options.coreSnapshot()
         if (liveCore.manifest.state !== 'ready' || liveCore.manifest.manifestId !== nextCore.manifest.manifestId)
           return error('stale-projection', 'Core graph changed during relation publication')
-        const payload = JSON.stringify(request.snapshot)
-        options.persistence?.save(payload)
-        current = JSON.parse(payload) as GraphRelationSnapshot
+        if (!persist(next))
+          return error('version-mismatch', 'Persisted relation snapshot changed during publication')
         return { ok: true, value: { manifestId: current.manifest.manifestId, relationRevision: current.manifest.relationRevision } }
       }
       finally {
@@ -100,7 +117,7 @@ export function createGraphRelationRepository(options: GraphRelationRepositoryOp
         return error('not-ready', 'A relation publication is in progress')
       if (!request.operationId.trim() || !request.nextManifestId.trim())
         return error('invalid-request', 'Relation operation or next manifest ID is empty')
-      if (request.expectedManifestId !== current.manifest.manifestId)
+      if (request.expectedManifestId !== current.manifest.manifestId || !unchanged())
         return error('version-mismatch', 'Relation manifest changed')
       if (!sameScope(request.scope, current.manifest.scope))
         return error('scope-denied', 'Relation scope mismatch')
@@ -117,9 +134,8 @@ export function createGraphRelationRepository(options: GraphRelationRepositoryOp
             state: 'stale',
           },
         }
-        const payload = JSON.stringify(next)
-        options.persistence?.save(payload)
-        current = JSON.parse(payload) as GraphRelationSnapshot
+        if (!persist(next))
+          return error('version-mismatch', 'Persisted relation snapshot changed during invalidation')
         return { ok: true, value: { invalidated: true } }
       }
       finally {
@@ -132,7 +148,7 @@ export function createGraphRelationRepository(options: GraphRelationRepositoryOp
       if (!request.operationId.trim() || !request.nextManifestId.trim()
         || request.nextManifestId === current.manifest.manifestId)
         return error('invalid-request', 'Purge needs a new manifest ID and operation ID')
-      if (request.expectedManifestId !== current.manifest.manifestId)
+      if (request.expectedManifestId !== current.manifest.manifestId || !unchanged())
         return error('version-mismatch', 'Relation manifest changed')
       if (!sameScope(request.scope, current.manifest.scope))
         return error('scope-denied', 'Relation scope mismatch')
@@ -143,63 +159,7 @@ export function createGraphRelationRepository(options: GraphRelationRepositoryOp
         return error('invalid-request', 'Purge target contains an invalid exact version')
       writing = true
       try {
-        const sourceKeys = new Set(request.sourceVersions.map(sourceVersionKey))
-        const claimKeys = new Set(request.claimVersions.map(refKey))
-        for (const claim of options.coreSnapshot().semanticBundle.claims) {
-          if (claim.provenance.sources.some(source => sourceKeys.has(sourceVersionKey(source)))
-            || claim.evidence.some(item => sourceKeys.has(sourceVersionKey(item.source))))
-            claimKeys.add(refKey(claim.ref))
-        }
-        const removedCandidateIds = new Set(current.candidates
-          .filter(candidate => claimKeys.has(refKey(candidate.from))
-            || claimKeys.has(refKey(candidate.to))
-            || candidate.sourceHints.some(source => sourceKeys.has(sourceVersionKey(source))))
-          .map(candidate => candidate.id))
-        const removedObservationIds = new Set(current.observations
-          .filter(observation => removedCandidateIds.has(observation.candidateId)
-            || (observation.premise.kind === 'claim' && claimKeys.has(refKey(observation.premise.ref)))
-            || (observation.premise.kind === 'source' && sourceKeys.has(sourceVersionKey(observation.premise.ref))))
-          .map(observation => observation.id))
-        const removedRelationKeys = new Set(current.relations
-          .filter(relation => claimKeys.has(refKey(relation.from))
-            || claimKeys.has(refKey(relation.to))
-            || relation.provenance.sources.some(source => sourceKeys.has(sourceVersionKey(source)))
-            || relation.evidence.some(item => sourceKeys.has(sourceVersionKey(item.source)))
-            || (relation.candidateId !== undefined && removedCandidateIds.has(relation.candidateId))
-            || relation.nliObservationIds.some(id => removedObservationIds.has(id)))
-          .map(relation => refKey(relation.ref)))
-        for (const candidate of current.candidates) {
-          if (candidate.resolution.status === 'accepted' && removedRelationKeys.has(refKey(candidate.resolution.relation)))
-            removedCandidateIds.add(candidate.id)
-        }
-        for (const observation of current.observations) {
-          if (removedCandidateIds.has(observation.candidateId))
-            removedObservationIds.add(observation.id)
-        }
-        let priorSize = -1
-        while (priorSize !== removedCandidateIds.size + removedObservationIds.size + removedRelationKeys.size) {
-          priorSize = removedCandidateIds.size + removedObservationIds.size + removedRelationKeys.size
-          for (const observation of current.observations) {
-            if (removedObservationIds.has(observation.id))
-              removedCandidateIds.add(observation.candidateId)
-          }
-          for (const relation of current.relations) {
-            if (relation.nliObservationIds.some(id => removedObservationIds.has(id))
-              || (relation.candidateId !== undefined && removedCandidateIds.has(relation.candidateId)))
-              removedRelationKeys.add(refKey(relation.ref))
-          }
-          for (const candidate of current.candidates) {
-            if (candidate.resolution.status === 'accepted' && removedRelationKeys.has(refKey(candidate.resolution.relation)))
-              removedCandidateIds.add(candidate.id)
-          }
-          for (const observation of current.observations) {
-            if (removedCandidateIds.has(observation.candidateId))
-              removedObservationIds.add(observation.id)
-          }
-        }
-        const relations = current.relations.filter(relation => !removedRelationKeys.has(refKey(relation.ref)))
-        const candidates = current.candidates.filter(candidate => !removedCandidateIds.has(candidate.id))
-        const observations = current.observations.filter(observation => !removedObservationIds.has(observation.id))
+        const { relations, candidates, observations, removed } = pruneGraphRelationDependencies(current, request, options.coreSnapshot().semanticBundle.claims)
         const next: GraphRelationSnapshot = {
           manifest: {
             ...current.manifest,
@@ -211,14 +171,9 @@ export function createGraphRelationRepository(options: GraphRelationRepositoryOp
           },
           relations, candidates, observations,
         }
-        const payload = JSON.stringify(next)
-        options.persistence?.save(payload)
-        current = JSON.parse(payload) as GraphRelationSnapshot
-        return { ok: true, value: {
-          removedRelations: removedRelationKeys.size,
-          removedCandidates: removedCandidateIds.size,
-          removedObservations: removedObservationIds.size,
-        } }
+        if (!persist(next))
+          return error('version-mismatch', 'Persisted relation snapshot changed during purge')
+        return { ok: true, value: removed }
       }
       finally {
         writing = false
@@ -334,9 +289,6 @@ function refKey(ref: { kind: string; id: string; version: number }): string {
   return `${ref.kind}\u0000${ref.id}\u0000${ref.version}`
 }
 
-function sourceVersionKey(source: GraphSourceRef): string {
-  return `${source.episodeId}\u0000${source.contentHash}`
-}
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T

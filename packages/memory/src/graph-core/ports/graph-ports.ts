@@ -1,6 +1,7 @@
 import type {
   GraphAnswerRef,
   GraphClaimRef,
+  GraphEntityRef,
   GraphFactRef,
   GraphRecallBudget,
   GraphRecallRequest,
@@ -15,6 +16,7 @@ import type {
 } from '@continuum-memory/contracts'
 import type {
   GraphClaimRecord,
+  GraphEntityRecord,
   GraphEdge,
   GraphGroundTerm,
   GraphNodeRef,
@@ -42,6 +44,8 @@ export interface GraphOpenViewRequest {
   /** Optional exact L3/L4 view; omitted means no hierarchy traversal. */
   readonly expectedHierarchyManifestId?: string
   readonly policyVersion: string
+  /** Source material only: never certifies a time match; default false for L2 and dated queries. */
+  readonly includeUnknownValidTime?: boolean
 }
 
 /** Opaque cursors must bind the view ID, query fingerprint and scan position. */
@@ -84,6 +88,8 @@ export interface GraphReadView {
   readonly context: GraphOpenViewRequest
   /** Exact versions only. Any missing/inaccessible source is an explicit error, not a shorter array. */
   resolveClaims: (refs: readonly GraphClaimRef[]) => Promise<GraphResult<readonly GraphClaimRecord[]>>
+  /** Optional exact entity lookup. Names/aliases alone never resolve identity. */
+  resolveEntities?: (refs: readonly GraphEntityRef[]) => Promise<GraphResult<readonly GraphEntityRecord[]>>
   resolveStatements: (refs: readonly GraphStatementRef[]) => Promise<GraphResult<readonly GraphStatementRecord[]>>
   resolveRules: (refs: readonly GraphRuleRef[]) => Promise<GraphResult<readonly GraphRuleRecord[]>>
   neighbors: (query: GraphNeighborQuery) => Promise<GraphResult<GraphPage<GraphEdge>>>

@@ -76,5 +76,19 @@ export async function runDesktopGraphReviewRegression() {
     const r = await controller.preview(); assert.equal(r.ok, false)
     if (!r.ok) assert.ok(r.error.includes('尚未就绪'))
   })
+  for (const phase of ['preview', 'confirm'] as const) await test(`reset-during-async-flush-blocks-${phase}`, async () => {
+    const f = await fixture()
+    let blocking = false, release!: () => void
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    const controller = createGraphRelationReviewController({ scope, createPort: () => createV4L2Memory(f.options),
+      flush: async () => { if (blocking) await barrier }, graphEnabled: () => true })
+    const report = await controller.preview(); assert.ok(report.ok)
+    const before = f.options.relationPersistence.load()
+    blocking = true
+    const pending = phase === 'preview' ? controller.preview() : controller.confirm(confirm(report.report.reviewId))
+    controller.reset(); release()
+    assert.equal((await pending).ok, false)
+    assert.equal(f.options.relationPersistence.load(), before)
+  })
   return { kind: 'desktop-controller-through-real-review-service-with-synthetic-memory', checks }
 }

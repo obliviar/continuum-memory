@@ -107,7 +107,7 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
             || query.claim.version <= 0 || !['out', 'in', 'both'].includes(query.direction)
             || !Array.isArray(query.kinds))
             return error('invalid-request', 'Invalid relation neighbor query')
-          const maxScanned = query.maxScanned
+          // maxScanned is a per-page bound; the view also enforces a cumulative edge budget.
           const fingerprint = hash(JSON.stringify([viewId, query.claim, query.direction, query.kinds]))
           let offset = 0
           let scannedBefore = 0
@@ -127,7 +127,8 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
           if (offset > eligible.length)
             return error('invalid-request', 'Relation cursor is outside the result set')
           const remaining = coreView.context.budget.maxHops === 0 ? 0 : Math.max(0, coreView.context.budget.maxEdges - scannedTotal)
-          const count = Math.min(query.limit, maxScanned, remaining, eligible.length - offset)
+          const count = Math.min(query.limit, query.maxScanned, remaining, eligible.length - offset)
+          // Reserve before asynchronous authorization so concurrent pages cannot exceed the view budget.
           scannedTotal += count
           const items = eligible.slice(offset, offset + count)
           for (const edge of items) {
@@ -145,7 +146,7 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
           const detachedItems = clone(items)
           const page: GraphPage<GraphRelationEdge> = nextOffset >= eligible.length
             ? { items: detachedItems, scanned: count, completion: 'complete' }
-            : scannedTotal >= coreView.context.budget.maxEdges || remaining === 0
+            : scannedTotal >= coreView.context.budget.maxEdges || coreView.context.budget.maxHops === 0
               ? { items: detachedItems, scanned: count, completion: 'budget-exhausted', nextCursor }
               : { items: detachedItems, scanned: count, completion: 'more', nextCursor }
           return { ok: true, value: page }

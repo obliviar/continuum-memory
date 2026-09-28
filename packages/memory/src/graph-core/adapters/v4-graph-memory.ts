@@ -4,8 +4,10 @@ import type { MemoryV4Repository } from '../../v4/repository/memory-v4-repositor
 import type { MemoryEpisodeV4, MemoryFactV4 } from '../../v4/domain/types'
 import { createDirectLexicalIndex, DIRECT_LEXICAL_POLICY } from '../recall/direct-lexical'
 import { DIRECT_HYBRID_POLICY, mergeDirectCandidates, searchDirectSemantic, type DirectSemanticOptions } from '../recall/direct-semantic'
-import { collectV4RecallInputs } from './v4-recall-input'
-import { graphHash, projectV4ScalarInputs, V4_SCALAR_MAPPING_POLICY } from './v4-semantic-adapter'
+import { collectCurrentL1, claimMatchesTime, entityCandidateText } from './accepted-l1-input'
+export { selectRetrievableGraphBundle } from './accepted-l1-input'
+import type { GraphSemanticBundle } from '../domain/types'
+import { graphHash, V4_SCALAR_MAPPING_POLICY } from './v4-semantic-adapter'
 import { planGraphQueryTime } from '../recall/query-time-plan'
 import { randomUUID } from 'node:crypto'
 import { createV4L1Store, type V4L1Store } from '../repository/v4-l1-store'
@@ -25,6 +27,10 @@ export interface V4GraphMemoryOptions {
   now?: () => number
   utcOffsetMinutes?: number
   semantic?: DirectSemanticOptions
+  /** Trusted owner-wide session inclusion; requests cannot grant it. */
+  includeOwnedSessions?: boolean
+  /** Current ready native L1, filtered by retrieval permission, rechecked on every read. */
+  acceptedBundle?: () => GraphSemanticBundle | undefined
   /** Optional trusted host access registry for external L1/L2 readers. */
   resolveGraphAccess?: (id: string) => GraphAccessContext | undefined
 }
@@ -74,33 +80,37 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         // Do not answer a relation question with unrelated scalar facts as though an edge had been found.
         if (/为什么|为何|原因|导致|先后|先.*后|\b(why|cause|caused|before|after)\b/i.test(request.query))
           return fail('unsupported-capability', 'This host route has no L2 traversal; use the bounded relation service')
-        const gathered = collectV4RecallInputs(options.repository, { scope: request.scope, expectedRevision: snapshot.revision,
-          now: timestamp, canRead: options.canRead })
+        const gathered = collectCurrentL1(options, request.scope, timestamp)
+        const projection = gathered.projection
+        const claimByFact = new Map(projection.semanticBundle.claims.map(claim => [claim.fact.id, claim]))
+        const includeUnknown = timePlan.value.source === 'caller' && request.temporal.valid.kind === 'at'
+          && request.temporal.valid.at === request.temporal.knownAt
         const inputs = gathered.inputs.filter(({ fact, sources }) => {
           if (!allowed(fact, request) || sources.some(s => !allowed(s.episode, request))) return false
-          const valid = timePlan.value.temporal.valid
-          return valid.kind === 'at' ? fact.validFrom! <= valid.at && (fact.validTo === undefined || valid.at < fact.validTo)
-            : fact.validFrom! < valid.to && (fact.validTo === undefined || valid.from < fact.validTo)
+          const claim = claimByFact.get(fact.id)!
+          return request.sharePolicies.includes(claim.sharePolicy) && request.sensitivities.includes(claim.sensitivity)
+            && claimMatchesTime(claim, timePlan.value.temporal, includeUnknown)
         })
-        const projection = projectV4ScalarInputs(gathered.inputs, request.scope, snapshot.revision)
         const manifestId = projection.manifest.manifestId
         if (request.expectedManifestId && request.expectedManifestId !== manifestId)
           return fail('version-mismatch', 'Requested L1 manifest is no longer current')
         const index = createDirectLexicalIndex(timePlan.value.lexicalQuery)
         for (const { fact } of inputs) index.upsert({ id: fact.id, scope: request.scope, state: 'active',
-          content: `${fact.canonicalText} ${fact.predicate}` })
+          content: `${fact.canonicalText} ${fact.predicate} ${entityCandidateText(claimByFact.get(fact.id)!, projection, request.sharePolicies, request.sensitivities)}` })
         const lexicalHits = index.search(timePlan.value.lexicalQuery, { scope: request.scope, limit: 10000, minScore: 0.2 })
         const semantic = await searchDirectSemantic(timePlan.value.lexicalQuery, inputs.map(input => input.fact),
           options.semantic, request.budget.maxElapsedMs - (performance.now() - start))
         if (!options.authorizeScope(request.scope) || graphHash(options.repository.snapshot()) !== graphHash(snapshot))
           return fail('stale-projection', 'Source or authorization changed during candidate retrieval')
         const hits = mergeDirectCandidates(lexicalHits, semantic.hits)
-        const claimByFact = new Map(projection.semanticBundle.claims.map(claim => [claim.fact.id, claim]))
         const byId = new Map(inputs.map(input => [input.fact.id, { input, claim: claimByFact.get(input.fact.id)! }]))
         const claims: GraphEvidenceClaim[] = []
         let tokens = 0
         let stopReason: GraphRecallResult['trace']['stopReason'] = hits.length ? 'exhausted-within-scope' : 'no-eligible-seeds'
         let incomplete = semantic.incomplete || gathered.rejected.some(item => item.reason !== 'access-denied')
+          || inputs.some(i => { const c = claimByFact.get(i.fact.id)!; return c.validTime.kind === 'unknown'
+            || c.polarity === 'unknown' || c.modality !== 'asserted' || c.condition.kind !== 'none'
+            || projection.semanticBundle.contexts.find(x => graphHash(x.ref) === graphHash(c.context))?.scenario !== 'actual' })
         for (const hit of hits) {
           if (claims.length >= Math.min(request.budget.maxSeeds, request.budget.maxNodes)) {
             stopReason = request.budget.maxNodes <= request.budget.maxSeeds ? 'node-budget' : 'coverage-satisfied'; incomplete = true; break
@@ -109,7 +119,7 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
           const entry: GraphEvidenceClaim = { kind: 'direct', ref: claim.ref, fact: claim.fact,
             citation: `G${claims.length + 1}`, content: input.fact.canonicalText,
             sources: claim.provenance.sources, polarity: claim.polarity, modality: claim.modality,
-            conditionText: null, context: claim.context, validTime: claim.validTime,
+            conditionText: claim.condition.kind === 'none' ? null : claim.condition.text, context: claim.context, validTime: claim.validTime,
             // Verified source extraction does not certify that competing explanations were exhaustively checked.
             support: 'unknown' }
           const cost = options.countTokens(JSON.stringify(entry).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'))
@@ -120,10 +130,10 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         const elapsed = performance.now() - start
         if (elapsed >= request.budget.maxElapsedMs) return fail('budget-exhausted', 'Direct recall elapsed-time budget exhausted')
         // Re-read CURRENT tombstones, policy and exact contents even when an encrypted projection exists.
-        const finalInputs = collectV4RecallInputs(options.repository, { scope: request.scope, expectedRevision: snapshot.revision,
-          now: now(), canRead: record => allowed(record, request) })
+        const finalInputs = collectCurrentL1(options, request.scope, now())
         const fresh = new Map(finalInputs.inputs.map(input => [input.fact.id, graphHash(input)]))
-        if (!options.authorizeScope(request.scope) || inputs.some(input => fresh.get(input.fact.id) !== graphHash(input)))
+        if (!options.authorizeScope(request.scope) || graphHash(finalInputs.projection) !== graphHash(projection)
+          || inputs.some(input => fresh.get(input.fact.id) !== graphHash(input)))
           return fail('stale-projection', 'Source or authorization changed during recall')
         const published = l1.publishCurrent({ operationId: request.recallId, scope: request.scope,
           expectedManifestId: l1.snapshot()?.manifest.manifestId ?? null })
@@ -138,7 +148,7 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
           scope: request.scope, sharePolicies: request.sharePolicies, sensitivities: request.sensitivities }
         grants.set(access.accessContextId, access)
         const opened = await l1.openView({ access, temporal: timePlan.value.temporal, budget: request.budget,
-          expectedManifestId: manifestId, policyVersion: V4_SCALAR_MAPPING_POLICY })
+          expectedManifestId: manifestId, policyVersion: V4_SCALAR_MAPPING_POLICY, includeUnknownValidTime: includeUnknown })
         try {
           if (!opened.ok) return opened
           const resolved = await opened.value.resolveClaims(claims.flatMap(c => c.kind === 'direct' ? [c.ref] : []))
@@ -161,7 +171,9 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
           trace: { recallId: request.recallId, manifestId, policyVersion: V4_SCALAR_MAPPING_POLICY,
             temporal: timePlan.value.temporal, completeness: incomplete ? 'incomplete' : 'complete-within-declared-scope',
             searchScope: ['current-verified-scalar-L1', 'BM25', DIRECT_LEXICAL_POLICY, DIRECT_HYBRID_POLICY,
-              ...semantic.scope, 'exact-owner-agent-session', 'no-L2', 'no-conflict-audit',
+              ...semantic.scope, 'accepted-entity-L1', 'entity-name-alias-candidates',
+              options.includeOwnedSessions && request.scope.sessionId === undefined ? 'trusted-owner-wide-sessions' : 'exact-owner-agent-session',
+              'no-L2', 'no-conflict-audit',
               ...(gathered.rejected.length ? ['some-V4-records-excluded'] : [])], stopReason,
             candidateRefs: hits.map(hit => byId.get(hit.id)!.claim.ref), evaluatedRefs: refs, selectedRefs: refs,
             usage: { seeds: claims.length, nodes: claims.length, edges: 0, maxHopReached: 0, ruleBindings: 0,

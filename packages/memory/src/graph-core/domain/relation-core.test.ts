@@ -146,6 +146,16 @@ describe('L2 relation layer', () => {
     expect(() => assertGraphRelationSnapshot(wrongVersion, core())).toThrow('exact L1 claim version')
     const wrongContext = { ...base, relations: [{ ...relation(), context: { ...context, id: 'other' } }] }
     expect(() => assertGraphRelationSnapshot(wrongContext, core())).toThrow('exact L1 context version')
+    const original = core()
+    const otherContext = { ...original.semanticBundle.contexts[0]!,
+      ref: { kind: 'context' as const, id: 'another-actual-frame', version: 1 } }
+    const splitEndpointContexts: GraphProjectionSnapshot = { ...original, semanticBundle: {
+      ...original.semanticBundle,
+      contexts: [...original.semanticBundle.contexts, otherContext],
+      claims: [original.semanticBundle.claims[0]!,
+        { ...original.semanticBundle.claims[1]!, context: otherContext.ref }],
+    } }
+    expect(() => assertGraphRelationSnapshot(base, splitEndpointContexts)).toThrow('relation endpoint contexts differ')
     const unmodified = core()
     const restrictedCore: GraphProjectionSnapshot = {
       ...unmodified,

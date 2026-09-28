@@ -98,10 +98,22 @@ export interface GraphPredicateSpec {
   readonly world: 'open'
 }
 
+/** A context is a discourse frame, not an individual Claim or a graph path. */
+export interface GraphContextFrame {
+  readonly speaker: { readonly kind: 'self' } | { readonly kind: 'reported'; readonly name: string }
+    | { readonly kind: 'unknown' }
+  readonly condition: { readonly kind: 'none' } | { readonly kind: 'conditional'; readonly text: string }
+    | { readonly kind: 'unknown' }
+  /** A speaker name alone cannot establish identity across sources. */
+  readonly isolation: 'shared' | 'source' | 'claim'
+}
+
 export interface GraphContextRecord extends GraphSemanticRecord {
   readonly ref: GraphContextRef
   readonly domain: string
-  readonly scenario: 'actual' | 'hypothetical'
+  readonly scenario: 'actual' | 'hypothetical' | 'unknown'
+  /** Optional only for persisted bundles predating normalized L1 contexts. */
+  readonly frame?: GraphContextFrame
   readonly parent: GraphContextRef | null
 }
 

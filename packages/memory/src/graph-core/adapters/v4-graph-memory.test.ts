@@ -38,6 +38,16 @@ describe('real V4 direct graph memory', () => {
     expect(result).toMatchObject({ ok: true, value: { evidence: { claims: [] }, trace: { completeness: 'incomplete' } } })
     expect(f.disk()).not.toContain('tea')
   })
+  it('can include an older session-scoped fact in an authorized owner-wide graph query', async () => {
+    const f = setup()
+    f.repository.transaction(draft => {
+      draft.facts[0]!.scope = { ...scope, sessionId: 'old-session' }
+      draft.episodes[0]!.scope = { ...scope, sessionId: 'old-session' }
+    })
+    const graph = createV4GraphMemory({ ...f.options, includeOwnedSessions: true })
+    expect(await graph.recall(f.request)).toMatchObject({ ok: true,
+      value: { evidence: { claims: [{ content: 'I like tea' }] } } })
+  })
   it('rechecks access and does not allow a request to authorize itself', async () => {
     const f = setup()
     await f.port.recall(f.request)

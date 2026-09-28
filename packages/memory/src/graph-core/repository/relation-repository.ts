@@ -213,11 +213,12 @@ function parsePersisted(payload: string, core: GraphProjectionSnapshot): GraphRe
     || !Array.isArray(snapshot.relations) || !Array.isArray(snapshot.candidates)
     || !Array.isArray(snapshot.observations))
     throw new Error('Persisted L2 relation snapshot has an invalid schema')
-  // A changed L1 source must explicitly invalidate/rebuild; never silently rebind.
+  // A changed L1 source is immediately unreadable. Reconciliation must explicitly
+  // purge invalid exact references and publish a new ready snapshot.
   if (snapshot.manifest.coreManifestId === core.manifest.manifestId)
     assertGraphRelationSnapshot(snapshot, core)
-  else if (snapshot.manifest.state !== 'stale')
-    throw new Error('Persisted L2 relation view has a changed core manifest; invalidate it first')
+  else if (snapshot.manifest.state === 'ready')
+    return clone({ ...snapshot, manifest: { ...snapshot.manifest, state: 'stale' } })
   return clone(snapshot)
 }
 

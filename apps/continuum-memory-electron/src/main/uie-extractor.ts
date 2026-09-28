@@ -1,12 +1,13 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { inferMemoryPrivacy, isSafeMemoryContent } from '@continuum-memory/memory'
+import { createGraphExtractionRun, inferMemoryPrivacy, isSafeMemoryContent } from '@continuum-memory/memory'
 import type { MemoryCandidate } from '@continuum-memory/memory'
+import type { GraphExtractionRun } from '@continuum-memory/memory'
 
 const ENTITY_LABELS = new Set([
   '人物', '地点', '组织机构', '项目', '企业', '影视作品', '图书作品',
-  '歌曲', '历史人物', '学校', '国家', '行政区',
+  '歌曲', '历史人物', '学校', '国家', '行政区', '机构',
 ])
 const FIELD_LABELS = new Set(['姓名', '职业', '所在地', '喜好', '当前项目'])
 const MAX_OUTPUT_BYTES = 2_000_000
@@ -29,6 +30,7 @@ export interface UieRelation {
 
 export interface UieExtraction {
   model: 'uie-base'
+  rawOutput: unknown
   entities: UieMention[]
   fields: UieMention[]
   relations: UieRelation[]
@@ -37,12 +39,16 @@ export interface UieExtraction {
 export interface LocalUieOptions {
   pythonPath: string
   modelHome: string
+  /** Direct local Taskflow checkpoint directory, when it is not under modelHome/taskflow. */
+  modelPath?: string
   scriptPath: string
   timeoutMs?: number
 }
 
 export function createLocalUieExtractor(options: LocalUieOptions) {
-  const modelWeights = join(options.modelHome, 'taskflow', 'information_extraction', 'uie-base', 'model_state.pdparams')
+  const modelWeights = options.modelPath
+    ? join(options.modelPath, 'model_state.pdparams')
+    : join(options.modelHome, 'taskflow', 'information_extraction', 'uie-base', 'model_state.pdparams')
   return {
     isReady: () => existsSync(options.pythonPath) && existsSync(options.scriptPath) && existsSync(modelWeights),
     async extract(text: string): Promise<UieExtraction> {
@@ -58,7 +64,8 @@ export function createLocalUieExtractor(options: LocalUieOptions) {
 
 async function runPython(options: LocalUieOptions, text: string): Promise<unknown> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(options.pythonPath, [options.scriptPath, '--home-path', options.modelHome], {
+    const child = spawn(options.pythonPath, [options.scriptPath,
+      ...(options.modelPath ? ['--model-path', options.modelPath] : ['--home-path', options.modelHome])], {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
@@ -157,7 +164,60 @@ export function parseUieOutput(source: string, raw: unknown): UieExtraction {
       }
     }
   }
-  return { model: 'uie-base', entities: [...entities.values()], fields: [...fields.values()], relations: [...relations.values()] }
+  return { model: 'uie-base', rawOutput: raw, entities: [...entities.values()], fields: [...fields.values()], relations: [...relations.values()] }
+}
+
+/** Preserve the untouched UIE payload, then convert code-point offsets for graph review. */
+export function uieGraphExtractionRun(sourceId: string, sourceText: string, extraction: UieExtraction): GraphExtractionRun {
+  const spans = new Map<string, UieMention>()
+  const add = (mention: UieMention) => {
+    const key = `${mention.start}:${mention.end}`
+    const previous = spans.get(key)
+    if (!previous || (entityType(previous.label) === previous.label && entityType(mention.label) !== mention.label))
+      spans.set(key, mention)
+  }
+  for (const mention of [...extraction.entities, ...extraction.fields]) add(mention)
+  for (const relation of extraction.relations) {
+    add(relation.subject)
+    if (!literalType(relation.predicate)) add(relation.object)
+  }
+  const mentionId = (mention: UieMention) => `uie:${mention.start}:${mention.end}`
+  const utf16 = (offset: number) => Array.from(sourceText).slice(0, offset).join('').length
+  const entities = [...spans.values()].map(mention => ({ id: mentionId(mention), type: entityType(mention.label),
+    text: mention.text, span: { start: utf16(mention.start), end: utf16(mention.end) }, modelScore: mention.score }))
+  const facts = extraction.relations.map((relation, index) => ({
+    id: `uie-fact:${index}`, subjectMentionId: mentionId(relation.subject), predicate: relation.predicate,
+    object: literalType(relation.predicate)
+      ? { literal: relation.object.text, valueType: literalType(relation.predicate) }
+      : { mentionId: mentionId(relation.object) },
+    evidenceSpan: { start: utf16(Math.min(relation.subject.start, relation.object.start)),
+      end: utf16(Math.max(relation.subject.end, relation.object.end)) },
+    modelScore: relation.score,
+    context: { negation: { value: null, resolution: 'unresolved' },
+      condition: { value: null, resolution: 'unresolved' },
+      time: { value: null, resolution: 'unresolved' },
+      speaker: { value: null, resolution: 'unresolved' } },
+  }))
+  return createGraphExtractionRun({ sourceId, sourceText, modelId: extraction.model,
+    rawOutput: { graph: { entities, facts }, uieRawOutput: extraction.rawOutput } })
+}
+
+function entityType(label: string): string {
+  if (['人物', '历史人物', '父亲', '母亲', '丈夫', '妻子', '主演', '导演', '作者', '歌手', '作词', '作曲', '董事长', '创始人', '校长'].includes(label)) return 'person'
+  if (['组织机构', '机构', '企业', '学校', '所属组织', '毕业院校', '出品公司'].includes(label)) return 'organization'
+  if (['地点', '国家', '行政区', '总部地点', '国籍', '居住地'].includes(label)) return 'location'
+  if (label === '影视作品') return 'film'
+  if (label === '图书作品') return 'book'
+  if (label === '歌曲' || label === '主题曲') return 'song'
+  if (label === '所属专辑') return 'album'
+  return label
+}
+
+function literalType(label: string): 'string' | 'number' | 'date' | undefined {
+  if (['上映时间', '成立日期'].includes(label)) return 'date'
+  if (['票房', '人口数量'].includes(label)) return 'number'
+  if (['官方语言', '朝代'].includes(label)) return 'string'
+  return undefined
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

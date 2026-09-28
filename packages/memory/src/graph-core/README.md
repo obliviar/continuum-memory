@@ -1,5 +1,10 @@
 # 图关系开发：样例、校验、种子检索与受限多跳召回
 
+> 2026-09-28：实体 L1 已接入统一固定视图和直接召回，支持精确实体读取、名称/别名候选、
+> 检索许可撤回与未知语义标记。审核规则沿用上游、尚未定案。上游关系审核仓库与聊天 L2
+> 仓库仍独立，不能将界面采纳等同于已进入聊天。当前边界与后续步骤见
+> [实体 L1 接入说明](../../../../docs/l1-recall-integration.md)。
+
 > **更新后请先读本节。** 权威 L2 类型以 `domain/relation-types.ts` 为准，存储使用上游新增的独立 `GraphRelationRepository`。下文第 1–5 步中的 `causal / contributes-to / before`、组合 bundle、assertion/status/support 字段属于旧样例与内部召回投影，不是当前 L2 持久化格式；它们已隔离到 `domain/recall-types.ts`，不可直接发布为 L2 快照。
 
 ## 与更新后的 L2 分支对齐
@@ -544,6 +549,8 @@ maxEvidenceTokens 目前计量证据读取内容，不等于将整个 JSON 序�
 
 更新后的分支已提供权威 L2 持久化与 CAS 发布，本次新增了召回到该读取层的适配。后续仍需对接真实 V4/L1 与宿主来源、种子检索和生命周期事件，再将证据包接入 Agent Runtime 和使用反馈。
 
+
+
 ### V4 current-state staging input
 
 `collectV4RecallInputs` (`adapters/v4-recall-input.ts`) reads a pinned V4 repository snapshot.
@@ -563,6 +570,8 @@ This is a staging boundary only. Persisted semantic decisions (predicate roles, 
 context, review), L1 publication, source hashing, query-time lifecycle/authorization rechecks,
 V4 query seed wiring and runtime injection are still required. A successful collection is not a
 live read view and must never be served as an enduring authorization grant.
+
+
 
 ## Desktop V4 → L1 → Agent direct-fact route
 

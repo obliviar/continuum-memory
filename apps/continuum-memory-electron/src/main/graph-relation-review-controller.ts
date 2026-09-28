@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { createV4L2Memory } from '@continuum-memory/memory'
 
 type Port = Pick<ReturnType<typeof createV4L2Memory>, 'reviewRelations' | 'republishRelations'>
-type Options = { scope: Parameters<Port['reviewRelations']>[0]; createPort: () => Port | undefined; flush: () => void; graphEnabled: () => boolean }
+type Options = { scope: Parameters<Port['reviewRelations']>[0]; createPort: () => Port | undefined; flush: () => void | Promise<void>; graphEnabled: () => boolean }
 const failed = (error: string) => ({ ok: false as const, error })
 function errorMessage(code: string): string {
   if (code === 'scope-denied') return '当前分享权限不允许复核或发布这些关系，请检查记忆设置。'
@@ -28,7 +28,8 @@ export function createGraphRelationReviewController(options: Options) {
       if (busy) return failed('正在处理复核，请稍候。')
       busy = true; pending = undefined; const generation = epoch
       try {
-        options.flush()
+        await options.flush()
+        if (epoch !== generation) return failed('记忆设置已重新加载，请重新查看报告。')
         const port = options.createPort()
         if (!port) return failed('记忆仓库尚未就绪，请启用长期记忆后重试。')
         const result = await port.reviewRelations(options.scope)
@@ -55,9 +56,10 @@ export function createGraphRelationReviewController(options: Options) {
         || !value.reason.trim() || value.reason.length > 2000 || value.confirmed !== true)
         return failed('请填写复核说明，并勾选确认。')
       if (!pending || pending.id !== value.reviewId) return failed('报告已失效，请重新查看报告。')
-      const item = pending; pending = undefined; busy = true
+      const item = pending; pending = undefined; busy = true; const generation = epoch
       try {
-        options.flush()
+        await options.flush()
+        if (epoch !== generation) return failed('记忆设置已重新加载，请重新查看报告。')
         const result = await item.port.republishRelations({ reviewId: item.id, scope: options.scope,
           operationId: `desktop-review:${randomUUID()}`, reviewer: 'desktop-local-user', reason: value.reason.trim() })
         return result.ok ? { ok: true as const, graphEnabled: options.graphEnabled() } : failed(errorMessage(result.error.code))

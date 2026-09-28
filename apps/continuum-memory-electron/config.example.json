@@ -8,5 +8,9 @@
   "memoryV4ReadMode": "auto",
   "embeddingModel": "local-hash-v3",
   "uiePythonPath": "D:\\Models\\UIE-mini\\.venv-paddle\\Scripts\\python.exe",
-  "uieModelHome": "D:\\Models\\UIE-mini"
+  "uieModelHome": "D:\\Models\\UIE-mini",
+  "uieModelPath": "C:\\path\\to\\uie-base-checkpoint",
+  "nliPythonPath": "C:\\path\\to\\python.exe",
+  "nliModelPath": "C:\\path\\to\\Erlangshen-Roberta-330M-NLI\\snapshots\\<revision>",
+  "nliDependenciesPath": "C:\\path\\to\\Python\\site-packages"
 }

@@ -3,11 +3,11 @@ import type { GraphProtocolErrorCode, GraphResult, GraphScope } from '@continuum
 import type { GraphProjectionSnapshot } from '../domain/types'
 import type { GraphAccessContext, GraphEvidenceReader, GraphReadPort, GraphReadView } from '../ports/graph-ports'
 import type { V4GraphMemoryOptions } from '../adapters/v4-graph-memory'
-import { collectV4RecallInputs } from '../adapters/v4-recall-input'
-import { graphHash, projectV4ScalarInputs, V4_SCALAR_MAPPING_POLICY } from '../adapters/v4-semantic-adapter'
+import { collectCurrentL1, claimMatchesTime } from '../adapters/accepted-l1-input'
+import { graphHash, V4_SCALAR_MAPPING_POLICY } from '../adapters/v4-semantic-adapter'
 
 const SCHEMA = 'v4-l1-publication/v1'
-type Options = Pick<V4GraphMemoryOptions, 'repository' | 'persistence' | 'authorizeScope' | 'canRead' | 'countTokens' | 'now'> & {
+type Options = Pick<V4GraphMemoryOptions, 'repository' | 'persistence' | 'authorizeScope' | 'canRead' | 'countTokens' | 'now' | 'acceptedBundle' | 'includeOwnedSessions'> & {
   resolveAccess: (id: string) => GraphAccessContext | undefined
 }
 export interface V4L1Store extends GraphReadPort {
@@ -48,10 +48,9 @@ export function createV4L1Store(options: Options): V4L1Store {
     if (!options.authorizeScope(scope)) throw new Error('Scope is not authorized')
     const source = options.repository.snapshot()
     if (source.facts.length > 10000) throw new Error('Source scan limit exceeded')
-    const gathered = collectV4RecallInputs(options.repository, { scope, expectedRevision: source.revision,
-      now: now(), canRead: options.canRead })
+    const gathered = collectCurrentL1(options, scope, now())
     if (!options.authorizeScope(scope)) throw new Error('Scope authorization changed')
-    return { source, inputs: gathered.inputs, projection: projectV4ScalarInputs(gathered.inputs, scope, source.revision) }
+    return gathered
   }
   function revokeViews() { generation++; for (const session of sessions.values()) session.close(); sessions.clear() }
   const store: V4L1Store = {
@@ -144,12 +143,8 @@ export function createV4L1Store(options: Options): V4L1Store {
         const valid = check(); if (!valid.ok) return valid
         const inputs = new Map(captured.inputs.map(i => [i.fact.id, i]))
         function eligible(claim: GraphProjectionSnapshot['semanticBundle']['claims'][number]) {
-          const t = claim.validTime
           return context.access.sharePolicies.includes(claim.sharePolicy) && context.access.sensitivities.includes(claim.sensitivity)
-            && claim.review.status === 'accepted' && claim.review.reviewedAt <= temporal.knownAt && claim.transactionTime.recordedAt <= temporal.knownAt
-            && t.kind === 'interval' && (temporal.valid.kind === 'at'
-              ? (t.from === null || t.from <= temporal.valid.at) && (t.to === null || temporal.valid.at < t.to)
-              : (t.from === null || t.from < temporal.valid.to) && (t.to === null || temporal.valid.from < t.to))
+            && claimMatchesTime(claim, temporal, context.includeUnknownValidTime === true)
         }
         function charge(values: unknown[]): GraphResult<void> {
           if (!values.length) return success(undefined)
@@ -173,6 +168,22 @@ export function createV4L1Store(options: Options): V4L1Store {
         const unsupported = () => guarded(() => fail('unsupported-capability', 'This L1 view does not execute relations, proofs or conflict audits'))
         const view: GraphReadView = {
           viewId, manifest: freeze(structuredClone(pinned.manifest)), context: freeze(structuredClone(context)),
+          resolveEntities: refs => guarded(() => {
+            const records = []
+            for (const ref of refs) {
+              const entity = pinned.semanticBundle.entities.find(e => same(e.ref, ref))
+              if (!entity || entity.review.status !== 'accepted' || entity.review.reviewedAt > temporal.knownAt
+                || !context.access.sharePolicies.includes(entity.sharePolicy) || !context.access.sensitivities.includes(entity.sensitivity)
+                || !pinned.semanticBundle.claims.some(c => eligible(c) && Object.values(c.atom.args).some(t => t.kind === 'entity' && same(t.ref, ref))))
+                return fail('source-unavailable', 'Exact eligible Entity unavailable')
+              records.push(entity)
+            }
+            const next = new Set([...nodes, ...records.map(e => graphHash(e.ref))])
+            if (next.size > context.budget.maxNodes) return fail('budget-exhausted', 'L1 entity node budget exhausted')
+            const charged = charge(records); if (!charged.ok) return charged
+            next.forEach(n => nodes.add(n))
+            return success(structuredClone(records))
+          }),
           resolveClaims: refs => guarded(() => {
             const records = []
             for (const ref of refs) {
@@ -194,7 +205,7 @@ export function createV4L1Store(options: Options): V4L1Store {
             const owners = []
             for (const ref of refs) {
               const claim = pinned.semanticBundle.claims.find(c => eligible(c) && c.provenance.sources.some(s =>
-                s.episodeId === ref.episodeId && s.contentHash === ref.contentHash))
+                same(s, ref)))
               const source = claim && inputs.get(claim.fact.id)?.sources.find(s => s.episode.id === ref.episodeId)
               if (!source || !claim) return fail('source-unavailable', 'Exact source unavailable in this view')
               owners.push(claim)

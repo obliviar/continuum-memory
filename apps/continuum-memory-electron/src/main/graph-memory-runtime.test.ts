@@ -24,7 +24,7 @@ function setup() {
   const hooks = createChatHooks()
   const deps = { persona: { systemPrompt: 'test', model: 'test' }, session: createSessionManager(20), memory, llm, hooks,
     resolveMemoryScope: () => scope,
-    graphRecall: { countTokens, createRequest: (query: string): GraphRecallRequest => {
+    graphRecall: { countTokens, awaitCaptureWrites: async () => {}, createRequest: (query: string): GraphRecallRequest => {
       const time = Date.now()
       return { protocolVersion: 'memory-graph/v1', recallId: crypto.randomUUID(), query, scope,
         temporal: { knownAt: time, valid: { kind: 'at', at: time } }, mode: 'direct-only',
@@ -51,6 +51,21 @@ describe('V4 graph through Agent runtime', () => {
     await createAgentRuntime(f.deps).send('s', 'What do I like?')
     expect(f.prompts[0]![0]!.content).not.toContain('I like tea')
     expect(f.memory.capture).toHaveBeenCalled()
+  })
+  it('waits for the host capture barrier before selecting graph evidence', async () => {
+    const f = setup()
+    let release!: () => void
+    let entered!: () => void
+    const blocking = new Promise<void>(resolve => { release = resolve })
+    const reached = new Promise<void>(resolve => { entered = resolve })
+    const recall = vi.spyOn(f.memory.graph!, 'recall')
+    f.deps.graphRecall.awaitCaptureWrites = async () => { entered(); await blocking }
+    const sending = createAgentRuntime(f.deps).send('s', 'What do I like?')
+    await reached
+    expect(recall).not.toHaveBeenCalled()
+    release()
+    await sending
+    expect(recall).toHaveBeenCalledOnce()
   })
   it('refreshes the evidence prompt after a tool deletes a source', async () => {
     const f = setup()

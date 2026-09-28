@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createMemoryV4Repository } from '../../v4/repository/memory-v4-repository'
+import { createV4ShadowWriter } from '../../v4/dual-write/v4-shadow-writer'
+import { createCaptureRepository } from '../../long-term/capture-repository'
+import { createMemoryWriter } from '../../long-term/memory-writer'
+import { createVectorStore } from '../../long-term/vector-store'
 import type { MemoryV4Snapshot } from '../../v4/domain/types'
 import { collectV4RecallInputs } from './v4-recall-input'
 
@@ -45,6 +49,49 @@ describe('V4 recall input staging', () => {
     for (const other of [{ ...scope, ownerId: 'other' }, { ...scope, agentId: 'other' }, { ...scope, sessionId: 's' }]) {
       expect(collect(fixture(), { scope: other })).toMatchObject({ inputs: [], rejected: [] })
     }
+  })
+  it('can include historical session facts only for an explicitly authorized owner-wide read', () => {
+    const repo = fixture()
+    repo.transaction(draft => {
+      draft.facts[0]!.scope = { ...scope, sessionId: 'old-session' }
+      draft.episodes[0]!.scope = { ...scope, sessionId: 'old-session' }
+    })
+    expect(collect(repo).inputs).toHaveLength(0)
+    expect(collect(repo, { includeOwnedSessions: true }).inputs).toHaveLength(1)
+    expect(collect(repo, { includeOwnedSessions: true, scope: { ...scope, ownerId: 'other' } }).inputs).toHaveLength(0)
+  })
+  it('allows a session episode to support an owner-wide fact but does not cross session-scoped facts', () => {
+    const repo = fixture()
+    repo.transaction(draft => { draft.episodes[0]!.scope = { ...scope, sessionId: 'session-a' } })
+    expect(collect(repo).inputs).toHaveLength(1)
+    expect(() => repo.transaction(draft => { draft.facts[0]!.scope = { ...scope, sessionId: 'session-b' } }))
+      .toThrow('crosses owner, agent, or session scope')
+  })
+  it('stages a live capture from a chat session for owner-wide graph recall', async () => {
+    const repo = createMemoryV4Repository()
+    const shadow = createV4ShadowWriter({ repository: repo, flushDelayMs: 10_000 })
+    let payload: string | undefined
+    const writer = createMemoryWriter({
+      store: createVectorStore({ onCommittedChange: shadow.enqueueCommit }),
+      captureRepository: createCaptureRepository({ persistence: {
+        load: () => payload, save: next => { payload = next },
+      } }),
+      extractor: () => [{ content: '用户喜欢喝茶', metadata: {
+        kind: 'preference', memoryKey: 'preference.drink', cardinality: 'multiple',
+        confidence: 0.95, importance: 0.9, extractionChannel: 'rules',
+        validFrom: Date.parse('2025-01-01T00:00:00Z'),
+      } }],
+      onCaptured: shadow.enqueueCapture,
+    })
+    expect(await writer.capture({ userMessage: '从2025年起我喜欢喝茶', assistantMessage: '',
+      metadata: { sessionId: 'chat-1', sourceMessageIds: ['message-1'] } }, scope)).toBe(1)
+    shadow.flush()
+    const staged = collectV4RecallInputs(repo, { scope, expectedRevision: repo.snapshot().revision,
+      now: Date.now() + 1000, canRead: () => true })
+    expect(staged.rejected).toEqual([])
+    expect(staged.inputs).toHaveLength(1)
+    expect(staged.inputs[0]?.fact.scope).toEqual(scope)
+    expect(staged.inputs[0]?.sources[0]?.episode.scope.sessionId).toBe('chat-1')
   })
   it.each([
     ['unverified', (s: MemoryV4Snapshot) => { s.facts[0]!.verificationState = 'legacy-unverified' }],

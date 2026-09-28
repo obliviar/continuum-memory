@@ -45,6 +45,8 @@ export interface AgentRuntimeDeps {
   graphRecall?: {
     createRequest: (query: string, scope: MemoryScope) => GraphRecallRequest
     countTokens: (text: string) => number
+    /** Host barrier for all capture segments before selecting exact graph evidence. */
+    awaitCaptureWrites: () => Promise<void>
   }
   /** Resolve a stable, isolated memory owner for a session. */
   resolveMemoryScope?: (sessionId: string) => MemoryScope
@@ -289,6 +291,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
         let graphResult: GraphRecallResult | undefined
         if (deps.graphRecall) {
           await capturePromise
+          await deps.graphRecall.awaitCaptureWrites()
           if (!deps.memory?.graph) throw new Error('Graph memory mode is enabled but no graph adapter is available')
           const request = deps.graphRecall.createRequest(userMessage, memoryScope)
           const recalled = await deps.memory.graph.recall(request)

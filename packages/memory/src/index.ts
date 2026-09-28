@@ -100,6 +100,51 @@ export type {
 } from './long-term/memory-write-policy'
 export { createSmartMemoryExtractor } from './long-term/smart-memory-extractor'
 export type { SmartExtractorConfig, SmartMemoryExtractorOptions } from './long-term/smart-memory-extractor'
+export {
+  GRAPH_EXTRACTION_SCHEMA_VERSION,
+  DEFAULT_GRAPH_WRITE_POLICY,
+  createGraphExtractionRun,
+  createGraphExtractionResultStore,
+  selectGraphWriteCandidates,
+} from './long-term/graph-extraction-result'
+export type {
+  EntityMention, FactCandidate, FactContext, GraphExtractionRun,
+  GraphExtractionResultStore, GraphWritePolicy, SourceSpan,
+} from './long-term/graph-extraction-result'
+export {
+  DEFAULT_GRAPH_PREDICATES,
+  createGraphPredicateRegistry,
+  normalizeGraphExtraction,
+} from './long-term/graph-identity-normalization'
+export type {
+  GraphEntityResolution, GraphNormalizedFact, GraphNormalizationResult,
+  GraphNormalizationOptions, GraphTypedValue,
+} from './long-term/graph-identity-normalization'
+export type {
+  GraphEntityRecord as GraphEntityRecordView,
+  GraphAliasDecision as GraphAliasDecisionView,
+  GraphPredicateSpec as GraphPredicateSpecView,
+} from './long-term/graph-identity-normalization'
+export { createGraphNormalizationStore } from './long-term/graph-normalization-store'
+export { graphEntityVectorCandidates } from './long-term/graph-entity-vector-candidates'
+export { confirmGraphFactIdentities } from './long-term/graph-confirmed-identity'
+export { reviewGraphAdmission } from './long-term/graph-admission-review'
+export type { GraphAdmissionChoices, GraphAdmissionDecision } from './long-term/graph-admission-review'
+export type { GraphNormalizationStore } from './long-term/graph-normalization-store'
+export {
+  GRAPH_L1_WRITE_VERSION,
+  assessGraphClaim,
+  confirmGraphClaim,
+  rejectGraphClaim,
+  deferGraphClaim,
+  setGraphUseAssessment,
+  createGraphL1Store,
+  createGraphL1Writer,
+} from './long-term/graph-l1-write'
+export type {
+  GraphClaimRecord, GraphClaimReview, GraphContextRecord, GraphEntityRelationEdge,
+  GraphL1Store, GraphL1Writer, GraphL1SemanticPublisher, GraphPublicationTask,
+} from './long-term/graph-l1-write'
 export type { MemoryCandidate } from './long-term/memory-extractor'
 export { MEMORY_NORMALIZER_VERSION, normalizeMemoryCandidate, normalizedMemoryFields } from './long-term/memory-normalizer'
 export type { NormalizedMemoryFields, NormalizedMemoryModality, NormalizedMemoryPolarity } from './long-term/memory-normalizer'

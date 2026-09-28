@@ -117,6 +117,8 @@ export function assertGraphRelationSnapshot(snapshot: GraphRelationSnapshot, cor
     assert(relation.modality !== 'inferred', 'inferred relation requires a proof, not an L2 source assertion')
     assert(relation.assertionBasis === 'source-explicit' || relation.assertionBasis === 'user-confirmed', 'invalid relation assertion basis')
     assert(relation.review.status === 'accepted', 'authoritative relation must be accepted')
+    if (relation.reviewReason !== undefined)
+      nonempty(relation.reviewReason, 'relation review reason')
     integer(relation.review.reviewedAt, 'relation review time', 1)
     nonempty(relation.review.reviewer, 'relation reviewer')
     integer(relation.transactionTime.recordedAt, 'relation recorded time', 1)

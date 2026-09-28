@@ -58,6 +58,16 @@ describe('independent source and task inbox', () => {
     expect(repository.snapshot().sources).toHaveLength(5)
   })
 
+  it('keeps session-qualified source identity separate from the caller write scope', () => {
+    const repository = createCaptureRepository({ persistence: persistence() })
+    const ownerScope = { ownerId: 'owner', agentId: 'agent' }
+    const task = repository.register({ ...turn(), metadata: { sourceMessageIds: ['message'], sessionId: 'session' } }, ownerScope, 'v1')[0]!
+    expect(repository.snapshot().sources[0]).toMatchObject({
+      scope: { ...ownerScope, sessionId: 'session' }, writeScope: ownerScope,
+    })
+    expect(repository.claim(task.id)?.scope).toEqual(ownerScope)
+  })
+
   it('versions edits and cancels stale work without changing old raw evidence', () => {
     const repository = createCaptureRepository({ persistence: persistence() })
     const first = repository.register(turn('旧文本'), scope, 'v1')[0]!

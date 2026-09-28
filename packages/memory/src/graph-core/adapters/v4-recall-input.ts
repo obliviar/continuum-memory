@@ -17,6 +17,8 @@ export interface V4RecallInputOptions {
   scope: MemoryV4Scope
   expectedRevision: number
   now: number
+  /** Trusted owner-wide read may include facts historically written with a session scope. */
+  includeOwnedSessions?: boolean
   /** Trusted host policy, applied to both facts and every evidence episode. */
   canRead: (record: MemoryFactV4 | MemoryEpisodeV4) => boolean
 }
@@ -40,7 +42,9 @@ export function collectV4RecallInputs(repository: MemoryV4Repository, options: V
   }
   for (const fact of snapshot.facts) {
     // Do not disclose even rejection identifiers across scopes.
-    if (!sameScope(fact.scope, options.scope)) continue
+    if (!sameScope(fact.scope, options.scope)
+      && !(options.includeOwnedSessions && options.scope.sessionId === undefined
+        && fact.scope.ownerId === options.scope.ownerId && fact.scope.agentId === options.scope.agentId)) continue
     const reject = (reason: V4RecallInputRejection) => { rejected.push({ factId: fact.id, reason }) }
     if (!options.canRead(structuredClone(fact))) { reject('access-denied'); continue }
     if (fact.status !== 'active' || fact.invalidatedAt !== undefined
@@ -70,7 +74,7 @@ export function collectV4RecallInputs(repository: MemoryV4Repository, options: V
       const episode = link && episodes.get(link.episodeId)
       if (!link || !episode || !link.active || link.invalidatedAt !== undefined
         || link.createdAt > options.now || episode.recordedAt > options.now
-        || !sameScope(episode.scope, fact.scope) || episode.contentState !== 'available'
+        || !evidenceScopeMatches(episode.scope, fact.scope) || episode.contentState !== 'available'
         || episode.deletedAt !== undefined || !episode.content?.trim()
         || (episode.contentHash !== undefined
           && episode.contentHash !== createHash('sha256').update(episode.content, 'utf8').digest('hex'))) {
@@ -93,4 +97,10 @@ export function collectV4RecallInputs(repository: MemoryV4Repository, options: V
 
 function sameScope(left: MemoryV4Scope, right: MemoryV4Scope): boolean {
   return left.ownerId === right.ownerId && left.agentId === right.agentId && left.sessionId === right.sessionId
+}
+
+/** An owner-wide fact may cite an episode from one of that owner's sessions. */
+function evidenceScopeMatches(episode: MemoryV4Scope, fact: MemoryV4Scope): boolean {
+  return episode.ownerId === fact.ownerId && episode.agentId === fact.agentId
+    && (fact.sessionId === undefined || episode.sessionId === fact.sessionId)
 }

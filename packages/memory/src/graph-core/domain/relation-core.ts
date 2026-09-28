@@ -30,6 +30,13 @@ export function assertGraphRelationSnapshot(snapshot: GraphRelationSnapshot, cor
   integer(manifest.candidateRevision, 'candidate revision', 0)
   integer(manifest.createdAt, 'relation manifest creation time', 1)
   assert(manifest.state === 'ready' || manifest.state === 'stale', 'invalid relation manifest state')
+  if (snapshot.lastRevalidation) {
+    const receipt = snapshot.lastRevalidation
+    for (const field of ['operationId', 'reviewer', 'reason', 'previousManifestId', 'previousCoreManifestId', 'targetCoreManifestId'] as const)
+      nonempty(receipt[field], `revalidation ${field}`)
+    integer(receipt.reviewedAt, 'revalidation time', 1)
+    assert(receipt.reviewedAt <= manifest.createdAt, 'revalidation is later than its publication')
+  }
 
   const claims = new Map(core.semanticBundle.claims.map(claim => [refKey(claim.ref), claim]))
   const contexts = new Set(core.semanticBundle.contexts.map(context => refKey(context.ref)))

@@ -95,6 +95,16 @@ export interface GraphRelationManifest {
 
 export interface GraphRelationSnapshot {
   readonly manifest: GraphRelationManifest
+  /** Last host-confirmed revalidation only; not a complete audit history or a new relation assertion. */
+  readonly lastRevalidation?: {
+    readonly operationId: string
+    readonly reviewer: string
+    readonly reason: string
+    readonly reviewedAt: number
+    readonly previousManifestId: string
+    readonly previousCoreManifestId: string
+    readonly targetCoreManifestId: string
+  }
   readonly relations: readonly GraphRelationRecord[]
   readonly candidates: readonly GraphRelationCandidate[]
   readonly observations: readonly GraphNliObservation[]

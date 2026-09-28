@@ -16,4 +16,11 @@ describe('graph source publication invalidation', () => {
     expect(() => wrapped.save('new')).toThrow('disk')
     expect(published).toBe(false)
   })
+  it('supplies the exact proposed payload to cleanup before saving it', () => {
+    const seen: string[] = []
+    const wrapped = withGraphSourceInvalidation({ save: (payload: string) => { seen.push(`save:${payload}`) } },
+      payload => { seen.push(`cleanup:${payload}`) })
+    wrapped.save('{"revision":2}')
+    expect(seen).toEqual(['cleanup:{"revision":2}', 'save:{"revision":2}'])
+  })
 })

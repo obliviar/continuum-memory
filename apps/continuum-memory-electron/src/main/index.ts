@@ -9,8 +9,12 @@ import { createOpenAILlm } from '@continuum-memory/llm-openai'
 import {
   createEncryptedFilePersistence,
   createEncryptedGraphL1Persistence,
-  createV4GraphMemory,
-  V4_GRAPH_BUDGET,
+  createV4L2Memory,
+  createEncryptedGraphRelationPersistence,
+  reconcileV4RelationLifecycle,
+  parseMemoryV4Snapshot,
+  diagnoseV4GraphInputs,
+  V4_L2_BUDGET,
   createEncryptedV4Persistence,
   createIdleConsolidationRunner,
   createJournaledV4Persistence,
@@ -64,6 +68,7 @@ import { createToolRegistry, webSearchTool, fileReadTool, httpFetchTool } from '
 
 import { createPersistence } from './persist'
 import { withGraphSourceInvalidation } from './graph-source-invalidation'
+import { createGraphRelationReviewController } from './graph-relation-review-controller'
 import { createSettingsManager } from './settings'
 import { setupVoiceIPC } from './voice'
 import { createImageMemoryService, isExplicitImageMemoryRequest } from './image-memory'
@@ -354,6 +359,7 @@ let memoryInitializationError = ''
 let memoryLegacyMigrated = false
 let memoryV4Shadow: V4ShadowWriter | undefined
 let graphL1Persistence: ReturnType<typeof createEncryptedGraphL1Persistence> | undefined
+let graphL2Persistence: ReturnType<typeof createEncryptedGraphRelationPersistence> | undefined
 const graphMemoryEnabled = process.env.CONTINUUM_GRAPH_MEMORY === '1'
 // Conservative byte-BPE token upper bound; final escaped graph prompt is checked again by core.
 const countGraphTokens = (text: string) => Buffer.byteLength(text, 'utf8')
@@ -610,6 +616,7 @@ function buildV4SemanticIndexSnapshot(snapshot: MemoryV4Snapshot): MemoryV4Seman
 }
 
 function initializeMemory(): void {
+  graphRelationReviewController.reset()
   memoryV4ShadowGeneration += 1
   memoryV4InternalReview.setEnabled(false)
   try {
@@ -822,10 +829,21 @@ function initializeMemory(): void {
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
       })
       const l1Persistence = graphL1Persistence
-      const v4Repository = createMemoryV4Repository({ persistence: withGraphSourceInvalidation(v4Persistence, () => {
+      graphL2Persistence = createEncryptedGraphRelationPersistence({
+        encryptedPath: join(userDataDir, 'memory-graph-l2.enc'),
+        keyPath: join(userDataDir, 'memory-graph-l2.key'),
+        protectKey: key => safeStorage.encryptString(key.toString('base64')),
+        unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+      })
+      const l2Persistence = graphL2Persistence
+      const v4Repository = createMemoryV4Repository({ persistence: withGraphSourceInvalidation(v4Persistence, (nextPayload) => {
         // Covers lifecycle purge, shadow writes and updates outside the Agent port, even when graph mode is off.
         if (existsSync(l1Persistence.storagePath!)) l1Persistence.save('{}')
+        reconcileV4RelationLifecycle(l2Persistence, parseMemoryV4Snapshot(nextPayload))
       }) })
+      const recoveredRelations = reconcileV4RelationLifecycle(l2Persistence, v4Repository.snapshot(), { invalidate: false })
+      if (recoveredRelations.changed)
+        writeBootLog(`Graph L2 startup cleanup: ${JSON.stringify(recoveredRelations)}`)
       memoryV4Repository = v4Repository
       memoryV4Lifecycle = createMemoryV4LifecycleService(v4Repository)
       memoryCandidateReview = createMemoryCandidateReviewService(v4Repository)
@@ -1128,7 +1146,7 @@ async function prepareMemoryV4SemanticQuery(
   catch (error) {
     const message = errorMessage(error)
     if (message !== memoryV4SemanticError)
-      writeBootLog(`Memory V4 learned semantic query fell back to local hash: ${message}`)
+      writeBootLog(`Memory V4 learned semantic query unavailable; caller fallback will apply: ${message}`)
     memoryV4SemanticError = message
     return undefined
   }
@@ -1163,23 +1181,45 @@ function invalidateMemoryV4ShadowComparisons(): void {
   memoryV4ShadowWorkerClient?.cancelAll()
 }
 
-function memoryForRemoteRuntime() {
-  if (!memory)
-    return undefined
-  const localMemory = memory
-  const worker = memoryV4ShadowWorkerClient
-  const graph = graphMemoryEnabled && memoryV4Repository && graphL1Persistence
-    ? createV4GraphMemory({
-        repository: memoryV4Repository, persistence: graphL1Persistence,
-        authorizeScope: scope => scope.ownerId === localMemoryScope.ownerId
+const graphRelationReviewController = createGraphRelationReviewController({
+  scope: localMemoryScope, createPort: createDesktopGraphMemory,
+  flush: () => { memoryV4Shadow?.flush() }, graphEnabled: () => graphMemoryEnabled,
+})
+
+function createDesktopGraphMemory() {
+  const repository = memoryV4Repository, l1Persistence = graphL1Persistence, l2Persistence = graphL2Persistence
+  return repository && l1Persistence && l2Persistence
+    ? createV4L2Memory({
+        repository, persistence: l1Persistence, relationPersistence: l2Persistence,
+        authorizeScope: scope => memoryV4Repository === repository
+          && graphL1Persistence === l1Persistence && graphL2Persistence === l2Persistence
+          && scope.ownerId === localMemoryScope.ownerId
           && scope.agentId === localMemoryScope.agentId && scope.sessionId === undefined,
         canRead: record => memorySettings.remotePolicy !== 'disabled' && record.sharePolicy === 'allow-remote'
           && (record.sensitivity === 'normal'
             || (record.sensitivity === 'private' && memorySettings.remotePolicy === 'allow-private')),
         countTokens: countGraphTokens,
         utcOffsetMinutes: -new Date().getTimezoneOffset(),
+        ...(memorySemanticActive && memoryV4EmbeddingIndex ? {
+          semantic: {
+            model: SEMANTIC_MEMORY_FINGERPRINT,
+            dimensions: SEMANTIC_MEMORY_EXPECTED_DIMENSION,
+            // Exact canonical text lookup rejects cached vectors for old fact contents.
+            index: { get: (id: string, model: string, content: string) =>
+              memorySemanticActive ? memoryV4EmbeddingIndex?.get(id, model, content) : undefined },
+            embedQuery: prepareMemoryV4SemanticQuery,
+          },
+        } : {}),
       })
     : undefined
+}
+
+function memoryForRemoteRuntime() {
+  if (!memory)
+    return undefined
+  const localMemory = memory
+  const worker = memoryV4ShadowWorkerClient
+  const graph = graphMemoryEnabled ? createDesktopGraphMemory() : undefined
   const readController = createMemoryV4ReadController({
     mode: config.memoryV4ReadMode,
     recallV3: (query, scope, options) => localMemory.recallAdaptive!(query, scope, options),
@@ -1314,7 +1354,7 @@ function rebuildRuntime() {
         const timestamp = Date.now()
         return { protocolVersion: 'memory-graph/v1' as const, recallId: crypto.randomUUID(), query,
           scope: localMemoryScope, temporal: { knownAt: timestamp, valid: { kind: 'at' as const, at: timestamp } },
-          mode: 'direct-only' as const, budget: { ...V4_GRAPH_BUDGET },
+          mode: 'direct-only' as const, budget: { ...V4_L2_BUDGET },
           sharePolicies: ['allow-remote' as const],
           sensitivities: memorySettings.remotePolicy === 'allow-private'
             ? ['normal' as const, 'private' as const] : ['normal' as const] }
@@ -1577,6 +1617,34 @@ function setupIPC() {
       await memory.unlinkSources(removedMessageIds, localMemoryScope)
     saveSessions()
     return { ok: true }
+  })
+
+  ipcMain.handle('memory:graph-review-preview', event => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame)
+      return { ok: false, error: '请在主窗口的记忆管理中操作。' }
+    return graphRelationReviewController.preview()
+  })
+  ipcMain.handle('memory:graph-review-confirm', (event, input: unknown) => {
+    if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame)
+      return { ok: false, error: '请在主窗口的记忆管理中操作。' }
+    return graphRelationReviewController.confirm(input)
+  })
+
+  ipcMain.handle('memory:graph-diagnostics', () => {
+    if (!memoryV4Repository) return { ok: false, error: 'V4 仓库尚未就绪。' }
+    try {
+      const report = diagnoseV4GraphInputs(memoryV4Repository, {
+        scope: localMemoryScope, expectedRevision: memoryV4Repository.snapshot().revision, now: Date.now(),
+        authorizeScope: scope => scope.ownerId === localMemoryScope.ownerId
+          && scope.agentId === localMemoryScope.agentId && scope.sessionId === undefined,
+        canRead: record => memorySettings.remotePolicy !== 'disabled' && record.sharePolicy === 'allow-remote'
+          && (record.sensitivity === 'normal'
+            || (record.sensitivity === 'private' && memorySettings.remotePolicy === 'allow-private')),
+      })
+      return { ok: true, graphEnabled: graphMemoryEnabled, pendingWrites: memoryV4Shadow?.pendingCount() ?? 0, report }
+    } catch {
+      return { ok: false, error: '诊断未完成：数据可能已更新、不符合结构校验或超过扫描上限，请刷新后重试。' }
+    }
   })
 
   ipcMain.handle('memory:status', async () => ({
@@ -2004,6 +2072,9 @@ function createWindow() {
     },
   })
 
+  mainWindow.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
+    if (isMainFrame) graphRelationReviewController.reset()
+  })
   mainWindow.webContents.on('did-finish-load', () => {
     writeBootLog('renderer finished loading')
     // Deterministic, API-free packaged/startup smoke test. It is inactive in

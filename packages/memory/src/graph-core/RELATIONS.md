@@ -17,13 +17,13 @@ L2 使用独立的关系快照；不修改现有 V4 持久化格式，也不把�
 
 来源或 Claim 删除时，宿主应先停止读取并调用 `purge`，原子清除关联关系、候选和 NLI 观察，随后重建并发布新的 ready 快照。如果旧 Claim 已从 L1 快照移走，宿主还需传入受影响的精确 Claim 引用。`invalidate` 只关闭旧视图，不替代清除。`rebaseGraphRelations` 在 L1 manifest 变化后先保持 L2 stale，按精确端点清除已无效的 Claim 关联记录，再对剩余记录重新核验来源并绑定新 L1 manifest；核验失败不会恢复 ready。冷启动发现旧 L2 指向不同 L1 时也先按 stale 读取。加密文件没有明文备份；物理介质残留和宿主级备份仍由宿主的数据删除策略负责。
 
-桌面端将待判断任务送入本地常驻 `Erlangshen-Roberta-330M-NLI` 进程。模型从本地快照离线加载，返回矛盾、无关、蕴含三分类概率；队列加密保存分数、输入文本哈希、截断状态与失败重试时间。当前宿主把候选和正式关系另存为 `graph-relations.enc`，用独立 OS 保护密钥和来源版本校验；记忆管理器分别展示 NLI 审核与显式 L2 发布。模型输出只是观察，不自动采纳 L2 关系。可通过 `CONTINUUM_MEMORY_NLI_PYTHON`、`CONTINUUM_MEMORY_NLI_MODEL_PATH` 和 `CONTINUUM_MEMORY_NLI_DEPENDENCIES` 指向其他本地安装位置。已发布的 L2 关系可作为后续配对的一跳邻居；现有 V4 Worker 和聊天 Runtime 尚未消费这些关系，候选分数不能绕过审核进入答案。
+桌面端将待判断任务送入本地常驻 `Erlangshen-Roberta-330M-NLI` 进程。模型从本地快照离线加载，返回矛盾、无关、蕴含三分类概率；队列加密保存分数、输入文本哈希、截断状态与失败重试时间。当前宿主把候选和正式关系另存为 `graph-relations.enc`，用独立 OS 保护密钥和来源版本校验；记忆管理器分别展示 NLI 审核与显式 L2 发布。模型输出只是观察，不自动采纳 L2 关系。可通过 `CONTINUUM_MEMORY_NLI_PYTHON`、`CONTINUUM_MEMORY_NLI_MODEL_PATH` 和 `CONTINUUM_MEMORY_NLI_DEPENDENCIES` 指向其他本地安装位置。已发布的 L2 关系可作为后续配对的一跳邻居，也已接到实验图聊天的受控读取入口；V4 Worker 不消费这些关系，候选分数不能绕过审核进入答案。
 ## 与受限召回的连接
 
 `recall/l2-recall-adapter.ts` 的 `createL2GraphRecallAdapter` 将精确 L1/L2 视图接入现有受限多跳召回和内部 `GraphAnswerEvidencePack`。输入须指定 expectedRelationManifestId；读取时保留五种关系的原义、权威原记录和 L2 manifest，不将旧样例 contributes-to 自动转换为 explains。宿主须提供 L1 读取、L2 来源读取、tokenizer，以及可选的问题种子检索回调。
 
 当前直接事实遍历只纳入 positive/asserted、已审核且有效时间已知的权威关系；其他模态和极性仍可存储，但不被适配器改写为正向事实。显式 contradicts 按对称关系返回，并与精确正反断言审查分开呈现。候选和 NLI 分数仍不能直接进入答案证据。
 
-此适配器不替代 CAS 写入或删除级联。实验图聊天已通过 `createV4L2Memory` 接入受限 L2 遍历，使用 `memory-graph-l2.enc`；上游 NLI/人工采纳另用 `graph-relations.enc`，本轮尚未将后者接到聊天读取路径。两者不能直接混用 manifest。详细边界见 [实体 L1 接入说明](../../../../docs/l1-recall-integration.md)。
+此适配器不替代 CAS 写入或删除级联。实验图聊天及关系复核已通过 `createV4L2Memory.nativeRelations` 读取上游 NLI/显式采纳的 `graph-relations.enc`，由原生 L1 读取适配器保留同一 manifest 和精确端点，再委托允许检索的固定视图检查来源与权限。旧 `memory-graph-l2.enc` 保留兼容，不自动迁移或用作失败回退。详细边界见 [实体 L1 接入说明](../../../../docs/l1-recall-integration.md)。
 
 桌面端对 owner 级跨会话查询显式启用 `includeOwnedSessions`，使此前以会话 scope 写入的 V4 事实仍可被同一 owner 的直接图召回访问。事实和来源仍逐条接受读取策略检查；带明确 session 的查询保持精确会话隔离。L2 遍历仍要求有效时间已知；原生 L1 未知时间材料的直接检索例外见接入说明，不能据此推断时序关系。

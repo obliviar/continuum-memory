@@ -7,8 +7,9 @@ import type { V4L1Store } from '../repository/v4-l1-store'
 import type { V4GraphMemoryOptions } from './v4-graph-memory'
 import { createV4RelationSourceReader } from './v4-relation-sources'
 import { graphHash } from './v4-semantic-adapter'
+import type { GraphClaimRecord } from '../domain/types'
 
-type Prepared = { core: { l1: V4L1Store }; repository: GraphRelationRepository }
+type Prepared = { core: { l1: V4L1Store }; repository: GraphRelationRepository; candidates?: readonly GraphClaimRecord[] }
 type Options = V4GraphMemoryOptions & {
   relationPersistence: GraphRelationPersistence
   prepare: (scope: GraphScope) => GraphResult<Prepared>
@@ -51,12 +52,15 @@ export function createV4RelationReview(options: Options) {
         sourceBundleId: projection.semanticBundle.bundleId, createdAt: Math.max(now(), current.manifest.createdAt), state: 'ready' } }
       const blockers: string[] = [], relations: V4RelationReviewReport['relations'][number][] = []
       const endpoints = new Set(projection.semanticBundle.claims.map(c => graphHash(c.ref)))
+      const readableClaims = prepared.value.candidates ?? projection.semanticBundle.claims
+      const readableEndpoints = new Set(readableClaims.map(c => graphHash(c.ref)))
       const facts = new Map(options.repository.snapshot().facts.map(fact => [fact.id, fact.canonicalText]))
-      const labels = new Map(projection.semanticBundle.claims.map(claim => [graphHash(claim.ref), facts.get(claim.fact.id) ?? null]))
+      const labels = new Map(readableClaims.map(claim => [graphHash(claim.ref), facts.get(claim.fact.id) ?? null]))
       const refs: GraphSourceRef[] = []
       for (const relation of current.relations) {
         const reasons: string[] = []
         if (!endpoints.has(graphHash(relation.from)) || !endpoints.has(graphHash(relation.to))) reasons.push('exact-endpoint-unavailable')
+        if (!readableEndpoints.has(graphHash(relation.from)) || !readableEndpoints.has(graphHash(relation.to))) reasons.push('scope-denied')
         const sourceRefs = [...relation.provenance.sources, ...relation.evidence.map(e => e.source)]
         const verified = await sources.verify(sourceRefs, scope, [relation])
         if (!verified.ok) reasons.push(verified.error.code)

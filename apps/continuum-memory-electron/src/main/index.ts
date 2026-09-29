@@ -1627,6 +1627,10 @@ async function prepareDesktopGraphRecall(flushCaptures: () => Promise<void>): Pr
       if (!repository || !semantic || !projection || !store) return
       const result = await semantic.syncFromClaims(store, repository, createGraphPredicateRegistry(), localMemoryScope)
       if (!result.ok || !projection.sync()) throw new Error('Current accepted L1 publication unavailable')
+      // Use the same serialized publication queue as explicit relation admission. This does not approve NLI candidates.
+      if (repository !== memoryV4Repository || semantic !== graphSemanticRepository || projection !== graphL1ProjectionRepository)
+        throw new Error('Graph memory reloaded during L1 synchronization')
+      await queueGraphL2Sync()
     } })
 }
 
@@ -1636,6 +1640,7 @@ function createDesktopGraphMemory() {
     ? createV4L2Memory({
         repository, persistence: l1Persistence, relationPersistence: l2Persistence,
         includeOwnedSessions: true,
+        nativeRelations: { projection: () => graphL1ProjectionRepository?.snapshot(), repository: () => graphRelationRepository },
         acceptedBundle: () => selectRetrievableGraphBundle(graphL1ProjectionRepository?.snapshot()?.semanticBundle, graphL1Store?.tasks() ?? []),
         authorizeScope: scope => memoryV4Repository === repository
           && graphL1Persistence === l1Persistence && graphL2Persistence === l2Persistence

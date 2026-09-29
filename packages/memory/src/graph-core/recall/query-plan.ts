@@ -98,7 +98,7 @@ export function planGraphQuery(input: GraphQueryPlanInput): GraphResult<GraphQue
     }
     catch { return bad('Invalid calendar date in query') }
   }
-  const text = timePlan?.lexicalQuery ?? query
+  const text = (timePlan?.lexicalQuery ?? query).replace(/^(?:请问|想问一下|我想问一下)[，,\s]*/, '').replace(/呢[?？]*$/, '')
   const inferred = (Object.keys(CUES) as GraphQuestionType[]).filter(type => CUES[type].test(text))
   const explicitRoute = input.direction !== undefined && input.kinds !== undefined
   const intent = hints.questionType ?? (inferred.length === 1 ? inferred[0] : undefined)
@@ -138,6 +138,7 @@ export function planGraphQuery(input: GraphQueryPlanInput): GraphResult<GraphQue
 function targetFromQuestion(text: string, intent: GraphQuestionType | undefined): string {
   if (intent === 'cause') return text.replace(/为什么|为何|\bwhy\b/gi, ' ')
     .replace(/^(?:是什么|什么)(?:导致|造成|引起)了?/, '')
+    .replace(/(?:是)?什么原因[?]*$/, '')
     .replace(/的?原因(?:是什么|有哪些)?[?]*$/, '')
   if (intent === 'effect') return text
     .replace(/(?:导致|造成|引起|带来|产生)了?(?:什么|哪些)(?:影响|后果|变化)?[?]*$/, '')

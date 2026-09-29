@@ -6,7 +6,8 @@ import { graphHash, sourceHash } from './v4-semantic-adapter'
 
 /** Source text is always read from current V4, never from a cached L2/NLI record. */
 export function createV4RelationSourceReader(options: V4GraphMemoryOptions) {
-  const sameScope = (a: GraphScope, b: GraphScope) => a.ownerId === b.ownerId && a.agentId === b.agentId && a.sessionId === b.sessionId
+  const sameScope = (source: GraphScope, access: GraphScope) => source.ownerId === access.ownerId && source.agentId === access.agentId
+    && (source.sessionId === access.sessionId || (options.includeOwnedSessions === true && access.sessionId === undefined))
   function read(refs: readonly GraphSourceRef[], access: GraphAccessContext): GraphResult<readonly GraphSourceContent[]> {
     if (!options.authorizeScope(access.scope)) return { ok: false, error: { code: 'scope-denied', message: 'Source scope denied' } }
     const snapshot = options.repository.snapshot(), values: GraphSourceContent[] = []

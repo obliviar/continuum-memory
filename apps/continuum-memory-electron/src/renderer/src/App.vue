@@ -130,6 +130,9 @@ interface GraphReviewItem {
   }
   predicate: string
   evidence: string
+  subject: string
+  object: string
+  sourceText: string
   context?: { negation: { value: boolean | null; resolution: string }; condition: { value: string | null; resolution: string };
     time: { value: string | null; resolution: string }; speaker: { value: string | null; resolution: string } }
   mentions: Array<{ id: string; text: string; type: string; resolvedEntityId?: string;
@@ -269,7 +272,7 @@ const memoryReviewItems = ref<MemoryReviewItem[]>([])
 const graphReviewItems = ref<GraphReviewItem[]>([])
 const graphL1View = ref<{ manifestId: string; bundleId: string; claims: number; argumentEdges: number } | null>(null)
 const graphExtractionStatus = ref<{ enabled: boolean; modelReady: boolean; error: string | null; runs: number;
-  pendingReviews: number; claims: number } | null>(null)
+  factCandidates: number; sourcesWithoutFacts: number; pendingReviews: number; claims: number } | null>(null)
 const graphRelationReviewItems = ref<GraphRelationReviewItem[]>([])
 const graphRelationReviewReasons = ref<Record<string, string>>({})
 const graphL2Candidates = ref<GraphL2CandidateItem[]>([])
@@ -643,6 +646,26 @@ async function reviewMemoryCandidate(id: string, outcome: 'approved' | 'rejected
   finally {
     memoryMutating.value = false
   }
+}
+
+async function reextractEmptyGraphSources() {
+  if (memoryMutating.value) return
+  memoryMutating.value = true
+  memoryStatusError.value = false
+  memoryStatusMessage.value = '正在用本地 UIE 重新提取，首次加载模型可能需要一些时间…'
+  try {
+    const result = await ipcRenderer.invoke('memory:graph-reextract-empty')
+    memoryStatusError.value = !result?.ok
+    memoryStatusMessage.value = result?.ok
+      ? `已重新提取 ${result.processed} 条来源，生成 ${result.candidates} 条图事实候选；仍有 ${result.remaining} 条来源未形成事实。请在下方审核候选。`
+      : `重新提取未完成：${result?.error || '未知错误'}（已处理 ${result?.processed || 0} 条来源）`
+    await refreshMemoryList()
+  }
+  catch (error) {
+    memoryStatusError.value = true
+    memoryStatusMessage.value = error instanceof Error ? error.message : '重新提取失败。'
+  }
+  finally { memoryMutating.value = false }
 }
 
 async function reviewGraphCandidate(id: string, outcome: 'approved' | 'rejected' | 'pending') {
@@ -1592,7 +1615,11 @@ async function doReset() {
 
         <div v-if="memoryStoragePath" class="memory-path" :title="memoryStoragePath">{{ memoryStoragePath }}</div>
         <div v-if="graphL1View" class="field-hint" :title="graphL1View.manifestId">L1 图视图已就绪：{{ graphL1View.claims }} 条 Claim、{{ graphL1View.argumentEdges }} 条论元边</div>
-        <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.pendingReviews }} 条待审、{{ graphExtractionStatus.claims }} 条 L1 Claim</div>
+        <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条事实候选、{{ graphExtractionStatus.pendingReviews }} 条待审、{{ graphExtractionStatus.claims }} 条 L1 Claim</div>
+        <div v-if="graphExtractionStatus?.sourcesWithoutFacts" class="field-hint">
+          {{ graphExtractionStatus.sourcesWithoutFacts }} 条来源尚未提取出可审核的关系；实体或字段提取成功不代表已形成图事实。
+          <button class="secondary-btn" :disabled="memoryMutating || !graphExtractionStatus.enabled || !graphExtractionStatus.modelReady" @click="reextractEmptyGraphSources">重新提取无事实记录（每次最多 5 条）</button>
+        </div>
         <div v-if="graphExtractionStatus?.error" class="api-status-message error">图提取最近一次失败：{{ graphExtractionStatus.error }}</div>
         <div v-if="graphL2View" class="field-hint" :title="graphL2View.manifestId">L2 关系快照已就绪：{{ graphL2View.candidates }} 条候选、{{ graphL2View.relations }} 条已发布关系（图模式下可参与聊天召回）</div>
 
@@ -1761,7 +1788,9 @@ async function doReset() {
                   <span class="memory-state conflicted">待确认</span>
                   <span>模型分数 {{ Math.round(item.review.modelScore * 100) }}%</span>
                 </div>
-                <div class="memory-content">{{ item.evidence || '[来源证据不可用]' }}</div>
+                <div class="memory-content">候选：{{ item.subject }} — {{ item.predicate }} → {{ item.object }}</div>
+                <div class="memory-content">证据：{{ item.evidence || '[来源证据不可用]' }}</div>
+                <details v-if="item.sourceText && item.sourceText !== item.evidence" class="field-hint"><summary>查看完整原文及语境</summary>{{ item.sourceText }}</details>
                 <div class="field-hint">原因：{{ item.review.reason }} · 来源：{{ item.review.sourceId }} · 隐私：{{ item.review.sensitivity }}</div>
                 <div v-for="mention in item.mentions" :key="mention.id" class="field-hint">
                   实体「{{ mention.text }}」（{{ mention.type }}）

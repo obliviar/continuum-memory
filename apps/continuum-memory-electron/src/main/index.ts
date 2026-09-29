@@ -38,6 +38,8 @@ import {
   createUieRuleFallbackExtractor,
   createGraphExtractionResultStore,
   createGraphNormalizationStore,
+  recoverGraphClaimReviews,
+  graphSourcesWithoutFactCandidates,
   normalizeGraphExtraction,
   graphEntityVectorCandidates,
   assessGraphClaim,
@@ -817,32 +819,33 @@ function mergeMemoryCandidates(candidates: MemoryCandidate[]): MemoryCandidate[]
   return [...unique.values()].slice(0, 8)
 }
 
+async function saveGraphExtraction(run: GraphExtractionRun): Promise<void> {
+  if (!graphExtractionStore) throw new Error('Graph extraction persistence is unavailable')
+  graphExtractionStore.append(run)
+  if (graphNormalizationStore && run.status !== 'failed') {
+    const normalized = normalizeGraphExtraction(run, {
+      entities: graphNormalizationStore.entities(),
+      aliasDecisions: graphNormalizationStore.aliasDecisions(),
+      vectorCandidatesByMentionId: graphEntityVectorCandidates(run, graphNormalizationStore.entities(), localMemoryScope),
+      scope: localMemoryScope,
+    })
+    graphNormalizationStore.appendResult(normalized)
+    for (const fact of normalized.facts) {
+      const evidence = run.factCandidates.find(item => item.id === fact.sourceFactId)
+      if (!evidence) continue
+      const privacy = inferMemoryPrivacy(run.sourceText)
+      const review = assessGraphClaim(run, fact, privacy)
+      if (graphL1Writer && review.status === 'approved')
+        await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
+      else if (!graphL1Store?.reviews().some(item => item.id === review.id))
+        graphL1Store?.recordReview(review)
+    }
+  }
+}
+
 function createConfiguredMemoryExtractor(): MemoryExtractor {
   const captureSettings = { ...memorySettings }
   const captureApiConfig = { ...apiConfig }
-  const saveGraphExtraction = async (run: GraphExtractionRun) => {
-    if (!graphExtractionStore) throw new Error('Graph extraction persistence is unavailable')
-    graphExtractionStore.append(run)
-    if (graphNormalizationStore && run.status !== 'failed') {
-      const normalized = normalizeGraphExtraction(run, {
-        entities: graphNormalizationStore.entities(),
-        aliasDecisions: graphNormalizationStore.aliasDecisions(),
-        vectorCandidatesByMentionId: graphEntityVectorCandidates(run, graphNormalizationStore.entities(), localMemoryScope),
-        scope: localMemoryScope,
-      })
-      graphNormalizationStore.appendResult(normalized)
-      for (const fact of normalized.facts) {
-        const evidence = run.factCandidates.find(item => item.id === fact.sourceFactId)
-        if (!evidence) continue
-        const privacy = inferMemoryPrivacy(run.sourceText)
-        const review = assessGraphClaim(run, fact, privacy)
-        if (graphL1Writer)
-          await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
-        else
-          graphL1Store?.recordReview(review)
-      }
-    }
-  }
   const smartExtractor = createSmartMemoryExtractor({
     getConfig: () => captureApiConfig,
     fallback: extractMemoryCandidates,
@@ -1031,6 +1034,12 @@ function initializeMemory(): void {
       unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
     })
     graphL1Store = createGraphL1Store(graphClaimPersistence)
+    try {
+      const recovered = recoverGraphClaimReviews(graphExtractionStore.list(), graphNormalizationStore,
+        graphL1Store, localMemoryScope)
+      if (recovered) writeBootLog(`Restored ${recovered} missing graph candidate reviews`)
+    }
+    catch (error) { writeBootLog(`Graph review recovery failed: ${errorMessage(error)}`) }
     let embeddingIndex: MemoryEmbeddingIndex | undefined
     try {
       const embeddingPersistence = createEncryptedFilePersistence({
@@ -2175,6 +2184,8 @@ function setupIPC() {
       modelReady: localUie.isReady(),
       error: graphExtractionError || null,
       runs: graphExtractionStore?.list().length ?? 0,
+      factCandidates: graphExtractionStore?.list().reduce((count, run) => count + run.factCandidates.length, 0) ?? 0,
+      sourcesWithoutFacts: graphSourcesWithoutFactCandidates(graphExtractionStore?.list() ?? []).length,
       pendingReviews: graphL1Store?.reviews().filter(item => item.status === 'pending').length ?? 0,
       claims: graphL1Store?.claims().length ?? 0,
     },
@@ -2186,6 +2197,10 @@ function setupIPC() {
       return {
         review,
         predicate: source?.predicate ?? '',
+        subject: run?.entityMentions.find(item => item.id === source?.subjectMentionId)?.text ?? '',
+        object: (source && ('literal' in source.object ? source.object.literal
+          : run?.entityMentions.find(item => 'mentionId' in source.object && item.id === source.object.mentionId)?.text)) ?? '',
+        sourceText: run?.sourceText ?? '',
         evidence: run && source ? run.sourceText.slice(source.evidenceSpan.start, source.evidenceSpan.end) : '',
         context: source?.context,
         mentions: mentionIds.map(id => {
@@ -2558,6 +2573,41 @@ function setupIPC() {
     initializeMemory()
     rebuildRuntime()
     return { ok: true, settings: memorySettings }
+  })
+
+  let graphReextractBusy = false
+  ipcMain.handle('memory:graph-reextract-empty', async () => {
+    if (graphReextractBusy) return { ok: false, error: '正在重新提取，请稍候。' }
+    if (!graphExtractionStore || !graphNormalizationStore || !graphL1Store || !localUie.isReady())
+      return { ok: false, error: '本地模型或图存储不可用。' }
+    if (!memorySettings.graphExtractionEnabled && memorySettings.extractionMode !== 'uie')
+      return { ok: false, error: '请先开启保存 UIE 图提取结果。' }
+    const store = graphExtractionStore
+    const sources = graphSourcesWithoutFactCandidates(store.list()).slice(0, 5)
+    let processed = 0, candidates = 0
+    graphReextractBusy = true
+    try {
+      for (const source of sources) {
+        const extraction = await localUie.extract(source.sourceText)
+        // Settings reload, clear, or source deletion while the model is running
+        // must not restore removed material into a new store.
+        if (graphExtractionStore !== store || !store.list().some(run => run.id === source.id))
+          throw new Error('记忆来源或设置已变化，请刷新后重试。')
+        if (!graphSourcesWithoutFactCandidates(store.list()).some(run => run.id === source.id)) continue
+        const run = uieGraphExtractionRun(source.sourceId, source.sourceText, extraction)
+        await saveGraphExtraction(run)
+        processed++
+        candidates += run.factCandidates.length
+      }
+      graphExtractionError = ''
+      return { ok: true, processed, candidates,
+        remaining: graphSourcesWithoutFactCandidates(store.list()).length }
+    }
+    catch (error) {
+      graphExtractionError = errorMessage(error)
+      return { ok: false, error: graphExtractionError, processed, candidates }
+    }
+    finally { graphReextractBusy = false }
   })
 
   ipcMain.handle('memory:uie-extract', async (_event, text: unknown) => {

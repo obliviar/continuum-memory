@@ -7,12 +7,13 @@ import { createGraphExtractionRun } from './graph-extraction-result'
 import type { GraphExtractionRun } from './graph-extraction-result'
 import { extractMemoryCandidates, inferMemoryPrivacy, isSafeMemoryContent } from './memory-extractor'
 import type { MemoryCandidate, MemoryExtractor } from './memory-extractor'
+import { personalUieRelations } from './uie-personal-relations'
 
 const ENTITY_LABELS = new Set([
   '人物', '地点', '组织机构', '项目', '企业', '影视作品', '图书作品',
   '歌曲', '历史人物', '学校', '国家', '行政区', '机构',
 ])
-const FIELD_LABELS = new Set(['姓名', '职业', '所在地', '喜好', '当前项目'])
+const FIELD_LABELS = new Set(['姓名', '职业', '所在地', '喜好', '当前项目', '爱好', '喜欢', '课程', '上课地点'])
 const MAX_OUTPUT_BYTES = 2_000_000
 const EXTRACTOR_VERSION = 'local-uie-base-v1'
 
@@ -29,6 +30,8 @@ export interface UieRelation {
   predicate: string
   object: UieMention
   score: number
+  /** Optional full-sentence evidence, in UIE code-point offsets, including context. */
+  evidenceSpan?: { start: number; end: number }
 }
 
 export interface UieExtraction {
@@ -265,6 +268,8 @@ export function parseUieOutput(source: string, raw: unknown): UieExtraction {
 
 /** Preserve the untouched UIE payload, then convert code-point offsets for graph review. */
 export function uieGraphExtractionRun(sourceId: string, sourceText: string, extraction: UieExtraction): GraphExtractionRun {
+  const personalRelations = personalUieRelations(sourceText, extraction.fields)
+  const relations = [...extraction.relations, ...personalRelations]
   const spans = new Map<string, UieMention>()
   const add = (mention: UieMention) => {
     const key = `${mention.start}:${mention.end}`
@@ -281,13 +286,24 @@ export function uieGraphExtractionRun(sourceId: string, sourceText: string, extr
   const utf16 = (offset: number) => Array.from(sourceText).slice(0, offset).join('').length
   const entities = [...spans.values()].map(mention => ({ id: mentionId(mention), type: entityType(mention.label),
     text: mention.text, span: { start: utf16(mention.start), end: utf16(mention.end) }, modelScore: mention.score }))
-  const facts = extraction.relations.map((relation, index) => ({
-    id: `uie-fact:${index}`, subjectMentionId: mentionId(relation.subject), predicate: relation.predicate,
+  // UIE can label one span both a course and an interest. Keep the contextual
+  // type proposal separate, so an unrelated root label cannot make it unreviewable.
+  const personalMentionId = (mention: UieMention) => `uie-personal:${entityType(mention.label)}:${mention.start}:${mention.end}`
+  for (const relation of personalRelations) {
+    for (const mention of [relation.subject, ...(literalType(relation.predicate) ? [] : [relation.object])]) {
+      const id = personalMentionId(mention)
+      if (!entities.some(item => item.id === id)) entities.push({ id, type: entityType(mention.label),
+        text: mention.text, span: { start: utf16(mention.start), end: utf16(mention.end) }, modelScore: mention.score })
+    }
+  }
+  const facts = relations.map((relation, index) => ({
+    id: `uie-fact:${index}`, subjectMentionId: index < extraction.relations.length
+      ? mentionId(relation.subject) : personalMentionId(relation.subject), predicate: relation.predicate,
     object: literalType(relation.predicate)
       ? { literal: relation.object.text, valueType: literalType(relation.predicate) }
-      : { mentionId: mentionId(relation.object) },
-    evidenceSpan: { start: utf16(Math.min(relation.subject.start, relation.object.start)),
-      end: utf16(Math.max(relation.subject.end, relation.object.end)) },
+      : { mentionId: index < extraction.relations.length ? mentionId(relation.object) : personalMentionId(relation.object) },
+    evidenceSpan: { start: utf16(relation.evidenceSpan?.start ?? Math.min(relation.subject.start, relation.object.start)),
+      end: utf16(relation.evidenceSpan?.end ?? Math.max(relation.subject.end, relation.object.end)) },
     modelScore: relation.score,
     context: { negation: { value: null, resolution: 'unresolved' },
       condition: { value: null, resolution: 'unresolved' },
@@ -295,7 +311,8 @@ export function uieGraphExtractionRun(sourceId: string, sourceText: string, extr
       speaker: { value: null, resolution: 'unresolved' } },
   }))
   return createGraphExtractionRun({ sourceId, sourceText, modelId: extraction.model,
-    rawOutput: { graph: { entities, facts }, uieRawOutput: extraction.rawOutput } })
+    rawOutput: { graph: { entities, facts }, uieRawOutput: extraction.rawOutput,
+      adapterVersion: 'uie-personal-relations-v1' } })
 }
 
 function entityType(label: string): string {
@@ -306,13 +323,16 @@ function entityType(label: string): string {
   if (label === '图书作品') return 'book'
   if (label === '歌曲' || label === '主题曲') return 'song'
   if (label === '所属专辑') return 'album'
+  if (label === '课程') return 'course'
+  if (label === '兴趣') return 'interest'
+  if (label === '项目' || label === '当前项目') return 'project'
   return label
 }
 
 function literalType(label: string): 'string' | 'number' | 'date' | undefined {
   if (['上映时间', '成立日期'].includes(label)) return 'date'
   if (['票房', '人口数量'].includes(label)) return 'number'
-  if (['官方语言', '朝代'].includes(label)) return 'string'
+  if (['官方语言', '朝代', '姓名', '职业'].includes(label)) return 'string'
   return undefined
 }
 

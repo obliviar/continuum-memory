@@ -299,11 +299,20 @@ export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
   }
   return {
     submit: (run, fact, review, entities, admission) => serialize(async () => {
-      if (review.status !== 'approved' || fact.status !== 'ready')
-        return undefined
-      if (review.runId !== run.id || review.sourceFactId !== fact.sourceFactId
+      if (fact.runId !== run.id || review.runId !== run.id || review.sourceFactId !== fact.sourceFactId
         || review.sourceId !== run.sourceId || review.sourceRevision !== run.sourceRevision)
         throw new Error('Graph review does not match the exact source candidate')
+      if (review.status !== 'approved') {
+        // A review is durable before publication eligibility is considered. Replayed
+        // policy assessments must not undo a human decision or an existing outbox task.
+        const previous = l1.reviews().find(item => item.id === review.id)
+        if (!l1.tasks().some(item => item.review.id === review.id)
+          && !(previous?.reviewer === 'user' && review.reviewer === 'policy'))
+          l1.recordReview(review)
+        return undefined
+      }
+      if (fact.status !== 'ready')
+        throw new Error('Approved graph fact still needs identity or predicate resolution')
       if (admission && admission.sourceRevision !== run.sourceRevision)
         throw new Error('Reviewed graph source revision changed')
       const id = stableId('graph-task', `${run.id}\0${fact.sourceFactId}`)

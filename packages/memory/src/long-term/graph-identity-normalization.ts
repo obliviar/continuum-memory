@@ -97,6 +97,8 @@ export const DEFAULT_GRAPH_PREDICATES: readonly GraphPredicateRegistration[] = [
     ['hasHusband', 'person', 'person', '丈夫'], ['hasWife', 'person', 'person', '妻子'],
     ['nationality', 'person', 'location', '国籍'], ['graduatedFrom', 'person', 'organization', '毕业院校'],
     ['residesIn', 'person', 'location', '居住地'],
+    ['takesCourse', 'person', 'course', '修读课程'], ['studiesAt', 'person', 'location', '上课地点'],
+    ['likes', 'person', 'interest', '喜欢'], ['worksOn', 'person', 'project', '参与项目'],
     ['starredBy', 'film', 'person', '主演'], ['directedBy', 'film', 'person', '导演'],
     ['producedBy', 'film', 'organization', '出品公司'], ['themeSong', 'film', 'song', '主题曲'],
     ['authoredBy', 'book', 'person', '作者'], ['performedBy', 'song', 'person', '歌手'],
@@ -111,6 +113,7 @@ export const DEFAULT_GRAPH_PREDICATES: readonly GraphPredicateRegistration[] = [
     ['releasedOn', 'film', 'date', '上映时间'], ['foundedOn', 'organization', 'date', '成立日期'],
     ['officialLanguage', 'location', 'string', '官方语言'], ['dynasty', 'person', 'string', '朝代'],
     ['population', 'location', 'number', '人口数量'], ['boxOffice', 'film', 'number', '票房'],
+    ['hasName', 'person', 'string', '姓名'], ['occupation', 'person', 'string', '职业'],
   ] as const).map(([name, sourceType, valueType, label]): GraphPredicateRegistration => ({
     spec: spec(name, 'subject', { entityType: sourceType }, 'value', valueType, 'single'),
     sourceRole: 'subject', targetRole: 'value', labels: [{ text: label, direction: 'forward' }],

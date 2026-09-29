@@ -142,6 +142,7 @@ export type {
   GraphPredicateSpec as GraphPredicateSpecView,
 } from './long-term/graph-identity-normalization'
 export { createGraphNormalizationStore } from './long-term/graph-normalization-store'
+export { recoverGraphClaimReviews, graphSourcesWithoutFactCandidates } from './long-term/graph-review-recovery'
 export { graphEntityVectorCandidates } from './long-term/graph-entity-vector-candidates'
 export { confirmGraphFactIdentities } from './long-term/graph-confirmed-identity'
 export { reviewGraphAdmission } from './long-term/graph-admission-review'

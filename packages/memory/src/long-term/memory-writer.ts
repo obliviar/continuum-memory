@@ -53,6 +53,8 @@ export interface MemoryWriterOptions {
   maximumQueuedSegments?: number
   /** Independent source inbox. Production callers must provide encrypted persistence. */
   captureRepository?: CaptureRepository
+  /** Called after the encrypted source inbox changes; graph consumers must resync source-only nodes. */
+  onCaptureSourcesChanged?: () => void
   /** Pins recovery to the configured extraction pipeline; changing it never silently replays old work. */
   captureProcessorVersion?: string
   onBackgroundCaptureError?: (error: unknown, turn: MemoryCapture, scope: MemoryScope) => void
@@ -84,6 +86,10 @@ export function createMemoryWriter(options: MemoryWriterOptions): MemoryWriter {
   const captureRepository = options.captureRepository
   const processorVersion = options.captureProcessorVersion ?? 'capture-default-v1'
   const scheduled = new Set<string>()
+  function notifyCaptureSourcesChanged(): void {
+    try { options.onCaptureSourcesChanged?.() }
+    catch { /* An additive graph observer cannot fail the authoritative memory operation. */ }
+  }
 
   function serialize<T>(operation: () => Promise<T>): Promise<T> {
     pendingCaptureSegments += 1
@@ -228,7 +234,9 @@ export function createMemoryWriter(options: MemoryWriterOptions): MemoryWriter {
           captureRepository.invalidate(scope, record.sourceMessageIds ?? [],
             typeof record.metadata?.memoryCaptureId === 'string' ? [record.metadata.memoryCaptureId] : [])
         }
-        return store.purge(id, scope)
+        const result = await store.purge(id, scope)
+        if (record) notifyCaptureSourcesChanged()
+        return result
       })
     },
     update: store.update,
@@ -266,6 +274,7 @@ export function createMemoryWriter(options: MemoryWriterOptions): MemoryWriter {
       captureRepository?.invalidate(scope)
       if (captureRepository) await serialize(() => store.clear(scope))
       else await store.clear(scope)
+      if (captureRepository) notifyCaptureSourcesChanged()
     },
     count: store.count,
     async reportRecallFeedback(report: MemoryRecallFeedbackReport): Promise<void> {
@@ -298,6 +307,7 @@ export function createMemoryWriter(options: MemoryWriterOptions): MemoryWriter {
       if (captureRepository) {
         const tasks = captureRepository.register(turn, scope, processorVersion, options.maximumSegmentCharacters)
           .filter(task => task.status === 'pending' && task.processorVersion === processorVersion)
+        notifyCaptureSourcesChanged()
         if (!tasks.length) return 0
         // The entire source and all segments are durable before the first extractor call.
         const first = scheduleTask(tasks[0]!.id)

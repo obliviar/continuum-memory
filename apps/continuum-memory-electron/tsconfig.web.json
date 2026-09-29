@@ -9,5 +9,5 @@
       "@/*": ["./src/renderer/src/*"]
     }
   },
-  "include": ["src/renderer/src/**/*", "src/renderer/src/**/*.vue"]
+  "include": ["src/renderer/src/**/*", "src/renderer/src/**/*.vue", "src/shared/**/*"]
 }

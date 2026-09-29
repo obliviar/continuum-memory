@@ -5,6 +5,7 @@ import type {
   GraphDerivedClaimRef,
   GraphEntityRef,
   GraphFactRef,
+  GraphInformationRef,
   GraphModality,
   GraphPolarity,
   GraphProofRef,
@@ -73,6 +74,18 @@ export interface GraphEntityRecord extends GraphSemanticRecord {
   readonly entityType: string
   readonly canonicalName: string
   readonly aliases: readonly string[]
+}
+
+/** Exact captured utterance. It can be navigated without asserting its truth or predicate. */
+export interface GraphInformationRecord {
+  readonly ref: GraphInformationRef
+  readonly scope: GraphScope
+  readonly source: { readonly captureId: string; readonly revision: number; readonly contentHash: string }
+  readonly content: string
+  readonly recordedAt: number
+  readonly status: 'source-only'
+  readonly sensitivity: MemorySensitivity
+  readonly sharePolicy: 'local-only'
 }
 
 /** Reversible identity decisions; an embedding neighbour is never automatically sameAs. */
@@ -199,6 +212,8 @@ export interface GraphSemanticBundle {
   readonly scope: GraphScope
   readonly revisions: GraphSourceRevisions
   readonly entities: readonly GraphEntityRecord[]
+  /** Optional on disk for bundles written before source-grounded information nodes. */
+  readonly information?: readonly GraphInformationRecord[]
   readonly aliases: readonly GraphAliasDecision[]
   readonly predicates: readonly GraphPredicateSpec[]
   readonly contexts: readonly GraphContextRecord[]
@@ -223,7 +238,7 @@ export interface GraphProjectionManifest {
 }
 
 export type GraphNavigationRef = GraphVersionRef<'navigation'>
-export type GraphSemanticNodeRef = GraphEntityRef | GraphClaimRef | GraphStatementRef
+export type GraphSemanticNodeRef = GraphEntityRef | GraphInformationRef | GraphClaimRef | GraphStatementRef
   | GraphRuleRef | GraphProofRef | GraphDerivedClaimRef
 export type GraphNodeRef = GraphSemanticNodeRef | GraphNavigationRef
 

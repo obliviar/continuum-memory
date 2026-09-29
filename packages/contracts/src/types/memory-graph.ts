@@ -19,6 +19,8 @@ export interface GraphVersionRef<K extends string> {
   readonly version: number
 }
 export type GraphEntityRef = GraphVersionRef<'entity'>
+/** Source-grounded information is a graph node, never a proven Claim. */
+export type GraphInformationRef = GraphVersionRef<'information'>
 export type GraphClaimRef = GraphVersionRef<'claim'>
 export type GraphStatementRef = GraphVersionRef<'statement'>
 export type GraphRuleRef = GraphVersionRef<'rule'>

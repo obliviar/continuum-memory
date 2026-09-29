@@ -2,9 +2,11 @@ import { createHash } from 'node:crypto'
 import type { GraphResult, GraphSourceRef } from '@continuum-memory/contracts'
 import type { MemoryV4Repository } from '../../v4/repository/memory-v4-repository'
 import type { GraphL1Store } from '../../long-term/graph-l1-write'
+import type { CaptureRepository } from '../../long-term/capture-repository'
 import type { GraphPredicateRegistry } from '../../long-term/graph-identity-normalization'
 import type { GraphClaimRecord, GraphEntityRecord, GraphGroundTerm, GraphSemanticBundle } from '../domain/types'
 import type { GraphSemanticWritePort } from '../ports/graph-ports'
+import { projectCapturedInformation } from './captured-information'
 
 export interface GraphSemanticPersistence {
   load: () => string | undefined
@@ -14,14 +16,14 @@ export interface GraphSemanticPersistence {
 
 export interface GraphSemanticRepository extends GraphSemanticWritePort {
   snapshot: () => GraphSemanticBundle | undefined
-  /** Rebuilds from accepted local Claims; also removes Claims whose exact V4 backing disappeared. */
+  /** Rebuilds accepted Claims and exact active capture information; removes revoked sources. */
   syncFromClaims: (l1: GraphL1Store, v4: MemoryV4Repository, registry: GraphPredicateRegistry,
     scope: GraphSemanticBundle['scope']) => Promise<GraphResult<{ bundleId: string }>>
 }
 
 /** CAS publication of immutable, complete bundles. The V4 repository remains the fact authority. */
 export function createGraphSemanticRepository(persistence: GraphSemanticPersistence,
-  v4: MemoryV4Repository): GraphSemanticRepository {
+  v4: MemoryV4Repository, captures?: CaptureRepository): GraphSemanticRepository {
   const raw = persistence.load()
   let current = raw ? JSON.parse(raw) as GraphSemanticBundle : undefined
   if (current && (current.schemaVersion !== 1 || !current.bundleId || !Array.isArray(current.claims)))
@@ -37,8 +39,8 @@ export function createGraphSemanticRepository(persistence: GraphSemanticPersiste
     const previous = operations.get(request.operationId)
     if (previous && previous !== serialized)
       return failure('invalid-request', 'Graph operation ID reused with different content')
-    if (!validBundle(request.bundle, v4))
-      return failure('source-unavailable', 'Graph Claim lacks an active exact V4 Fact or evidence')
+    if (!validBundle(request.bundle, v4, captures))
+      return failure('source-unavailable', 'Graph Claim or source information lacks active exact evidence')
     writing = true
     try {
       persistence.save(serialized)
@@ -55,7 +57,7 @@ export function createGraphSemanticRepository(persistence: GraphSemanticPersiste
     publish,
     snapshot: () => current ? structuredClone(current) : undefined,
     async syncFromClaims(l1, repository, registry, scope) {
-      const next = buildBundle(l1, repository, registry, scope, current)
+      const next = buildBundle(l1, repository, registry, scope, current, captures)
       if (current && sameContents(current, next))
         return { ok: true, value: { bundleId: current.bundleId } }
       return publish({ operationId: `graph-sync:${next.bundleId}`,
@@ -65,7 +67,7 @@ export function createGraphSemanticRepository(persistence: GraphSemanticPersiste
 }
 
 function buildBundle(l1: GraphL1Store, v4: MemoryV4Repository, registry: GraphPredicateRegistry,
-  scope: GraphSemanticBundle['scope'], previous?: GraphSemanticBundle): GraphSemanticBundle {
+  scope: GraphSemanticBundle['scope'], previous?: GraphSemanticBundle, captures?: CaptureRepository): GraphSemanticBundle {
   const snapshot = v4.snapshot()
   const claims = l1.claims().filter(claim => sameScope(claim.scope, scope) && exactClaimAvailable(claim, snapshot))
     .sort((a, b) => a.ref.id.localeCompare(b.ref.id)) as GraphClaimRecord[]
@@ -102,23 +104,27 @@ function buildBundle(l1: GraphL1Store, v4: MemoryV4Repository, registry: GraphPr
     .map(item => item.spec).sort((a, b) => a.name.localeCompare(b.name))
   const revisions = { v4: snapshot.revision, semantics: (previous?.revisions.semantics ?? 0) + 1,
     predicates: 1, rules: 0, aliases: 0 }
-  const content = { scope, entities: [...entities.values()].sort((a, b) => a.ref.id.localeCompare(b.ref.id)),
+  const content = { scope, information: captures ? projectCapturedInformation(captures.snapshot(), scope) : [],
+    entities: [...entities.values()].sort((a, b) => a.ref.id.localeCompare(b.ref.id)),
     aliases: [], predicates, contexts, claims, statements: [], rules: [] } as const
   const bundleId = `graph-semantic:${hash([content, revisions])}`
   return { schemaVersion: 1, bundleId, revisions, ...content }
 }
 
 function sameContents(a: GraphSemanticBundle, b: GraphSemanticBundle): boolean {
-  return JSON.stringify([a.scope, a.entities, a.aliases, a.predicates, a.contexts, a.claims, a.statements, a.rules,
-    a.revisions.v4]) === JSON.stringify([b.scope, b.entities, b.aliases, b.predicates, b.contexts, b.claims,
+  return JSON.stringify([a.scope, a.information ?? [], a.entities, a.aliases, a.predicates, a.contexts, a.claims, a.statements, a.rules,
+    a.revisions.v4]) === JSON.stringify([b.scope, b.information ?? [], b.entities, b.aliases, b.predicates, b.contexts, b.claims,
     b.statements, b.rules, b.revisions.v4])
 }
 
-function validBundle(bundle: GraphSemanticBundle, v4: MemoryV4Repository): boolean {
+function validBundle(bundle: GraphSemanticBundle, v4: MemoryV4Repository, captures?: CaptureRepository): boolean {
   if (bundle.schemaVersion !== 1 || !bundle.bundleId || !bundle.scope.ownerId || !bundle.scope.agentId
     || !Array.isArray(bundle.claims) || !Array.isArray(bundle.contexts) || !Array.isArray(bundle.entities)
     || !Array.isArray(bundle.predicates) || !Array.isArray(bundle.aliases)
-    || !Array.isArray(bundle.statements) || !Array.isArray(bundle.rules)) return false
+    || !Array.isArray(bundle.statements) || !Array.isArray(bundle.rules)
+    || (captures
+      ? JSON.stringify(bundle.information ?? []) !== JSON.stringify(projectCapturedInformation(captures.snapshot(), bundle.scope))
+      : (bundle.information?.length ?? 0) > 0)) return false
   const snapshot = v4.snapshot()
   if (bundle.revisions.v4 !== snapshot.revision) return false
   const contexts = new Set(bundle.contexts.map(record => `${record.ref.id}:${record.ref.version}`))

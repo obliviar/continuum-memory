@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
+import { graphReviewIpcFields, graphReviewTimeError } from '../../shared/graph-review-ipc'
 
 const { ipcRenderer } = (window as any).require('electron')
 
@@ -270,7 +271,8 @@ const memoryStoragePath = ref('')
 const memoryItems = ref<MemoryItem[]>([])
 const memoryReviewItems = ref<MemoryReviewItem[]>([])
 const graphReviewItems = ref<GraphReviewItem[]>([])
-const graphL1View = ref<{ manifestId: string; bundleId: string; claims: number; argumentEdges: number } | null>(null)
+const graphL1View = ref<{ manifestId: string; bundleId: string; claims: number; information: number; argumentEdges: number } | null>(null)
+const graphInformationItems = ref<Array<{ id: string; text: string; recordedAt: number; sourceId: string }>>([])
 const graphExtractionStatus = ref<{ enabled: boolean; modelReady: boolean; error: string | null; runs: number;
   factCandidates: number; sourcesWithoutFacts: number; pendingReviews: number; claims: number } | null>(null)
 const graphRelationReviewItems = ref<GraphRelationReviewItem[]>([])
@@ -279,6 +281,7 @@ const graphL2Candidates = ref<GraphL2CandidateItem[]>([])
 const graphL2PublishReasons = ref<Record<string, string>>({})
 const graphL2View = ref<{ manifestId: string; candidates: number; relations: number } | null>(null)
 const graphReviewReasons = ref<Record<string, string>>({})
+const graphReviewErrors = ref<Record<string, string>>({})
 const graphIdentityChoices = ref<Record<string, Record<string, string>>>({})
 const graphContextChoices = ref<Record<string, { negation: string; condition: string; conditionText: string;
   time: string; speaker: string; speakerName: string }>>({})
@@ -593,6 +596,7 @@ async function refreshMemoryList() {
     memoryReviewItems.value = Array.isArray(result.reviewItems) ? result.reviewItems : []
     graphReviewItems.value = Array.isArray(result.graphReviewItems) ? result.graphReviewItems : []
     graphL1View.value = result.graphL1View ?? null
+    graphInformationItems.value = Array.isArray(result.graphInformationItems) ? result.graphInformationItems : []
     graphExtractionStatus.value = result.graphExtraction ?? null
     graphRelationReviewItems.value = Array.isArray(result.graphRelationReviewItems) ? result.graphRelationReviewItems : []
     graphL2Candidates.value = Array.isArray(result.graphL2Candidates) ? result.graphL2Candidates : []
@@ -672,20 +676,22 @@ async function reviewGraphCandidate(id: string, outcome: 'approved' | 'rejected'
   if (memoryMutating.value) return
   const reason = graphReviewReasons.value[id]?.trim()
   if (!reason) return
+  graphReviewErrors.value[id] = ''
   memoryMutating.value = true
   memoryStatusError.value = false
   try {
+    const fields = graphReviewIpcFields(graphContextChoices.value[id], graphIdentityChoices.value[id])
     const result = await ipcRenderer.invoke('memory:graph-review', {
       id, outcome, reason,
       retrievalRetain: graphRetrievalRetain.value[id] !== false,
       proactivePreference: graphProactivePreferences.value[id] === true,
       sourceRevision: graphReviewItems.value.find(item => item.review.id === id)?.review.sourceRevision,
-      identities: graphIdentityChoices.value[id],
-      context: graphContextChoices.value[id],
+      ...fields,
     })
     if (!result?.ok) {
       memoryStatusError.value = true
       memoryStatusMessage.value = result?.error || '图事实审核失败。'
+      graphReviewErrors.value[id] = memoryStatusMessage.value
       return
     }
     memoryStatusMessage.value = outcome === 'approved'
@@ -697,6 +703,7 @@ async function reviewGraphCandidate(id: string, outcome: 'approved' | 'rejected'
   catch (error) {
     memoryStatusError.value = true
     memoryStatusMessage.value = error instanceof Error ? error.message : '图事实审核失败。'
+    graphReviewErrors.value[id] = memoryStatusMessage.value
   }
   finally {
     memoryMutating.value = false
@@ -707,6 +714,7 @@ function graphApprovalReady(item: GraphReviewItem): boolean {
   const context = graphContextChoices.value[item.review.id]
   const identities = graphIdentityChoices.value[item.review.id]
   return !!context && !!identities && !!context.negation && !!context.condition && !!context.time && !!context.speaker
+    && !graphReviewTimeError(context.time)
     && (context.condition !== 'conditional' || !!context.conditionText.trim())
     && (context.speaker !== 'reported' || !!context.speakerName.trim())
     && item.mentions.every(mention => !!identities[mention.id])
@@ -1614,7 +1622,11 @@ async function doReset() {
         </div>
 
         <div v-if="memoryStoragePath" class="memory-path" :title="memoryStoragePath">{{ memoryStoragePath }}</div>
-        <div v-if="graphL1View" class="field-hint" :title="graphL1View.manifestId">L1 图视图已就绪：{{ graphL1View.claims }} 条 Claim、{{ graphL1View.argumentEdges }} 条论元边</div>
+        <div v-if="graphL1View" class="field-hint" :title="graphL1View.manifestId">图视图已就绪：{{ graphL1View.information }} 条原文信息节点（未断言）、{{ graphL1View.claims }} 条已审核 L1 Claim、{{ graphL1View.argumentEdges }} 条论元边</div>
+        <details v-if="graphInformationItems.length" class="field-hint">
+          <summary>查看最近入图的原文信息（{{ graphInformationItems.length }} 条；仅来源记录，不代表事实已审核）</summary>
+          <div v-for="item in graphInformationItems" :key="item.id" :title="item.sourceId">{{ item.text }}</div>
+        </details>
         <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条事实候选、{{ graphExtractionStatus.pendingReviews }} 条待审、{{ graphExtractionStatus.claims }} 条 L1 Claim</div>
         <div v-if="graphExtractionStatus?.sourcesWithoutFacts" class="field-hint">
           {{ graphExtractionStatus.sourcesWithoutFacts }} 条来源尚未提取出可审核的关系；实体或字段提取成功不代表已形成图事实。
@@ -1629,7 +1641,7 @@ async function doReset() {
           <p v-if="graphDiagnosticMessage">{{ graphDiagnosticMessage }}</p>
         </div>
 
-        <div class="field-hint">启用实验图模式后，直接问题读取已审核 L1；受支持的关系问题仅遍历已审核、可检索的 L2 关系。候选和 NLI 分数不会自动进入回答。</div>
+        <div class="field-hint">原文信息节点不受谓词 schema 限制，但仅供本地查看，尚不作为已审核事实注入回答。启用实验图模式后，直接问题读取已审核 L1；受支持的关系问题仅遍历已审核、可检索的 L2 关系。候选和 NLI 分数不会自动进入回答。</div>
 
         <section class="memory-settings-panel">
           <div class="memory-settings-title">
@@ -1810,6 +1822,7 @@ async function doReset() {
                 </select>
                 <input v-if="graphContextChoice(item.review.id).condition === 'conditional'" v-model="graphContextChoice(item.review.id).conditionText" class="settings-input" maxlength="500" placeholder="填写条件原文" />
                 <input v-model="graphContextChoice(item.review.id).time" class="settings-input" placeholder="时间：YYYY-MM-DD、none 或 unknown" />
+                <div v-if="graphReviewTimeError(graphContextChoice(item.review.id).time)" class="api-status-message error">{{ graphReviewTimeError(graphContextChoice(item.review.id).time) }}</div>
                 <select v-model="graphContextChoice(item.review.id).speaker" class="settings-input">
                   <option value="">选择说话者</option><option value="self">用户本人陈述</option><option value="reported">转述他人</option><option value="unknown">未知</option>
                 </select>
@@ -1825,6 +1838,7 @@ async function doReset() {
                 </label>
               </div>
               <div class="memory-item-actions">
+                <div v-if="graphReviewErrors[item.review.id]" class="api-status-message error">{{ graphReviewErrors[item.review.id] }}</div>
                 <button class="memory-restore-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim() || !graphApprovalReady(item)" @click="reviewGraphCandidate(item.review.id, 'approved')">确认</button>
                 <button class="memory-delete-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'rejected')">拒绝</button>
                 <button class="secondary-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'pending')">继续待确认</button>

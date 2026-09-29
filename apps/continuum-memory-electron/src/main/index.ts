@@ -78,6 +78,7 @@ import type {
   GraphExtractionResultStore,
   GraphNormalizationStore,
   GraphL1Store,
+  CaptureRepository,
   GraphL1Writer,
   GraphSemanticRepository,
   GraphL1ProjectionRepository,
@@ -471,6 +472,7 @@ let graphExtractionStore: GraphExtractionResultStore | undefined
 let graphExtractionError = ''
 let graphNormalizationStore: GraphNormalizationStore | undefined
 let graphL1Store: GraphL1Store | undefined
+let graphCaptureRepository: CaptureRepository | undefined
 let graphL1Writer: GraphL1Writer | undefined
 let graphSemanticRepository: GraphSemanticRepository | undefined
 let graphL1ProjectionRepository: GraphL1ProjectionRepository | undefined
@@ -976,6 +978,7 @@ function initializeMemory(): void {
   graphExtractionError = ''
   graphNormalizationStore = undefined
   graphL1Store = undefined
+  graphCaptureRepository = undefined
   graphL1Writer = undefined
   graphSemanticRepository = undefined
   graphL1ProjectionRepository = undefined
@@ -1099,16 +1102,18 @@ function initializeMemory(): void {
         integrity: semanticMemory.integrity().state,
         ...preparedSemantic,
       })
+    graphCaptureRepository = createCaptureRepository({
+      persistence: createEncryptedFilePersistence({
+        encryptedPath: join(userDataDir, 'memory-captures.enc'),
+        keyPath: join(userDataDir, 'memory-captures.key'),
+        protectKey: key => safeStorage.encryptString(key.toString('base64')),
+        unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+      }),
+    })
     memory = createMemoryWriter({
       store,
-      captureRepository: createCaptureRepository({
-        persistence: createEncryptedFilePersistence({
-          encryptedPath: join(userDataDir, 'memory-captures.enc'),
-          keyPath: join(userDataDir, 'memory-captures.key'),
-          protectKey: key => safeStorage.encryptString(key.toString('base64')),
-          unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
-        }),
-      }),
+      captureRepository: graphCaptureRepository,
+      onCaptureSourcesChanged: () => syncGraphSemantic(),
       captureProcessorVersion: `capture-v1:${createHmac('sha256', 'capture-profile-v1').update(JSON.stringify({
         mode: memorySettings.extractionMode,
         graphExtractionEnabled: memorySettings.graphExtractionEnabled,
@@ -1204,12 +1209,12 @@ function initializeMemory(): void {
         protectKey: key => safeStorage.encryptString(key.toString('base64')),
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
       })
-      graphSemanticRepository = createGraphSemanticRepository(graphSemanticPersistence, v4Repository)
+      graphSemanticRepository = createGraphSemanticRepository(graphSemanticPersistence, v4Repository, graphCaptureRepository)
       graphL1ProjectionRepository = createGraphL1ProjectionRepository(createEncryptedFilePersistence({
         encryptedPath: graphL1ProjectionStoragePath, keyPath: graphL1ProjectionKeyPath,
         protectKey: key => safeStorage.encryptString(key.toString('base64')),
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
-      }), graphSemanticRepository, v4Repository, graphL1Store!)
+      }), graphSemanticRepository, v4Repository, graphL1Store!, graphCaptureRepository)
       const nliRevision = config.nliModelPath ? basename(config.nliModelPath) : 'unavailable'
       graphNliJudge = createLocalErlangshenNli({
         pythonPath: config.nliPythonPath,
@@ -1228,6 +1233,7 @@ function initializeMemory(): void {
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
       }), { modelId: ERLANGSHEN_NLI_MODEL_ID, modelRevision: nliRevision,
         preprocessingVersion: ERLANGSHEN_NLI_PREPROCESSING_VERSION })
+      syncGraphSemantic()
       graphL1ProjectionRepository.sync()
       syncGraphRelationTasks()
       const predicateRegistry = createGraphPredicateRegistry()
@@ -2176,8 +2182,13 @@ function setupIPC() {
     graphL1View: (() => {
       const view = graphL1ProjectionRepository?.snapshot()
       return view ? { manifestId: view.manifest.manifestId, bundleId: view.manifest.sourceBundleId,
-        claims: view.semanticBundle.claims.length, argumentEdges: view.edges.length } : null
+        claims: view.semanticBundle.claims.length, information: view.semanticBundle.information?.length ?? 0,
+        argumentEdges: view.edges.length } : null
     })(),
+    graphInformationItems: (graphL1ProjectionRepository?.snapshot()?.semanticBundle.information ?? [])
+      .slice().sort((a, b) => b.recordedAt - a.recordedAt).slice(0, 20)
+      .map(item => ({ id: item.ref.id, text: item.content.slice(0, 500), recordedAt: item.recordedAt,
+        sourceId: item.source.captureId })),
     graphExtraction: {
       enabled: !!graphExtractionStore && (memorySettings.extractionMode === 'uie'
         || memorySettings.graphExtractionEnabled),

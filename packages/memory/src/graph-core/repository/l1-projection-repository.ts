@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import { MEMORY_GRAPH_PROTOCOL_VERSION } from '@continuum-memory/contracts'
 import type { MemoryV4Repository } from '../../v4/repository/memory-v4-repository'
 import type { GraphL1Store } from '../../long-term/graph-l1-write'
+import type { CaptureRepository } from '../../long-term/capture-repository'
+import { projectCapturedInformation } from './captured-information'
 import type { GraphProjectionSnapshot, GraphSemanticBundle, GraphSemanticEdge } from '../domain/types'
 import type { GraphSemanticRepository } from './semantic-repository'
 import { exactClaimAvailable } from './semantic-repository'
@@ -17,7 +19,8 @@ export interface GraphL1ProjectionRepository {
 }
 
 export function createGraphL1ProjectionRepository(persistence: { load: () => string | undefined; save: (value: string) => void },
-  semantic: GraphSemanticRepository, v4: MemoryV4Repository, l1?: GraphL1Store): GraphL1ProjectionRepository {
+  semantic: GraphSemanticRepository, v4: MemoryV4Repository, l1?: GraphL1Store,
+  captures?: CaptureRepository): GraphL1ProjectionRepository {
   const raw = persistence.load()
   let current = raw ? JSON.parse(raw) as GraphProjectionSnapshot : undefined
   if (current && (current.manifest?.schemaVersion !== 1 || current.manifest.builderVersion !== GRAPH_L1_PROJECTION_VERSION
@@ -34,7 +37,8 @@ export function createGraphL1ProjectionRepository(persistence: { load: () => str
     const snapshot = v4.snapshot()
     try {
       const expected = buildProjection(bundle)
-      return sameLiveClaims(bundle, snapshot, l1) && bundle.claims.every(claim => exactClaimAvailable(claim, snapshot))
+      return sameLiveClaims(bundle, snapshot, l1) && sameLiveInformation(bundle, captures)
+        && bundle.claims.every(claim => exactClaimAvailable(claim, snapshot))
         && fingerprint(bundle) === view.manifest.semanticFingerprint
         && JSON.stringify(bundle) === JSON.stringify(view.semanticBundle)
         && expected.manifest.manifestId === view.manifest.manifestId
@@ -57,7 +61,7 @@ export function createGraphL1ProjectionRepository(persistence: { load: () => str
     sync() {
       const bundle = semantic.snapshot()
       if (!bundle || bundle.revisions.v4 !== v4.snapshot().revision
-        || !sameLiveClaims(bundle, v4.snapshot(), l1)
+        || !sameLiveClaims(bundle, v4.snapshot(), l1) || !sameLiveInformation(bundle, captures)
         || !bundle.claims.every(claim => exactClaimAvailable(claim, v4.snapshot())))
         return undefined
       if (eligible(current, bundle)) return structuredClone(current)
@@ -67,6 +71,10 @@ export function createGraphL1ProjectionRepository(persistence: { load: () => str
       return structuredClone(view)
     },
   }
+}
+
+function sameLiveInformation(bundle: GraphSemanticBundle, captures?: CaptureRepository): boolean {
+  return !captures || JSON.stringify(bundle.information ?? []) === JSON.stringify(projectCapturedInformation(captures.snapshot(), bundle.scope))
 }
 
 function sameLiveClaims(bundle: GraphSemanticBundle,

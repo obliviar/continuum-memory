@@ -1594,7 +1594,7 @@ async function doReset() {
         <div v-if="graphL1View" class="field-hint" :title="graphL1View.manifestId">L1 图视图已就绪：{{ graphL1View.claims }} 条 Claim、{{ graphL1View.argumentEdges }} 条论元边</div>
         <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.pendingReviews }} 条待审、{{ graphExtractionStatus.claims }} 条 L1 Claim</div>
         <div v-if="graphExtractionStatus?.error" class="api-status-message error">图提取最近一次失败：{{ graphExtractionStatus.error }}</div>
-        <div v-if="graphL2View" class="field-hint" :title="graphL2View.manifestId">L2 关系快照已就绪：{{ graphL2View.candidates }} 条候选、{{ graphL2View.relations }} 条已发布关系（尚未接入聊天召回）</div>
+        <div v-if="graphL2View" class="field-hint" :title="graphL2View.manifestId">L2 关系快照已就绪：{{ graphL2View.candidates }} 条候选、{{ graphL2View.relations }} 条已发布关系（图模式下可参与聊天召回）</div>
 
         <div v-if="memoryStatusMessage" :class="['api-status-message', { error: memoryStatusError }]">{{ memoryStatusMessage }}</div>
         <div class="api-status-message">
@@ -1602,7 +1602,7 @@ async function doReset() {
           <p v-if="graphDiagnosticMessage">{{ graphDiagnosticMessage }}</p>
         </div>
 
-        <div class="field-hint">聊天图召回目前仅支持已审核 L1 的直接证据；L2 仍以本地关系快照为准，尚不参与聊天遍历。</div>
+        <div class="field-hint">启用实验图模式后，直接问题读取已审核 L1；受支持的关系问题仅遍历已审核、可检索的 L2 关系。候选和 NLI 分数不会自动进入回答。</div>
 
         <section class="memory-settings-panel">
           <div class="memory-settings-title">

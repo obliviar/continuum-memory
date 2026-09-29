@@ -1,6 +1,7 @@
 import { createAgentRuntime, createSessionManager, createChatHooks } from '@continuum-memory/core'
 import { createOpenAILlm } from '@continuum-memory/llm-openai'
-import { createMemoryWriter, createVectorStore } from '@continuum-memory/memory'
+import { createLocalUieFromEnvironment, createMemoryWriter,
+  createUieRuleFallbackExtractor, createVectorStore } from '@continuum-memory/memory'
 import { createToolRegistry, webSearchTool, fileReadTool, httpFetchTool } from '@continuum-memory/tools'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -23,6 +24,7 @@ hooks.onStreamEnd(async () => {
 })
 
 let memory: ReturnType<typeof createMemoryWriter> | undefined
+let disposeUie: (() => void) | undefined
 if (config.memoryEnabled) {
   const currentDefaultMemoryPath = join(homedir(), '.continuum-memory', 'memories.json')
   const legacyDefaultMemoryPath = join(homedir(), '.deskpet', 'memories.json')
@@ -35,7 +37,21 @@ if (config.memoryEnabled) {
     embeddingModel: config.embeddingModel,
     storagePath: config.memoryPath ?? defaultMemoryPath,
   })
-  memory = createMemoryWriter({ store })
+  const uie = createLocalUieFromEnvironment()
+  disposeUie = uie.dispose
+  let uieErrorReported = false
+  memory = createMemoryWriter({
+    store,
+    extractor: createUieRuleFallbackExtractor({
+      uie,
+      onError: error => {
+        if (uieErrorReported) return
+        uieErrorReported = true
+        console.error(`[continuum-memory] UIE unavailable; rules extraction remains active: ${String(error)}`)
+      },
+    }),
+  })
+  console.log(`[continuum-memory] UIE: ${uie.isReady() ? 'ready' : 'unavailable; rules fallback'}`)
 }
 
 const tools = createToolRegistry([webSearchTool, fileReadTool, httpFetchTool])
@@ -58,4 +74,7 @@ console.log(`[continuum-memory] Ready. Model: ${config.model}, Provider: ${confi
 console.log(`[continuum-memory] Tools: ${tools.definitions().map(d => d.function.name).join(', ')}`)
 console.log('[continuum-memory] Type /help for commands, Ctrl+C to exit.\n')
 
-startChatRepl(runtime, config.defaultSession ?? 'default')
+startChatRepl(runtime, config.defaultSession ?? 'default', async () => {
+  try { await memory?.flushPendingCaptures() }
+  finally { disposeUie?.() }
+})

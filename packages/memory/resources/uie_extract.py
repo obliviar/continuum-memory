@@ -1,4 +1,4 @@
-"""One-shot, local-only UIE-base bridge. JSON in and JSON out on stdio."""
+"""Shared local UIE-base bridge. Supports one-shot and line-delimited stdio."""
 
 import argparse
 import json
@@ -24,15 +24,11 @@ SCHEMA = [
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--serve", action="store_true")
     location = parser.add_mutually_exclusive_group(required=True)
     location.add_argument("--home-path")
     location.add_argument("--model-path")
     args = parser.parse_args()
-    request = json.load(sys.stdin)
-    text = request.get("text")
-    if not isinstance(text, str) or not text.strip() or len(text) > 4000:
-        raise ValueError("text must contain 1–4000 characters")
-
     from paddlenlp import Taskflow
 
     model_location = {"task_path": args.model_path} if args.model_path else {"home_path": args.home_path}
@@ -43,11 +39,26 @@ def main():
         **model_location,
         batch_size=8,
     )
-    result = extractor(text)
-    if not isinstance(result, list) or len(result) != 1:
-        raise ValueError("UIE returned an unexpected number of results")
-    sys.stdout.write(json.dumps(result[0], ensure_ascii=False, separators=(",", ":")))
-    sys.stdout.flush()
+    def extract(request):
+        text = request.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text) > 4000:
+            raise ValueError("text must contain 1–4000 characters")
+        result = extractor(text)
+        if not isinstance(result, list) or len(result) != 1:
+            raise ValueError("UIE returned an unexpected number of results")
+        return result[0]
+
+    if args.serve:
+        for line in sys.stdin:
+            try:
+                response = {"ok": True, "result": extract(json.loads(line))}
+            except Exception as error:
+                response = {"ok": False, "error": str(error)[:500]}
+            sys.stdout.write(json.dumps(response, ensure_ascii=False, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+    else:
+        sys.stdout.write(json.dumps(extract(json.load(sys.stdin)), ensure_ascii=False, separators=(",", ":")))
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":

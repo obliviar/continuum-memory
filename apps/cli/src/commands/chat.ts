@@ -1,7 +1,7 @@
 import type { AgentRuntime } from '@continuum-memory/core'
 import { createInterface } from 'node:readline'
 
-export function startChatRepl(runtime: AgentRuntime, sessionId: string) {
+export function startChatRepl(runtime: AgentRuntime, sessionId: string, onClose?: () => void | Promise<void>) {
   const rl = createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -37,8 +37,12 @@ export function startChatRepl(runtime: AgentRuntime, sessionId: string) {
   })
 
   rl.on('close', () => {
-    console.log('\n[continuum-memory] goodbye!')
-    process.exit(0)
+    void Promise.resolve().then(onClose).catch(error => {
+      console.error('[continuum-memory] capture flush failed during shutdown:', error)
+    }).finally(() => {
+      console.log('\n[continuum-memory] goodbye!')
+      process.exit(0)
+    })
   })
 }
 

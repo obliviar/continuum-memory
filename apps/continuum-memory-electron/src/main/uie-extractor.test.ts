@@ -1,10 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { assessGraphClaim, confirmGraphClaim, confirmGraphFactIdentities,
   createGraphL1Store, createGraphL1Writer, createGraphPredicateRegistry,
   createMemoryV4Repository, normalizeGraphExtraction } from '@continuum-memory/memory'
-import { createLocalUieExtractor, parseUieOutput, uieGraphExtractionRun, uieReviewCandidates } from './uie-extractor'
+import { createLocalUieExtractor, localUieScriptPath, parseUieOutput,
+  uieGraphExtractionRun, uieReviewCandidates } from '@continuum-memory/memory'
 
 describe('local UIE-base output adapter', () => {
   it.skipIf(!process.env.CONTINUUM_MEMORY_UIE_PYTHON || !process.env.CONTINUUM_MEMORY_UIE_MODEL_PATH)(
@@ -13,12 +12,14 @@ describe('local UIE-base output adapter', () => {
         pythonPath: process.env.CONTINUUM_MEMORY_UIE_PYTHON!,
         modelPath: process.env.CONTINUUM_MEMORY_UIE_MODEL_PATH!,
         modelHome: '',
-        scriptPath: join(dirname(fileURLToPath(import.meta.url)), '../../resources/uie_extract.py'),
+        scriptPath: localUieScriptPath,
         timeoutMs: 120_000,
       })
+      try {
       expect(extractor.isReady()).toBe(true)
       const text = '张三在星河公司工作。'
       const result = await extractor.extract(text)
+      expect((await extractor.extract(text)).entities.length).toBeGreaterThan(0)
       expect(result.rawOutput).toBeDefined()
       expect(result.entities.length).toBeGreaterThan(0)
       for (const mention of result.entities)
@@ -55,6 +56,7 @@ describe('local UIE-base output adapter', () => {
       expect(publication?.state).toBe('published')
       expect(v4.snapshot().factVersions).toHaveLength(1)
       expect(l1.claims()[0]?.atom.predicate).toBe('affiliatedWith')
+      } finally { extractor.dispose() }
     }, 150_000)
   it('deduplicates root spans and preserves nested relation evidence', () => {
     const text = '《雪满庭》由祝云舟主演。'

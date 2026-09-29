@@ -1,6 +1,6 @@
 # Codex 本地 MCP 验证入口
 
-`server.ts` 通过 STDIO 向 Codex 提供 `remember`、`recall`、`list`、`forget` 四个工具，复用现有 V3 记忆存储、内容安全检查和召回逻辑。作用域固定为 `ownerId=local-user`、`agentId=codex`；工具参数不能切换到其他用户或 Agent。
+`server.ts` 通过 STDIO 向 Codex 提供 `remember`、`recall`、`list`、`forget` 四个工具，复用现有 V3 记忆存储、内容安全检查和召回逻辑。作用域固定为 `ownerId=local-user`、`agentId=codex`；工具参数不能切换到其他用户或 Agent。`remember` 会尝试本地 UIE-base，并在返回值中标出未审核建议；模型失败时回退规则，但明确提交的原句仍按原有手动写入语义保存。UIE 建议不存入图。
 
 启动前必须设置 `CONTINUUM_MEMORY_MCP_DATA_PATH`，并用 Node.js 和 `tsx` 运行 `server.ts`。本验证入口把数据存为本地 JSON 明文，因此只用于虚构测试数据；`forget` 是逻辑删除，记录仍保留在文件中。它不会自动读取或保存 Codex 对话。
 

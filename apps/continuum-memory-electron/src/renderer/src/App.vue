@@ -1613,9 +1613,9 @@ async function doReset() {
             <label>
               <span>事实提取</span>
               <select v-model="memorySettings.extractionMode" :disabled="memoryMutating" @change="saveMemorySettings({ extractionMode: memorySettings.extractionMode })">
-                <option value="rules">本地规则（稳定、免费）</option>
-                <option value="smart">智能提取（调用当前聊天模型）</option>
-                <option value="uie">本地 UIE-base（实体与信息候选，需审核）</option>
+                <option value="rules">规则记忆 + 本地 UIE 待审候选</option>
+                <option value="smart">规则 + 本地 UIE + 聊天模型</option>
+                <option value="uie">本地 UIE-base（强制保存图候选）</option>
               </select>
             </label>
             <label>
@@ -1628,8 +1628,8 @@ async function doReset() {
             </label>
           </div>
           <label class="memory-check-row">
-            <input v-model="memorySettings.graphExtractionEnabled" type="checkbox" :disabled="memoryMutating || memorySettings.extractionMode !== 'rules'" @change="saveMemorySettings({ graphExtractionEnabled: memorySettings.graphExtractionEnabled })" />
-            <span>在本地规则模式下并行运行 UIE-base 图提取（只生成待审图候选，不改变当前普通记忆与召回策略）</span>
+            <input v-model="memorySettings.graphExtractionEnabled" type="checkbox" :disabled="memoryMutating || memorySettings.extractionMode === 'uie'" @change="saveMemorySettings({ graphExtractionEnabled: memorySettings.graphExtractionEnabled })" />
+            <span>保存 UIE 图提取结果供审核（所有模式均尝试 UIE；失败保留规则记忆；此开关不改变召回策略）</span>
           </label>
           <details class="uie-preview">
             <summary>试提取实体与信息（仅本地预览，不写入记忆）</summary>

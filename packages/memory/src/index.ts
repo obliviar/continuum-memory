@@ -101,6 +101,22 @@ export type {
 export { createSmartMemoryExtractor } from './long-term/smart-memory-extractor'
 export type { SmartExtractorConfig, SmartMemoryExtractorOptions } from './long-term/smart-memory-extractor'
 export {
+  createLocalUieExtractor,
+  createLocalUieFromEnvironment,
+  createUieRuleFallbackExtractor,
+  localUieScriptPath,
+  parseUieOutput,
+  uieGraphExtractionRun,
+  uieReviewCandidates,
+} from './long-term/local-uie'
+export type {
+  LocalUieOptions,
+  UieExtraction,
+  UieMention,
+  UieRelation,
+  UieRuleFallbackOptions,
+} from './long-term/local-uie'
+export {
   GRAPH_EXTRACTION_SCHEMA_VERSION,
   DEFAULT_GRAPH_WRITE_POLICY,
   createGraphExtractionRun,

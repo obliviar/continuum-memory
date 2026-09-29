@@ -4,7 +4,8 @@ import { join } from 'node:path'
 import type { AgentRuntime } from '@continuum-memory/core'
 import { createAgentRuntime, createSessionManager } from '@continuum-memory/core'
 import { createOpenAILlm } from '@continuum-memory/llm-openai'
-import { createMemoryWriter, createVectorStore } from '@continuum-memory/memory'
+import { createLocalUieFromEnvironment, createMemoryWriter,
+  createUieRuleFallbackExtractor, createVectorStore } from '@continuum-memory/memory'
 import { createToolRegistry, webSearchTool, fileReadTool, httpFetchTool } from '@continuum-memory/tools'
 
 import { chatRoutes } from './routes/chat'
@@ -37,6 +38,7 @@ const llm = createOpenAILlm({ apiKey: config.apiKey, baseURL: config.baseURL })
 const session = createSessionManager(200)
 
 let memory: ReturnType<typeof createMemoryWriter> | undefined
+let disposeUie: (() => void) | undefined
 if (environmentValue('CONTINUUM_MEMORY_ENABLED', 'DESKPET_MEMORY') !== 'false') {
   const store = createVectorStore({
     apiKey: config.embeddingApiKey,
@@ -44,7 +46,21 @@ if (environmentValue('CONTINUUM_MEMORY_ENABLED', 'DESKPET_MEMORY') !== 'false') 
     embeddingModel: config.embeddingModel,
     storagePath: config.memoryPath,
   })
-  memory = createMemoryWriter({ store })
+  const uie = createLocalUieFromEnvironment()
+  disposeUie = uie.dispose
+  let uieErrorReported = false
+  memory = createMemoryWriter({
+    store,
+    extractor: createUieRuleFallbackExtractor({
+      uie,
+      onError: error => {
+        if (uieErrorReported) return
+        uieErrorReported = true
+        console.error(`[continuum-memory-server] UIE unavailable; rules extraction remains active: ${String(error)}`)
+      },
+    }),
+  })
+  console.log(`[continuum-memory-server] UIE: ${uie.isReady() ? 'ready' : 'unavailable; rules fallback'}`)
 }
 
 const tools = createToolRegistry([webSearchTool, fileReadTool, httpFetchTool])
@@ -72,4 +88,19 @@ app.route('/voice', voiceRoutes)
 console.log(`[continuum-memory-server] starting on http://localhost:${config.port}`)
 console.log(`[continuum-memory-server] model: ${config.model}, tools: ${tools.definitions().map(d => d.function.name).join(', ')}`)
 
-serve({ fetch: app.fetch, port: config.port })
+const server = serve({ fetch: app.fetch, port: config.port })
+let stopping = false
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.once(signal, () => {
+    if (stopping) return
+    stopping = true
+    const closed = new Promise<void>(resolve => server.close(() => resolve()))
+    const flush = memory ? memory.flushPendingCaptures() : Promise.resolve()
+    void Promise.all([closed, flush]).catch(error => {
+      console.error('[continuum-memory-server] capture flush failed during shutdown:', error)
+    }).finally(() => {
+      disposeUie?.()
+      process.exit(0)
+    })
+  })
+}

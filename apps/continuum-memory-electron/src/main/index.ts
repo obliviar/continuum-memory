@@ -35,6 +35,7 @@ import {
   createMemoryWriter,
   createCaptureRepository,
   createSmartMemoryExtractor,
+  createUieRuleFallbackExtractor,
   createGraphExtractionResultStore,
   createGraphNormalizationStore,
   normalizeGraphExtraction,
@@ -100,7 +101,6 @@ import { createPersistence } from './persist'
 import { withGraphSourceInvalidation } from './graph-source-invalidation'
 import { prepareGraphRecallInputs } from './graph-l1-recall-barrier'
 import { createSettingsManager } from './settings'
-import { createRulesWithGraphExtractor } from './graph-rules-extractor'
 import { setupVoiceIPC } from './voice'
 import { createImageMemoryService, isExplicitImageMemoryRequest } from './image-memory'
 import {
@@ -136,7 +136,7 @@ import {
   type MemoryV4ReadController,
 } from './memory-v4-read-controller'
 import { createMemoryV4RuntimeObservability } from './memory-v4-runtime-observability'
-import { createLocalUieExtractor, uieGraphExtractionRun, uieReviewCandidates } from './uie-extractor'
+import { createLocalUieExtractor, uieGraphExtractionRun } from './uie-extractor'
 import { createLocalErlangshenNli, ERLANGSHEN_NLI_MODEL_ID,
   ERLANGSHEN_NLI_PREPROCESSING_VERSION } from './local-erlangshen-nli'
 
@@ -756,7 +756,7 @@ const localUie = createLocalUieExtractor({
   modelPath: config.uieModelPath,
   scriptPath: app.isPackaged
     ? join(process.resourcesPath, 'uie_extract.py')
-    : join(app.getAppPath(), 'resources', 'uie_extract.py'),
+    : join(app.getAppPath(), '..', '..', 'packages', 'memory', 'resources', 'uie_extract.py'),
 })
 
 function updateSemanticModelProgress(progress: SemanticModelProgress): void {
@@ -846,52 +846,27 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
   const smartExtractor = createSmartMemoryExtractor({
     getConfig: () => captureApiConfig,
     fallback: extractMemoryCandidates,
-    saveGraphExtraction,
+    saveGraphExtraction: run => captureSettings.graphExtractionEnabled ? saveGraphExtraction(run) : undefined,
   })
-  const extractLocalGraph = async (turn: Parameters<MemoryExtractor>[0]) => {
-    const structured = await localUie.extract(turn.userMessage)
-    const sourceIds = turn.metadata?.sourceMessageIds
-    const sourceId = Array.isArray(sourceIds) && typeof sourceIds[0] === 'string'
-      ? sourceIds[0] : String(turn.metadata?.memoryCaptureId ?? 'unknown-source')
-    await saveGraphExtraction(uieGraphExtractionRun(sourceId, turn.userMessage, structured))
-    graphExtractionError = ''
-    return structured
-  }
-  const rulesWithGraph = createRulesWithGraphExtractor({
+  const uieWithRules = createUieRuleFallbackExtractor({
+    uie: localUie,
     rules: extractMemoryCandidates,
-    captureGraph: async turn => { await extractLocalGraph(turn) },
-    onGraphError: error => {
+    onGraphExtraction: async (_turn, run) => {
+      if (captureSettings.graphExtractionEnabled || captureSettings.extractionMode === 'uie')
+        await saveGraphExtraction(run)
+      graphExtractionError = ''
+    },
+    onError: error => {
       graphExtractionError = errorMessage(error)
       writeBootLog(`Local UIE-base graph capture failed; rules memory remains active: ${graphExtractionError}`)
     },
   })
   return async (turn) => {
-    let candidates: MemoryCandidate[]
-    if (captureSettings.extractionMode === 'uie' && memoryV4Shadow && memoryCandidateReview) {
-      const local = await extractMemoryCandidates(turn)
-      try {
-        const structured = await extractLocalGraph(turn)
-        const existing = new Set(local.map(candidate => candidate.content.toLocaleLowerCase()))
-        candidates = [
-          ...local,
-          ...uieReviewCandidates(turn.userMessage, structured)
-            .filter(candidate => !existing.has(candidate.content.toLocaleLowerCase())),
-        ]
-      }
-      catch (error) {
-        graphExtractionError = errorMessage(error)
-        writeBootLog(`Local UIE-base extraction failed, using rules: ${errorMessage(error)}`)
-        candidates = local
-      }
-    }
-    else if (captureSettings.extractionMode === 'rules') {
-      candidates = captureSettings.graphExtractionEnabled && localUie.isReady()
-        ? await rulesWithGraph(turn) : await extractMemoryCandidates(turn)
-    }
-    else {
-      candidates = captureSettings.extractionMode === 'smart' && captureSettings.remotePolicy !== 'disabled'
-        ? await smartExtractor(turn)
-        : await extractMemoryCandidates(turn)
+    let candidates: MemoryCandidate[] = await uieWithRules(turn)
+    if (captureSettings.extractionMode === 'smart' && captureSettings.remotePolicy !== 'disabled') {
+      const smart = await smartExtractor(turn)
+      const existing = new Set(candidates.map(candidate => candidate.content.toLocaleLowerCase()))
+      candidates = [...candidates, ...smart.filter(candidate => !existing.has(candidate.content.toLocaleLowerCase()))]
     }
     if (!captureSettings.imageMemoryEnabled
       || !turn.attachments?.length
@@ -1130,9 +1105,7 @@ function initializeMemory(): void {
         graphExtractionEnabled: memorySettings.graphExtractionEnabled,
         remotePolicy: memorySettings.remotePolicy,
         imageMemoryEnabled: memorySettings.imageMemoryEnabled,
-        ...(memorySettings.extractionMode === 'uie'
-          || memorySettings.extractionMode === 'rules' && memorySettings.graphExtractionEnabled
-          ? { uieModelHome: config.uieModelPath ?? config.uieModelHome } : {}),
+        uieModelHome: config.uieModelPath ?? config.uieModelHome,
         ...(memorySettings.extractionMode === 'smart' ? { model: apiConfig.model, baseURL: apiConfig.baseURL } : {}),
       })).digest('hex')}`,
       extractor: createConfiguredMemoryExtractor(),
@@ -2193,7 +2166,7 @@ function setupIPC() {
     })(),
     graphExtraction: {
       enabled: !!graphExtractionStore && (memorySettings.extractionMode === 'uie'
-        || memorySettings.extractionMode === 'rules' && memorySettings.graphExtractionEnabled),
+        || memorySettings.graphExtractionEnabled),
       modelReady: localUie.isReady(),
       error: graphExtractionError || null,
       runs: graphExtractionStore?.list().length ?? 0,
@@ -2566,15 +2539,6 @@ function setupIPC() {
     if (nextSettings.semanticEnabled && !semanticMemory.isInstalled()) {
       return { ok: false, error: '请先下载本地语义模型。', settings: memorySettings }
     }
-    if (nextSettings.extractionMode === 'uie' && !localUie.isReady()) {
-      return { ok: false, error: '本地 UIE-base 模型或 Python 环境不可用，请检查 config.json 中的 uiePythonPath 和 uieModelHome。', settings: memorySettings }
-    }
-    if (input.graphExtractionEnabled === true && nextSettings.extractionMode === 'rules' && !localUie.isReady()) {
-      return { ok: false, error: '本地 UIE-base 模型或 Python 环境不可用，无法在 rules 模式下开启图提取。', settings: memorySettings }
-    }
-    if (nextSettings.extractionMode === 'uie' && (!memoryV4Shadow || !memoryCandidateReview)) {
-      return { ok: false, error: 'UIE-base 候选需要 V4 影子存储与审核服务；当前不可用。', settings: memorySettings }
-    }
     if (nextSettings.semanticEnabled && !semanticMemory.isVerified() && !await semanticMemory.verify()) {
       return {
         ok: false,
@@ -2810,6 +2774,7 @@ app.on('before-quit', (event) => {
         memoryV4Shadow?.flush()
         saveSessions()
         persist.saveAllImmediately()
+        localUie.dispose()
         app.quit()
       })
     return
@@ -2822,4 +2787,5 @@ app.on('before-quit', (event) => {
   }
   saveSessions()
   persist.saveAllImmediately()
+  localUie.dispose()
 })

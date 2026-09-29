@@ -9,10 +9,10 @@ import { createOpenAILlm } from '@continuum-memory/llm-openai'
 import {
   createEncryptedFilePersistence,
   createEncryptedGraphL1Persistence,
-  createV4GraphMemory,
+  createV4L2Memory,
   createEncryptedGraphRelationPersistence,
   diagnoseV4GraphInputs,
-  V4_GRAPH_BUDGET,
+  V4_L2_BUDGET,
   selectRetrievableGraphBundle,
   createEncryptedV4Persistence,
   createIdleConsolidationRunner,
@@ -1578,15 +1578,20 @@ async function prepareDesktopGraphRecall(flushCaptures: () => Promise<void>): Pr
       if (!repository || !semantic || !projection || !store) return
       const result = await semantic.syncFromClaims(store, repository, createGraphPredicateRegistry(), localMemoryScope)
       if (!result.ok || !projection.sync()) throw new Error('Current accepted L1 publication unavailable')
+      // Use the same serialized publication queue as explicit relation admission. This does not approve NLI candidates.
+      if (repository !== memoryV4Repository || semantic !== graphSemanticRepository || projection !== graphL1ProjectionRepository)
+        throw new Error('Graph memory reloaded during L1 synchronization')
+      await queueGraphL2Sync()
     } })
 }
 
 function createDesktopGraphMemory() {
   const repository = memoryV4Repository, l1Persistence = graphL1Persistence
   return repository && l1Persistence
-    ? createV4GraphMemory({
+    ? createV4L2Memory({
         repository, persistence: l1Persistence,
         includeOwnedSessions: true,
+        nativeRelations: { projection: () => graphL1ProjectionRepository?.snapshot(), repository: () => graphRelationRepository },
         acceptedBundle: () => selectRetrievableGraphBundle(graphL1ProjectionRepository?.snapshot()?.semanticBundle, graphL1Store?.tasks() ?? []),
         authorizeScope: scope => memoryV4Repository === repository
           && graphL1Persistence === l1Persistence
@@ -1755,7 +1760,7 @@ function rebuildRuntime() {
         const timestamp = Date.now()
         return { protocolVersion: 'memory-graph/v1' as const, recallId: crypto.randomUUID(), query,
           scope: localMemoryScope, temporal: { knownAt: timestamp, valid: { kind: 'at' as const, at: timestamp } },
-          mode: 'direct-only' as const, budget: { ...V4_GRAPH_BUDGET },
+          mode: 'direct-only' as const, budget: { ...V4_L2_BUDGET },
           sharePolicies: ['allow-remote' as const],
           sensitivities: memorySettings.remotePolicy === 'allow-private'
             ? ['normal' as const, 'private' as const] : ['normal' as const] }

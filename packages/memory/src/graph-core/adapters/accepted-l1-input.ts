@@ -112,10 +112,15 @@ export function claimMatchesTime(claim: GraphClaimRecord, temporal: GraphTempora
 /** Names/aliases help locate Claims; identity equality always requires an exact Entity ref. */
 export function entityCandidateText(claim: GraphClaimRecord, projection: GraphProjectionSnapshot,
   sharePolicies: readonly string[], sensitivities: readonly string[]): string {
+  return entityCandidateNames(claim, projection, sharePolicies, sensitivities).join(' ')
+}
+
+export function entityCandidateNames(claim: GraphClaimRecord, projection: GraphProjectionSnapshot,
+  sharePolicies: readonly string[], sensitivities: readonly string[]): string[] {
   return Object.values(claim.atom.args).flatMap(term => {
     if (term.kind !== 'entity') return []
     const entity = projection.semanticBundle.entities.find(e => same(e.ref, term.ref))
     return entity && sharePolicies.includes(entity.sharePolicy) && sensitivities.includes(entity.sensitivity)
       ? [entity.canonicalName, ...entity.aliases] : []
-  }).join(' ')
+  })
 }

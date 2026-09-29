@@ -205,6 +205,32 @@ export interface GraphAnswerEvidenceBundle {
   /** Optional source-asserted L2 evidence. These edges are not logical proofs. */
   readonly relationManifestId?: string
   readonly relations?: readonly GraphEvidenceRelation[]
+  /** Bounded retrieval explanation, never a proof or an exhaustive graph audit. */
+  readonly relationRecall?: GraphRelationRecallContext
+}
+
+export interface GraphRelationRecallContext {
+  readonly direction: 'in' | 'out' | 'both'
+  readonly kinds: readonly GraphEvidenceRelation['kind'][]
+  readonly maxHops: number
+  readonly pathPolicy: 'one-shortest-path-per-root-and-claim'
+  readonly paths: readonly {
+    readonly root: GraphClaimRef
+    readonly target: GraphClaimRef
+    readonly depth: number
+    readonly parent: GraphClaimRef | null
+    readonly via: GraphRelationRef | null
+  }[]
+  readonly depthFrontier: readonly { readonly root: GraphClaimRef; readonly node: GraphClaimRef }[]
+  /** Current desktop reader cannot conduct an exhaustive conflict audit. */
+  readonly conflictAudit: 'not-supported'
+  readonly causalAlternatives: readonly {
+    readonly target: GraphClaimRef
+    readonly coverage: 'complete-within-declared-scope' | 'incomplete' | 'not-checked'
+    readonly causes: readonly { readonly claims: readonly GraphClaimRef[]; readonly relations: readonly GraphRelationRef[] }[]
+    readonly hasMultipleCauses: boolean
+    readonly interpretation: 'candidates-may-coexist'
+  }[]
 }
 
 export interface GraphEvidenceRelation extends GraphEvidenceSemantics {

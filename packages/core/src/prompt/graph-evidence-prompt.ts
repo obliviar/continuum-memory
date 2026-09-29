@@ -1,4 +1,5 @@
 import type { GraphRecallResult } from '@continuum-memory/contracts'
+import { validateGraphRecallContext } from './graph-recall-context'
 
 /** Escaped structured data, never additional model instructions from a memory source. */
 export function buildGraphEvidencePrompt(result: GraphRecallResult): string {
@@ -17,7 +18,9 @@ export function buildGraphEvidencePrompt(result: GraphRecallResult): string {
       || r.polarity !== 'positive' || r.modality !== 'asserted' || !r.sources.length
       || ![r.from, r.to].every(ref => claimKeys.has(JSON.stringify([ref.kind, ref.id, ref.version])))))
     throw new Error('Unsupported or inconsistent graph evidence packet')
+  validateGraphRecallContext(evidence)
   const payload = JSON.stringify({ claims: evidence.claims, relations, relationManifestId: evidence.relationManifestId,
+    relationRecall: evidence.relationRecall,
     coverage: result.trace.completeness, searched: result.trace.searchScope, stopReason: result.trace.stopReason })
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
   return [
@@ -26,6 +29,8 @@ export function buildGraphEvidencePrompt(result: GraphRecallResult): string {
     'Unknown polarity, unknown valid time, reported or hypothetical modality, and conditions are source material only; they do not establish a current positive fact.',
     'No rule proof or exhaustive conflict check is provided. Do not infer causal or temporal relations between separate claims.',
     'Only explicit relation records authorize reporting a relationship: preserve their from/to direction, cite [R1] etc., and attribute it to the source. A chain is not proof of a new transitive relationship.',
+    'Retrieval paths describe how evidence was found, not new facts. Traversing an incoming edge does not reverse its assertion. Depth-frontier nodes have not had their further neighbors checked.',
+    'When several recorded causes are returned, describe them without choosing a sole cause or assuming they conflict. Coverage is limited to the declared search scope; an unsupported conflict audit does not mean no contradictions exist.',
     'If memory evidence is absent or insufficient, say that you cannot establish the personal fact from memory. Do not invent it.',
     '<graph-memory>', payload, '</graph-memory>',
   ].join('\n')

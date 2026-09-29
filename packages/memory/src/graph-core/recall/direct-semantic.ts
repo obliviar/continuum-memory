@@ -72,10 +72,10 @@ export async function searchDirectSemantic(
 }
 
 /** Fuse ranks, never treat cosine or lexical score as factual confidence. */
-export function mergeDirectCandidates(lexical: readonly Hit[], semantic: readonly Hit[]): Hit[] {
-  if (!semantic.length) return [...lexical]
+export function mergeDirectCandidates(lexical: readonly Hit[], semantic: readonly Hit[], structured: readonly Hit[] = []): Hit[] {
+  if (!semantic.length && !structured.length) return [...lexical]
   const scores = new Map<string, number>()
-  for (const channel of [lexical, semantic]) {
+  for (const channel of [lexical, semantic, structured]) {
     const seen = new Set<string>()
     channel.forEach((hit, rank) => {
       if (!seen.has(hit.id)) scores.set(hit.id, (scores.get(hit.id) ?? 0) + 1 / (60 + rank + 1))

@@ -9,6 +9,7 @@ import type { GraphSemanticRepository } from './semantic-repository'
 import { exactClaimAvailable } from './semantic-repository'
 import type { GraphExtractionResultStore } from '../../long-term/graph-extraction-result'
 import { projectOpenAssertions } from './open-assertions'
+import { canNavigateOpenAssertion } from './open-assertion-admission'
 
 export const GRAPH_L1_PROJECTION_VERSION = 'accepted-l1-projection-v1'
 
@@ -96,7 +97,7 @@ function buildProjection(bundle: GraphSemanticBundle): GraphProjectionSnapshot {
   const entities = new Set(bundle.entities.map(entity => `${entity.ref.id}\0${entity.ref.version}`))
   const edges: GraphSemanticEdge[] = []
   for (const assertion of bundle.openAssertions ?? []) {
-    if (assertion.review.status !== 'accepted') continue
+    if (!canNavigateOpenAssertion(assertion)) continue
     edges.push({ id: `open-evidence:${hash(assertion.ref)}`, layer: 'semantic', kind: 'open-evidence',
       from: assertion.ref, to: { kind: 'information', id: `information:${assertion.source.captureId}`, version: assertion.source.revision } })
     for (const participant of assertion.participants)

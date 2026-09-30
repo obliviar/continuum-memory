@@ -6,6 +6,7 @@ import { createGraphPredicateRegistry, type GraphPredicateRegistry } from '../..
 import { inferMemoryPrivacy } from '../../long-term/memory-extractor'
 import type { GraphSemanticBundle } from '../domain/types'
 import type { GraphOpenAssertionRecord } from '../domain/open-assertion-types'
+import { assessOpenNavigation, backtraceOpenContext, canNavigateOpenAssertion } from './open-assertion-admission'
 export type { GraphOpenAssertionRecord } from '../domain/open-assertion-types'
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -104,10 +105,12 @@ export function projectOpenAssertions(captures: CaptureSnapshot, store: Pick<Gra
         relationText: candidate.relationText, ...(relationSpan ? { relationSpan } : {}), evidenceSpan,
         text: text.slice(evidenceSpan.start, evidenceSpan.end), participants: participants as GraphOpenAssertionRecord['participants'],
         attributes: candidate.attributes, context: exactReview?.context ? translatedContext(exactReview.context, offset) : context,
+        sourceContext: backtraceOpenContext(text, evidenceSpan),
         review: exactReview ? { status: exactReview.status, reason: exactReview.reason, reviewedAt: exactReview.reviewedAt } : { status: 'candidate' },
         modelScore: candidate.modelScore, sensitivity: inferMemoryPrivacy(text).sensitivity, sharePolicy: 'local-only', inferenceAllowed: false }
       const previous = result.get(id)
-      if (!previous || previous.modelScore <= record.modelScore) result.set(id, record)
+      const admitted = { ...record, admission: assessOpenNavigation(record) }
+      if (!previous || previous.modelScore <= record.modelScore) result.set(id, admitted)
     }
   }
   return [...result.values()].sort((a, b) => a.ref.id.localeCompare(b.ref.id))
@@ -122,27 +125,35 @@ function validSpan(span: SourceSpan, source: string): boolean {
 export interface OpenAssertionSearchHit {
   assertion: GraphOpenAssertionRecord
   depth: number
-  route: 'text-match' | 'mention-text-candidate'
-  via?: { assertionId: string; mentionText: string }
+  route: 'text-match' | 'mention-text-candidate' | 'context-vector-candidate'
+  /** Similarity ranks relevance only, not identity or factual correctness. */
+  contextSimilarity?: number
+  verification?: 'user-confirmed' | 'automatic-navigation' | 'unverified-candidate'
+  via?: { assertionId: string; mentionText: string; contextSimilarity?: number }
 }
 
 /** Local navigation. Matching mention text proposes relevance, never sameAs or a proof. */
 export function searchOpenAssertions(bundle: Pick<GraphSemanticBundle, 'openAssertions'>, query: string,
-  options: { scope: GraphScope; maximumDepth?: number; limit?: number; sensitivities?: readonly MemorySensitivity[] }): OpenAssertionSearchHit[] {
+  options: { scope: GraphScope; maximumDepth?: number; limit?: number; sensitivities?: readonly MemorySensitivity[];
+    includeCandidates?: boolean; seedAssertionIds?: readonly string[] }): OpenAssertionSearchHit[] {
   const needle = name(query)
   if (!needle) return []
   const limit = Number.isFinite(options.limit) ? Math.max(1, Math.min(100, Math.floor(options.limit!))) : 20
   const depthLimit = Number.isFinite(options.maximumDepth) ? Math.max(0, Math.min(3, Math.floor(options.maximumDepth!))) : 1
   const sensitivities = options.sensitivities ?? ['normal', 'private', 'secret']
-  const records = (bundle.openAssertions ?? []).filter(record => record.review.status === 'accepted'
+  const records = (bundle.openAssertions ?? []).filter(record => record.review.status !== 'rejected'
+    && (canNavigateOpenAssertion(record) || options.includeCandidates)
     && record.scope.ownerId === options.scope.ownerId && record.scope.agentId === options.scope.agentId
     && (options.scope.sessionId === undefined || options.scope.sessionId === record.scope.sessionId)
     && sensitivities.includes(record.sensitivity))
   const hits = new Map<string, OpenAssertionSearchHit>()
-  const queue = records.filter(record => name(record.text).includes(needle) || needle.includes(name(record.text))
+  const verification = (record: GraphOpenAssertionRecord): OpenAssertionSearchHit['verification'] =>
+    record.review.status === 'accepted' ? 'user-confirmed' : canNavigateOpenAssertion(record) ? 'automatic-navigation' : 'unverified-candidate'
+  const queue = records.filter(record => options.seedAssertionIds ? options.seedAssertionIds.includes(record.ref.id)
+    : name(record.text).includes(needle) || needle.includes(name(record.text))
     || name(record.relationText).includes(needle)
     || record.participants.some(participant => usefulMention(name(participant.text)) && needle.includes(name(participant.text))))
-    .slice(0, limit).map(assertion => ({ assertion, depth: 0, route: 'text-match' as const }))
+    .slice(0, limit).map(assertion => ({ assertion, depth: 0, route: 'text-match' as const, verification: verification(assertion) }))
   for (const hit of queue) hits.set(hit.assertion.ref.id, hit)
   const frontier: OpenAssertionSearchHit[] = [...queue]
   const mentions = new Map<string, GraphOpenAssertionRecord[]>()
@@ -158,8 +169,11 @@ export function searchOpenAssertions(bundle: Pick<GraphSemanticBundle, 'openAsse
     for (const participant of hit.assertion.participants) {
       for (const neighbor of mentions.get(name(participant.text)) ?? []) {
         if (hits.has(neighbor.ref.id)) continue
+        const compatible = neighbor.participants.some(other => name(other.text) === name(participant.text)
+          && (other.typeCandidate === 'unknown' || participant.typeCandidate === 'unknown' || other.typeCandidate === participant.typeCandidate))
+        if (!compatible) continue
         const next: OpenAssertionSearchHit = { assertion: neighbor, depth: hit.depth + 1, route: 'mention-text-candidate',
-          via: { assertionId: hit.assertion.ref.id, mentionText: participant.text } }
+          verification: verification(neighbor), via: { assertionId: hit.assertion.ref.id, mentionText: participant.text } }
         hits.set(neighbor.ref.id, next); frontier.push(next)
         if (hits.size >= limit) break
       }

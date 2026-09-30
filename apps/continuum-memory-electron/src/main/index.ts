@@ -52,7 +52,8 @@ import {
   createGraphSemanticRepository,
   projectOpenAssertions,
   needsOpenFactRepresentation,
-  searchOpenAssertions,
+  searchOpenAssertionsWithContext,
+  canNavigateOpenAssertion,
   parseUieExtractionTargets,
   createGraphL1ProjectionRepository,
   reviewGraphAdmission,
@@ -754,6 +755,18 @@ const purgeConfirmation = createMemoryPurgeConfirmationGate()
 const semanticMemory = createSemanticMemoryService(join(userDataDir, 'models', 'memory'), (progress) => {
   updateSemanticModelProgress(progress)
 })
+// Query-only cache; never puts private contextual vectors in an external service or disk.
+const openContextVectorCache = new Map<string, number[]>()
+async function embedOpenContext(text: string): Promise<number[]> {
+  if (!memorySettings.semanticEnabled || !semanticMemory.isVerified()) throw new Error('Local semantic model unavailable')
+  const key = createHash('sha256').update(`${SEMANTIC_MEMORY_FINGERPRINT}\0${text}`).digest('hex')
+  const cached = openContextVectorCache.get(key)
+  if (cached) return [...cached]
+  const vector = await semanticMemory.embed(text)
+  if (openContextVectorCache.size >= 256) openContextVectorCache.delete(openContextVectorCache.keys().next().value!)
+  openContextVectorCache.set(key, [...vector])
+  return vector
+}
 const imageMemory = createImageMemoryService(join(userDataDir, 'models', 'ocr'), (progress) => {
   imageMemoryProgress = progress
   mainWindow?.webContents.send('memory:ocr-progress', progress)
@@ -966,6 +979,7 @@ function initializeMemory(): void {
   memory = undefined
   memoryPersistence = undefined
   memoryEmbeddingIndex = undefined
+  openContextVectorCache.clear()
   memoryV4EmbeddingIndex = undefined
   memoryV4SemanticBackgroundIndex = undefined
   memoryV4Shadow = undefined
@@ -1838,6 +1852,7 @@ async function prepareMemoryPurge(id: unknown) {
 }
 
 async function confirmMemoryPurge(input: { id?: unknown; token?: unknown; phrase?: unknown }) {
+  openContextVectorCache.clear()
   if (!memory?.purge || !memoryV4Repository || !memoryV4Lifecycle || !memoryV4Persistence)
     return { ok: false as const, error: '彻底清除当前不可用。' }
   const id = typeof input?.id === 'string' ? input.id.trim() : ''
@@ -2199,7 +2214,7 @@ function setupIPC() {
       const view = graphL1ProjectionRepository?.snapshot()
       return view ? { manifestId: view.manifest.manifestId, bundleId: view.manifest.sourceBundleId,
         claims: view.semanticBundle.claims.length, information: view.semanticBundle.information?.length ?? 0,
-        openAssertions: view.semanticBundle.openAssertions?.filter(item => item.review.status === 'accepted').length ?? 0,
+        openAssertions: view.semanticBundle.openAssertions?.filter(canNavigateOpenAssertion).length ?? 0,
         argumentEdges: view.edges.length } : null
     })(),
     graphInformationItems: (graphL1ProjectionRepository?.snapshot()?.semanticBundle.information ?? [])
@@ -2217,8 +2232,9 @@ function setupIPC() {
       factCandidates: graphExtractionStore?.list().reduce((count, run) => count + run.factCandidates.length + (run.assertionCandidates?.length ?? 0), 0) ?? 0,
       sourcesWithoutFacts: graphSourcesWithoutFactCandidates(graphExtractionStore?.list() ?? []).length,
       pendingReviews: (graphL1Store?.reviews().filter(item => item.status === 'pending'
-        && !openCandidateKeys.has(`${item.runId}\0${item.sourceFactId}`)).length ?? 0)
-        + openAssertions.filter(item => item.review.status === 'candidate').length,
+        && !openCandidateKeys.has(`${item.runId}\0${item.sourceFactId}`)).length ?? 0),
+      automaticOpenNavigation: openAssertions.filter(item => item.review.status === 'candidate' && canNavigateOpenAssertion(item)).length,
+      deferredOpenCandidates: openAssertions.filter(item => item.review.status === 'candidate' && !canNavigateOpenAssertion(item)).length,
       claims: graphL1Store?.claims().length ?? 0,
     },
     graphReviewItems: graphL1Store?.reviews().filter(item => item.status === 'pending'
@@ -2400,14 +2416,20 @@ function setupIPC() {
     } catch (error) { return { ok: false, error: errorMessage(error) } }
   })
 
-  ipcMain.handle('memory:graph-open-search', async (_event, input: { query?: unknown; maximumDepth?: unknown }) => {
+  ipcMain.handle('memory:graph-open-search', async (_event, input: { query?: unknown; maximumDepth?: unknown; includeCandidates?: unknown }) => {
     if (typeof input?.query !== 'string' || !input.query.trim() || input.query.length > 500)
       return { ok: false, error: '请输入查询内容。' }
     const view = graphL1ProjectionRepository?.snapshot()
     if (!view) return { ok: false, error: '图视图尚未就绪，请刷新。' }
     const needle = input.query.normalize('NFKC').toLocaleLowerCase().replace(/\s+/gu, '')
-    return { ok: true, items: searchOpenAssertions(view.semanticBundle, input.query,
-      { scope: localMemoryScope, maximumDepth: typeof input.maximumDepth === 'number' ? input.maximumDepth : 1, limit: 20 }),
+    const results = await searchOpenAssertionsWithContext(view.semanticBundle, input.query,
+      { scope: localMemoryScope, maximumDepth: typeof input.maximumDepth === 'number' ? input.maximumDepth : 1, limit: 20,
+        includeCandidates: input.includeCandidates === true,
+        ...(memorySettings.semanticEnabled && semanticMemory.isVerified() ? { embed: embedOpenContext } : {}) })
+    // Async embeddings must not reveal a removed source or an out-of-date review.
+    if (graphL1ProjectionRepository?.snapshot()?.manifest.manifestId !== view.manifest.manifestId)
+      return { ok: false, error: '查询期间来源或审核状态已变化，请重新查询。' }
+    return { ok: true, ...results,
       sources: (view.semanticBundle.information ?? []).filter(item => item.content.normalize('NFKC').toLocaleLowerCase()
         .replace(/\s+/gu, '').includes(needle)).slice(0, 20).map(item => ({ id: item.ref.id, text: item.content })) }
   })

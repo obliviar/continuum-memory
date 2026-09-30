@@ -36,6 +36,20 @@ describe('installed UIE open graph pipeline', () => {
         const items = projectOpenAssertions(captures.snapshot(), extractions, scope)
           .filter(item => ['存放在', '发生'].includes(item.relationText))
         expect(items).toHaveLength(2)
+        expect(items.every(item => item.admission?.localNavigation === 'automatic')).toBe(true)
+        expect(extractions.openReviews()).toEqual([])
+        expect((await semantic.syncFromClaims(l1, v4, registry, scope)).ok).toBe(true)
+        const autoView = projection.sync()!
+        expect(searchOpenAssertions(autoView.semanticBundle, '样品S7', { scope, maximumDepth: 2 })).toHaveLength(2)
+        expect(autoView.semanticBundle.claims).toHaveLength(0)
+        const riskyTexts = ['如果设备修好，样品S7存放在恒温箱B2。', '小王说样品S7存放在恒温箱B2。', '他把它放入那里。']
+        for (const [i, riskyText] of riskyTexts.entries()) {
+          await memory.capture({ userMessage: riskyText, assistantMessage: '', metadata: { sourceMessageIds: [`risky-${i}`] } }, scope)
+          const riskyItems = projectOpenAssertions(captures.snapshot(), extractions, scope)
+            .filter(item => item.extraction.sourceId === `risky-${i}`)
+          expect(riskyItems.length).toBeGreaterThan(0)
+          expect(riskyItems.every(item => item.admission?.localNavigation === 'candidate-only')).toBe(true)
+        }
         for (const item of items) extractions.recordOpenReview({ assertionId: item.ref.id,
           sourceId: item.extraction.sourceId, sourceRevision: item.extraction.sourceRevision,
           status: 'accepted', reason: '核对本地合成原文', reviewedAt: Date.now() })

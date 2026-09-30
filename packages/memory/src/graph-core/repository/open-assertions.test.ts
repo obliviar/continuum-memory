@@ -42,6 +42,45 @@ function fixture() {
 }
 
 describe('schema-independent assertion publication and navigation', () => {
+  it('projects automatically navigable source records and revokes them without creating accepted reviews', async () => {
+    const f = fixture()
+    f.append('样品S7存放在恒温箱B2。', 'auto')
+    const view = await f.sync(), item = view.semanticBundle.openAssertions![0]!
+    expect(item.admission?.localNavigation).toBe('automatic')
+    expect(item.review.status).toBe('candidate')
+    expect(f.extractions.openReviews()).toEqual([])
+    expect(view.edges.filter(edge => edge.kind === 'open-participant')).toHaveLength(2)
+    expect(searchOpenAssertions(view.semanticBundle, '样品S7', { scope })).toHaveLength(1)
+    expect(view.semanticBundle.claims).toEqual([])
+    expect(f.v4.snapshot().facts).toEqual([])
+    f.extractions.recordOpenReview({ assertionId: item.ref.id, sourceId: 'auto', sourceRevision: item.extraction.sourceRevision,
+      status: 'rejected', reason: '用户撤销自动关联', reviewedAt: 100 })
+    expect(f.projection.snapshot()).toBeUndefined()
+    expect((await f.sync()).edges.filter(edge => edge.kind === 'open-participant')).toEqual([])
+    f.captures.register({ userMessage: '样品S7存放在冷柜C3。', assistantMessage: '', metadata: { sourceMessageIds: ['auto'] } }, scope, 'test')
+    expect(f.projection.snapshot()).toBeUndefined()
+    expect((await f.sync()).semanticBundle.openAssertions).toEqual([])
+  })
+
+  it('rebuilds pre-policy snapshots without clearing captures or changing human decisions', async () => {
+    const f = fixture()
+    f.append('样品S7存放在恒温箱B2。', 'legacy')
+    const view = await f.sync()
+    f.accept(view.semanticBundle.openAssertions![0]!.ref.id)
+    await f.sync()
+    const oldSemantic = JSON.parse(f.semanticDisk.load()!), oldProjection = JSON.parse(f.projectionDisk.load()!)
+    for (const bundle of [oldSemantic, oldProjection.semanticBundle])
+      for (const assertion of bundle.openAssertions) { delete assertion.sourceContext; delete assertion.admission }
+    f.semanticDisk.save(JSON.stringify(oldSemantic)); f.projectionDisk.save(JSON.stringify(oldProjection))
+    const reopenedSemantic = createGraphSemanticRepository(f.semanticDisk, f.v4, f.captures, f.extractions)
+    const reopenedProjection = createGraphL1ProjectionRepository(f.projectionDisk, reopenedSemantic, f.v4, f.l1, f.captures, f.extractions)
+    expect(reopenedProjection.snapshot()).toBeUndefined()
+    expect((await reopenedSemantic.syncFromClaims(f.l1, f.v4, f.registry, scope)).ok).toBe(true)
+    expect(reopenedProjection.sync()?.semanticBundle.openAssertions![0]).toMatchObject({
+      review: { status: 'accepted' }, admission: { localNavigation: 'automatic' }, sourceContext: { sourceRole: 'user-message' } })
+    expect(f.captures.snapshot().sources).toHaveLength(1)
+    expect(f.extractions.openReviews()).toHaveLength(1)
+  })
   it('retains unknown UIE labels and publishes an unknown relation without adding a native Claim', async () => {
     const f = fixture(), text = '样品S7保管于恒温箱B2'
     f.captures.register({ userMessage: text, assistantMessage: '', metadata: { sourceMessageIds: ['m1'] } }, scope, 'test')

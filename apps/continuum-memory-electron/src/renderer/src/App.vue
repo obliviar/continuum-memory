@@ -277,7 +277,8 @@ const graphL1View = ref<{ manifestId: string; bundleId: string; claims: number; 
 const graphOpenAssertionItems = ref<GraphOpenAssertionRecord[]>([])
 const graphInformationItems = ref<Array<{ id: string; text: string; recordedAt: number; sourceId: string }>>([])
 const graphExtractionStatus = ref<{ enabled: boolean; modelReady: boolean; error: string | null; runs: number;
-  factCandidates: number; sourcesWithoutFacts: number; pendingReviews: number; claims: number } | null>(null)
+  factCandidates: number; sourcesWithoutFacts: number; pendingReviews: number; claims: number;
+  automaticOpenNavigation?: number; deferredOpenCandidates?: number } | null>(null)
 const graphRelationReviewItems = ref<GraphRelationReviewItem[]>([])
 const graphRelationReviewReasons = ref<Record<string, string>>({})
 const graphL2Candidates = ref<GraphL2CandidateItem[]>([])
@@ -1626,12 +1627,13 @@ async function doReset() {
         </div>
 
         <div v-if="memoryStoragePath" class="memory-path" :title="memoryStoragePath">{{ memoryStoragePath }}</div>
-        <div v-if="graphL1View" class="field-hint" :title="graphL1View.manifestId">图视图已就绪：{{ graphL1View.information }} 条原文信息节点（未断言）、{{ graphL1View.openAssertions ?? 0 }} 条已确认开放断言、{{ graphL1View.claims }} 条已审核 L1 Claim、{{ graphL1View.argumentEdges }} 条图连接</div>
+        <div v-if="graphL1View" class="field-hint" :title="graphL1View.manifestId">图视图已就绪：{{ graphL1View.information }} 条原文信息节点（未断言）、{{ graphL1View.openAssertions ?? 0 }} 条可本地关联查询的开放记录（含自动准入，不等于事实确认）、{{ graphL1View.claims }} 条已审核 L1 Claim、{{ graphL1View.argumentEdges }} 条图连接</div>
         <details v-if="graphInformationItems.length" class="field-hint">
           <summary>查看最近入图的原文信息（{{ graphInformationItems.length }} 条；仅来源记录，不代表事实已审核）</summary>
           <div v-for="item in graphInformationItems" :key="item.id" :title="item.sourceId">{{ item.text }}</div>
         </details>
         <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条关系/事件候选、{{ graphExtractionStatus.pendingReviews }} 条待审、{{ graphExtractionStatus.claims }} 条规范 L1 Claim</div>
+        <div v-if="graphExtractionStatus" class="field-hint">开放关系：{{ graphExtractionStatus.automaticOpenNavigation ?? 0 }} 条自动准入本地查询，{{ graphExtractionStatus.deferredOpenCandidates ?? 0 }} 条按需核实候选；无需逐条审核，也不会自动发布 Claim。</div>
         <div v-if="graphExtractionStatus?.sourcesWithoutFacts" class="field-hint">
           {{ graphExtractionStatus.sourcesWithoutFacts }} 条来源尚未提取出可审核的关系；实体或字段提取成功不代表已形成图事实。
           <button class="secondary-btn" :disabled="memoryMutating || !graphExtractionStatus.enabled || !graphExtractionStatus.modelReady" @click="reextractEmptyGraphSources">重新提取无事实记录（每次最多 5 条）</button>

@@ -76,9 +76,28 @@ describe('open graph desktop controls', () => {
     async (find, root) => {
       find('input').props['onUpdate:modelValue']('样品S7'); await vue.nextTick()
       await find('button', '搜索相关开放记忆').props.onClick(); await vue.nextTick()
-      expect(calls[0]).toEqual({ channel: 'memory:graph-open-search', input: { query: '样品S7', maximumDepth: 2 } })
+      expect(calls[0]).toEqual({ channel: 'memory:graph-open-search', input: { query: '样品S7', maximumDepth: 2, includeCandidates: false } })
       expect(text(root)).toContain('恒温箱B2发生故障')
       expect(text(root)).toContain('同名不等于同一实体')
+    })
+  })
+
+  it('allows explicit unverified-candidate search and labels semantic ranking without treating it as approval', async () => {
+    const calls: any[] = []
+    await fixture(async (channel, input) => { calls.push({ channel, input }); return { ok: true,
+      semantic: { mode: 'context-vector', compared: 2, truncated: false },
+      items: [{ assertion: { ref: { id: 'uncertain' }, text: '如果设备修好，样品S7存放在恒温箱B2',
+        sourceContext: { text: '小王说：如果设备修好，样品S7存放在恒温箱B2' }, review: { status: 'candidate' } },
+      depth: 0, route: 'context-vector-candidate', verification: 'unverified-candidate' }] } }, async (find, root) => {
+      const checkbox = all(root).find(n => n.type === 'input' && n.props.type === 'checkbox')
+      checkbox.props['onUpdate:modelValue'](true)
+      find('input').props['onUpdate:modelValue']('样品S7'); await vue.nextTick()
+      await find('button', '搜索相关开放记忆').props.onClick(); await vue.nextTick()
+      expect(calls[0]?.input.includeCandidates).toBe(true)
+      expect(text(root)).toContain('未核实候选')
+      expect(text(root)).toContain('相似度仅表示相关性')
+      expect(text(root)).toContain('小王说')
+      expect(find('button', '按需确认')).toBeDefined()
     })
   })
 
@@ -86,7 +105,7 @@ describe('open graph desktop controls', () => {
     const calls: any[] = []
     await fixture(async (channel, input) => { calls.push({ channel, input }); return { ok: true } }, async (find, root, events) => {
       find('select').props['onUpdate:modelValue']('capture')
-      const inputs = all(root).filter(n => n.type === 'input')
+      const inputs = all(root).filter(n => n.type === 'input' && n.props.type !== 'checkbox')
       inputs[1]!.props['onUpdate:modelValue']('设备→故障'); await vue.nextTick()
       await find('button', '本地重新提取').props.onClick(); await vue.nextTick()
       expect(calls[0]).toEqual({ channel: 'memory:graph-custom-extract', input: { sourceId: 'capture', targets: '设备→故障' } })

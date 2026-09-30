@@ -116,6 +116,7 @@ async function completeWithOpenAI(prompt: string, config: SmartExtractorConfig):
 
 function buildPrompt(userMessage: string): string {
   return [
+    'graph may also contain assertions:[{id,relationText,relationSpan:{start,end},participants:[{mentionId,role}],evidenceSpan:{start,end},modelScore,context}]. Use assertions for events with multiple participants and relations outside existing categories. Preserve the exact relation wording, every participant and its source span. Entity type is an open proposal; use unknown when uncertain. Do not force a new domain into person/organization/location. Shared words never prove shared identity. Missing roles/context stay unknown. Assertions use the same context format as facts.',
     'Return all UIE graph elements before any filtering: graph:{entities:[{id,type,text,span:{start,end},modelScore}],facts:[{id,subjectMentionId,predicate,object:{mentionId}|{literal,valueType?,unit?},evidenceSpan:{start,end},modelScore,context:{negation,condition,time,speaker}}]}. Offsets are UTF-16 positions in the exact user text; end is exclusive. Each context field is {value,resolution:"resolved|unresolved|absent",evidenceSpan?}. Dates and amounts are typed literals, not entity mentions. Do not apply a 0.75 score threshold or an eight-item cap.',
     '从下面的用户原话中提取未来对话仍然有用的、明确陈述的事实。',
     '不要推测；不要提取一次性请求、寒暄、模型指令、密钥、密码或令牌。',

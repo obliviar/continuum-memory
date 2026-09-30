@@ -20,6 +20,7 @@ export interface GraphAdmissionDecision {
 export function reviewGraphAdmission(run: GraphExtractionRun, sourceFactId: string,
   choices: GraphAdmissionChoices, identities: Readonly<Record<string, string>>): GraphAdmissionDecision {
   const source = run.factCandidates.find(fact => fact.id === sourceFactId)
+    ?? run.assertionCandidates?.find(assertion => assertion.id === sourceFactId)
   if (!source)
     throw new Error('Reviewed graph fact is absent from the exact source')
   if (run.status !== 'complete' || createHash('sha256').update(run.sourceText).digest('hex') !== run.sourceRevision

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
 import { graphReviewIpcFields, graphReviewTimeError } from '../../shared/graph-review-ipc'
+import type { GraphOpenAssertionRecord } from '@continuum-memory/memory'
+import GraphOpenAssertions from './components/GraphOpenAssertions.vue'
 
 const { ipcRenderer } = (window as any).require('electron')
 
@@ -271,7 +273,8 @@ const memoryStoragePath = ref('')
 const memoryItems = ref<MemoryItem[]>([])
 const memoryReviewItems = ref<MemoryReviewItem[]>([])
 const graphReviewItems = ref<GraphReviewItem[]>([])
-const graphL1View = ref<{ manifestId: string; bundleId: string; claims: number; information: number; argumentEdges: number } | null>(null)
+const graphL1View = ref<{ manifestId: string; bundleId: string; claims: number; information: number; openAssertions: number; argumentEdges: number } | null>(null)
+const graphOpenAssertionItems = ref<GraphOpenAssertionRecord[]>([])
 const graphInformationItems = ref<Array<{ id: string; text: string; recordedAt: number; sourceId: string }>>([])
 const graphExtractionStatus = ref<{ enabled: boolean; modelReady: boolean; error: string | null; runs: number;
   factCandidates: number; sourcesWithoutFacts: number; pendingReviews: number; claims: number } | null>(null)
@@ -597,6 +600,7 @@ async function refreshMemoryList() {
     graphReviewItems.value = Array.isArray(result.graphReviewItems) ? result.graphReviewItems : []
     graphL1View.value = result.graphL1View ?? null
     graphInformationItems.value = Array.isArray(result.graphInformationItems) ? result.graphInformationItems : []
+    graphOpenAssertionItems.value = Array.isArray(result.graphOpenAssertionItems) ? result.graphOpenAssertionItems : []
     graphExtractionStatus.value = result.graphExtraction ?? null
     graphRelationReviewItems.value = Array.isArray(result.graphRelationReviewItems) ? result.graphRelationReviewItems : []
     graphL2Candidates.value = Array.isArray(result.graphL2Candidates) ? result.graphL2Candidates : []
@@ -1622,12 +1626,12 @@ async function doReset() {
         </div>
 
         <div v-if="memoryStoragePath" class="memory-path" :title="memoryStoragePath">{{ memoryStoragePath }}</div>
-        <div v-if="graphL1View" class="field-hint" :title="graphL1View.manifestId">图视图已就绪：{{ graphL1View.information }} 条原文信息节点（未断言）、{{ graphL1View.claims }} 条已审核 L1 Claim、{{ graphL1View.argumentEdges }} 条论元边</div>
+        <div v-if="graphL1View" class="field-hint" :title="graphL1View.manifestId">图视图已就绪：{{ graphL1View.information }} 条原文信息节点（未断言）、{{ graphL1View.openAssertions ?? 0 }} 条已确认开放断言、{{ graphL1View.claims }} 条已审核 L1 Claim、{{ graphL1View.argumentEdges }} 条图连接</div>
         <details v-if="graphInformationItems.length" class="field-hint">
           <summary>查看最近入图的原文信息（{{ graphInformationItems.length }} 条；仅来源记录，不代表事实已审核）</summary>
           <div v-for="item in graphInformationItems" :key="item.id" :title="item.sourceId">{{ item.text }}</div>
         </details>
-        <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条事实候选、{{ graphExtractionStatus.pendingReviews }} 条待审、{{ graphExtractionStatus.claims }} 条 L1 Claim</div>
+        <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条关系/事件候选、{{ graphExtractionStatus.pendingReviews }} 条待审、{{ graphExtractionStatus.claims }} 条规范 L1 Claim</div>
         <div v-if="graphExtractionStatus?.sourcesWithoutFacts" class="field-hint">
           {{ graphExtractionStatus.sourcesWithoutFacts }} 条来源尚未提取出可审核的关系；实体或字段提取成功不代表已形成图事实。
           <button class="secondary-btn" :disabled="memoryMutating || !graphExtractionStatus.enabled || !graphExtractionStatus.modelReady" @click="reextractEmptyGraphSources">重新提取无事实记录（每次最多 5 条）</button>
@@ -1641,7 +1645,10 @@ async function doReset() {
           <p v-if="graphDiagnosticMessage">{{ graphDiagnosticMessage }}</p>
         </div>
 
-        <div class="field-hint">原文信息节点不受谓词 schema 限制，但仅供本地查看，尚不作为已审核事实注入回答。启用实验图模式后，直接问题读取已审核 L1；受支持的关系问题仅遍历已审核、可检索的 L2 关系。候选和 NLI 分数不会自动进入回答。</div>
+        <GraphOpenAssertions :ready="!!graphL1View" :busy="memoryMutating" :items="graphOpenAssertionItems"
+          :sources="graphInformationItems" @refresh="refreshMemoryList" @busy="memoryMutating = $event" />
+
+        <div class="field-hint">原文信息与已确认开放断言支持本地查看和关联搜索。规范 L1 Claim 和已发布 L2 关系仍按原有图模式参与聊天召回；开放断言不会自动变成推理结论或发送给聊天模型。</div>
 
         <section class="memory-settings-panel">
           <div class="memory-settings-title">

@@ -4,6 +4,7 @@ import {
   createLocalUieFromEnvironment,
   createUieRuleFallbackExtractor,
   localUieScriptPath,
+  parseUieExtractionTargets,
   type UieExtraction,
 } from './local-uie'
 
@@ -19,6 +20,13 @@ const extraction: UieExtraction = {
 const rule = { content: '规则事实', metadata: { kind: 'identity' } }
 
 describe('shared UIE with rules fallback', () => {
+  it('accepts new domain extraction targets and rejects malformed or unbounded schema input', () => {
+    expect(parseUieExtractionTargets('样品→存放位置、检测结果；设备->故障；芯片'))
+      .toEqual([{ 样品: ['存放位置', '检测结果'] }, { 设备: ['故障'] }, '芯片'])
+    for (const invalid of ['', '设备→', '→故障', '设备→故障→原因', 'x'.repeat(101)])
+      expect(() => parseUieExtractionTargets(invalid)).toThrow()
+    expect(() => parseUieExtractionTargets(Array.from({ length: 65 }, (_, i) => `类型${i}`).join('；'))).toThrow()
+  })
   it('calls UIE and keeps its candidates review-only alongside rules', async () => {
     const onGraphExtraction = vi.fn()
     const extractor = createUieRuleFallbackExtractor({

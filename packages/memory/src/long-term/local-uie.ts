@@ -8,6 +8,7 @@ import type { GraphExtractionRun } from './graph-extraction-result'
 import { extractMemoryCandidates, inferMemoryPrivacy, isSafeMemoryContent } from './memory-extractor'
 import type { MemoryCandidate, MemoryExtractor } from './memory-extractor'
 import { personalUieRelations } from './uie-personal-relations'
+import { extractLocalOpenAssertions } from './open-assertion-extractor'
 
 const ENTITY_LABELS = new Set([
   '人物', '地点', '组织机构', '项目', '企业', '影视作品', '图书作品',
@@ -16,6 +17,37 @@ const ENTITY_LABELS = new Set([
 const FIELD_LABELS = new Set(['姓名', '职业', '所在地', '喜好', '当前项目', '爱好', '喜欢', '课程', '上课地点'])
 const MAX_OUTPUT_BYTES = 2_000_000
 const EXTRACTOR_VERSION = 'local-uie-base-v1'
+
+export type UieSchema = (string | { [entityLabel: string]: string[] })[]
+
+export function parseUieExtractionTargets(input: string): UieSchema {
+  if (typeof input !== 'string' || !input.trim() || input.length > 2000)
+    throw new Error('请输入抽取目标，例如：样品→存放位置；设备→故障。')
+  const schema = input.split(/[；;\n]/u).map(part => part.trim()).filter(Boolean).map(part => {
+    const [label, ...relations] = part.split(/→|->/u).map(value => value.trim())
+    if (relations.length > 1) throw new Error('每个抽取目标只能包含一个箭头。')
+    return relations.length ? { [label!]: relations[0]!.split(/[、,，]/u).map(value => value.trim()).filter(Boolean) } : label!
+  })
+  validateUieSchema(schema)
+  return schema
+}
+
+function validateUieSchema(schema: UieSchema): void {
+  if (!Array.isArray(schema) || !schema.length || schema.length > 64) throw new Error('抽取目标数量必须为 1–64。')
+  let count = 0
+  for (const target of schema) {
+    let labels: unknown[]
+    if (typeof target === 'string') labels = [target]
+    else if (target && typeof target === 'object' && Object.keys(target).length === 1) {
+      const [label, children] = Object.entries(target)[0]!
+      if (!Array.isArray(children) || !children.length || children.length > 32) throw new Error('每类关系目标必须为 1–32 个。')
+      labels = [label, ...children]
+    } else throw new Error('抽取目标格式无效。')
+    if (labels.some(label => typeof label !== 'string' || !label.trim() || label.length > 100)) throw new Error('抽取目标名称必须为 1–100 字。')
+    count += labels.length
+  }
+  if (count > 128) throw new Error('抽取目标总数不得超过 128。')
+}
 
 export interface UieMention {
   label: string
@@ -40,6 +72,7 @@ export interface UieExtraction {
   entities: UieMention[]
   fields: UieMention[]
   relations: UieRelation[]
+  schema?: UieSchema
 }
 
 export interface LocalUieOptions {
@@ -49,6 +82,7 @@ export interface LocalUieOptions {
   modelPath?: string
   scriptPath: string
   timeoutMs?: number
+  schema?: UieSchema
 }
 
 /** The source-tree bridge is shared by CLI, server and MCP; desktop packages it as an extra resource. */
@@ -80,8 +114,10 @@ export function createUieRuleFallbackExtractor(options: UieRuleFallbackOptions):
   const rules = options.rules ?? extractMemoryCandidates
   return async turn => {
     const local = await rules(turn)
+    let extracted = false
     try {
       const extraction = await options.uie.extract(turn.userMessage)
+      extracted = true
       if (options.onGraphExtraction) {
         const sourceIds = turn.metadata?.sourceMessageIds
         const sourceId = Array.isArray(sourceIds) && typeof sourceIds[0] === 'string'
@@ -95,6 +131,16 @@ export function createUieRuleFallbackExtractor(options: UieRuleFallbackOptions):
     catch (error) {
       try { options.onError?.(error) }
       catch { /* Logging must not replace the rules fallback. */ }
+      if (!extracted && options.onGraphExtraction) {
+        const discovery = extractLocalOpenAssertions(turn.userMessage)
+        const sourceIds = turn.metadata?.sourceMessageIds
+        const sourceId = Array.isArray(sourceIds) && typeof sourceIds[0] === 'string'
+          ? sourceIds[0] : String(turn.metadata?.memoryCaptureId ?? 'unknown-source')
+        try {
+          await options.onGraphExtraction(turn, createGraphExtractionRun({ sourceId, sourceText: turn.userMessage,
+            modelId: 'local-open-patterns-v1', rawOutput: { graph: { ...discovery, facts: [] } } }))
+        } catch { /* Source capture and stable rule memories survive a graph storage failure. */ }
+      }
       return local
     }
   }
@@ -128,7 +174,7 @@ export function createLocalUieExtractor(options: LocalUieOptions) {
     idleTimer.unref()
   }
 
-  function runPython(text: string): Promise<unknown> {
+  function runPython(text: string, schema?: UieSchema): Promise<unknown> {
     if (disposed) return Promise.reject(new Error('Local UIE-base extractor is closed'))
     return new Promise((resolve, reject) => {
       if (idleTimer) clearTimeout(idleTimer)
@@ -192,23 +238,25 @@ export function createLocalUieExtractor(options: LocalUieOptions) {
       child.stderr.on('data', onStderr)
       child.on('error', onError)
       child.on('close', onClose)
-      try { child.stdin.write(`${JSON.stringify({ text })}\n`, error => { if (error) finish(error) }) }
+      try { child.stdin.write(`${JSON.stringify({ text, ...(schema ? { schema } : {}) })}\n`, error => { if (error) finish(error) }) }
       catch (error) { finish(error instanceof Error ? error : new Error(String(error))) }
     })
   }
 
   return {
     isReady: () => existsSync(options.pythonPath) && existsSync(options.scriptPath) && existsSync(modelWeights),
-    async extract(text: string): Promise<UieExtraction> {
+    async extract(text: string, schema: UieSchema | undefined = options.schema): Promise<UieExtraction> {
       if (disposed) throw new Error('Local UIE-base extractor is closed')
       if (!text.trim() || text.length > 4000)
         throw new Error('UIE input must contain 1–4000 characters')
+      if (schema !== undefined) validateUieSchema(schema)
+      const requestSchema = schema === undefined ? undefined : structuredClone(schema)
       if (!existsSync(options.pythonPath) || !existsSync(options.scriptPath) || !existsSync(modelWeights))
         throw new Error('Local UIE-base runtime or model is unavailable')
-      const task = pending.then(() => runPython(text))
+      const task = pending.then(() => runPython(text, requestSchema))
       pending = task.then(() => {}, () => {})
       const raw = await task
-      return parseUieOutput(text, raw)
+      return { ...parseUieOutput(text, raw), ...(requestSchema ? { schema: requestSchema } : {}) }
     },
     dispose: () => {
       if (disposed) return
@@ -239,7 +287,8 @@ export function parseUieOutput(source: string, raw: unknown): UieExtraction {
       if (!subject)
         continue
       const key = `${label}\u0000${subject.start}\u0000${subject.end}`
-      if (ENTITY_LABELS.has(label)) putBest(entities, key, subject)
+      // Unknown runtime schema labels remain type proposals instead of being discarded.
+      if (ENTITY_LABELS.has(label) || !FIELD_LABELS.has(label)) putBest(entities, key, subject)
       if (FIELD_LABELS.has(label)) putBest(fields, key, subject)
       const nested = asRecord(entry)?.relations
       if (!nested || typeof nested !== 'object' || Array.isArray(nested))
@@ -268,6 +317,7 @@ export function parseUieOutput(source: string, raw: unknown): UieExtraction {
 
 /** Preserve the untouched UIE payload, then convert code-point offsets for graph review. */
 export function uieGraphExtractionRun(sourceId: string, sourceText: string, extraction: UieExtraction): GraphExtractionRun {
+  const discovery = extractLocalOpenAssertions(sourceText)
   const personalRelations = personalUieRelations(sourceText, extraction.fields)
   const relations = [...extraction.relations, ...personalRelations]
   const spans = new Map<string, UieMention>()
@@ -311,8 +361,8 @@ export function uieGraphExtractionRun(sourceId: string, sourceText: string, extr
       speaker: { value: null, resolution: 'unresolved' } },
   }))
   return createGraphExtractionRun({ sourceId, sourceText, modelId: extraction.model,
-    rawOutput: { graph: { entities, facts }, uieRawOutput: extraction.rawOutput,
-      adapterVersion: 'uie-personal-relations-v1' } })
+    rawOutput: { graph: { entities: [...entities, ...discovery.entities], facts, assertions: discovery.assertions }, uieRawOutput: extraction.rawOutput,
+      extractionSchema: extraction.schema ?? null, adapterVersion: 'uie-open-assertions-v1' } })
 }
 
 function entityType(label: string): string {

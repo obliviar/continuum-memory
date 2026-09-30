@@ -50,6 +50,10 @@ import {
   createGraphL1Store,
   createGraphL1Writer,
   createGraphSemanticRepository,
+  projectOpenAssertions,
+  needsOpenFactRepresentation,
+  searchOpenAssertions,
+  parseUieExtractionTargets,
   createGraphL1ProjectionRepository,
   reviewGraphAdmission,
   createGraphRelationTaskQueue,
@@ -832,7 +836,10 @@ async function saveGraphExtraction(run: GraphExtractionRun): Promise<void> {
       scope: localMemoryScope,
     })
     graphNormalizationStore.appendResult(normalized)
+    const registry = createGraphPredicateRegistry()
+    const openCandidateIds = new Set(run.factCandidates.filter(fact => needsOpenFactRepresentation(run, fact, registry)).map(fact => fact.id))
     for (const fact of normalized.facts) {
+      if (openCandidateIds.has(fact.sourceFactId)) continue
       const evidence = run.factCandidates.find(item => item.id === fact.sourceFactId)
       if (!evidence) continue
       const privacy = inferMemoryPrivacy(run.sourceText)
@@ -843,6 +850,7 @@ async function saveGraphExtraction(run: GraphExtractionRun): Promise<void> {
         graphL1Store?.recordReview(review)
     }
   }
+  syncGraphSemantic()
 }
 
 function createConfiguredMemoryExtractor(): MemoryExtractor {
@@ -859,7 +867,7 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
     onGraphExtraction: async (_turn, run) => {
       if (captureSettings.graphExtractionEnabled || captureSettings.extractionMode === 'uie')
         await saveGraphExtraction(run)
-      graphExtractionError = ''
+      if (run.modelId === 'uie-base') graphExtractionError = ''
     },
     onError: error => {
       graphExtractionError = errorMessage(error)
@@ -1209,12 +1217,12 @@ function initializeMemory(): void {
         protectKey: key => safeStorage.encryptString(key.toString('base64')),
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
       })
-      graphSemanticRepository = createGraphSemanticRepository(graphSemanticPersistence, v4Repository, graphCaptureRepository)
+      graphSemanticRepository = createGraphSemanticRepository(graphSemanticPersistence, v4Repository, graphCaptureRepository, graphExtractionStore)
       graphL1ProjectionRepository = createGraphL1ProjectionRepository(createEncryptedFilePersistence({
         encryptedPath: graphL1ProjectionStoragePath, keyPath: graphL1ProjectionKeyPath,
         protectKey: key => safeStorage.encryptString(key.toString('base64')),
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
-      }), graphSemanticRepository, v4Repository, graphL1Store!, graphCaptureRepository)
+      }), graphSemanticRepository, v4Repository, graphL1Store!, graphCaptureRepository, graphExtractionStore)
       const nliRevision = config.nliModelPath ? basename(config.nliModelPath) : 'unavailable'
       graphNliJudge = createLocalErlangshenNli({
         pythonPath: config.nliPythonPath,
@@ -2119,7 +2127,15 @@ function setupIPC() {
     ocr: { progress: imageMemoryProgress, cachePath: imageMemory.cachePath },
   }))
 
-  ipcMain.handle('memory:list', async (_event, limit = 200) => ({
+  ipcMain.handle('memory:list', async (_event, limit = 200) => {
+    const openAssertions = graphCaptureRepository && graphExtractionStore
+      ? projectOpenAssertions(graphCaptureRepository.snapshot(), graphExtractionStore, localMemoryScope) : []
+    const openCandidateKeys = new Set(openAssertions.map(item => `${item.extraction.runId}\0${item.extraction.candidateId}`))
+    const registry = createGraphPredicateRegistry()
+    for (const run of graphExtractionStore?.list() ?? [])
+      for (const fact of run.factCandidates)
+        if (needsOpenFactRepresentation(run, fact, registry)) openCandidateKeys.add(`${run.id}\0${fact.id}`)
+    return ({
     capture: memory?.captureStatus(),
     ok: true,
     enabled: !!memory,
@@ -2183,24 +2199,31 @@ function setupIPC() {
       const view = graphL1ProjectionRepository?.snapshot()
       return view ? { manifestId: view.manifest.manifestId, bundleId: view.manifest.sourceBundleId,
         claims: view.semanticBundle.claims.length, information: view.semanticBundle.information?.length ?? 0,
+        openAssertions: view.semanticBundle.openAssertions?.filter(item => item.review.status === 'accepted').length ?? 0,
         argumentEdges: view.edges.length } : null
     })(),
     graphInformationItems: (graphL1ProjectionRepository?.snapshot()?.semanticBundle.information ?? [])
       .slice().sort((a, b) => b.recordedAt - a.recordedAt).slice(0, 20)
       .map(item => ({ id: item.ref.id, text: item.content.slice(0, 500), recordedAt: item.recordedAt,
         sourceId: item.source.captureId })),
+    graphOpenAssertionItems: openAssertions.filter(item => item.review.status !== 'rejected')
+      .sort((a, b) => Number(a.review.status === 'accepted') - Number(b.review.status === 'accepted')).slice(0, Number(limit)),
     graphExtraction: {
       enabled: !!graphExtractionStore && (memorySettings.extractionMode === 'uie'
         || memorySettings.graphExtractionEnabled),
       modelReady: localUie.isReady(),
       error: graphExtractionError || null,
       runs: graphExtractionStore?.list().length ?? 0,
-      factCandidates: graphExtractionStore?.list().reduce((count, run) => count + run.factCandidates.length, 0) ?? 0,
+      factCandidates: graphExtractionStore?.list().reduce((count, run) => count + run.factCandidates.length + (run.assertionCandidates?.length ?? 0), 0) ?? 0,
       sourcesWithoutFacts: graphSourcesWithoutFactCandidates(graphExtractionStore?.list() ?? []).length,
-      pendingReviews: graphL1Store?.reviews().filter(item => item.status === 'pending').length ?? 0,
+      pendingReviews: (graphL1Store?.reviews().filter(item => item.status === 'pending'
+        && !openCandidateKeys.has(`${item.runId}\0${item.sourceFactId}`)).length ?? 0)
+        + openAssertions.filter(item => item.review.status === 'candidate').length,
       claims: graphL1Store?.claims().length ?? 0,
     },
-    graphReviewItems: graphL1Store?.reviews().filter(item => item.status === 'pending').slice(0, Number(limit)).map((review) => {
+    graphReviewItems: graphL1Store?.reviews().filter(item => item.status === 'pending'
+      && !openCandidateKeys.has(`${item.runId}\0${item.sourceFactId}`))
+      .slice(0, Number(limit)).map((review) => {
       const run = graphExtractionStore?.list().find(item => item.id === review.runId)
       const source = run?.factCandidates.find(item => item.id === review.sourceFactId)
       const normalized = graphNormalizationStore?.results().find(item => item.runId === review.runId)
@@ -2268,7 +2291,8 @@ function setupIPC() {
         })
     })(),
     pendingCaptureSegments: memory?.pendingCaptureCount() ?? 0,
-  }))
+    })
+  })
 
   ipcMain.handle('memory:candidate-review', async (
     _event,
@@ -2350,6 +2374,61 @@ function setupIPC() {
       return task?.state === 'published' ? { ok: true, published: true } : { ok: true, published: false }
     }
     catch (error) { return { ok: false, error: errorMessage(error) } }
+  })
+
+  ipcMain.handle('memory:graph-open-review', async (_event,
+    input: { id?: unknown; sourceRevision?: unknown; outcome?: unknown; reason?: unknown }) => {
+    if (!graphCaptureRepository || !graphExtractionStore || !graphSemanticRepository || !graphL1Store || !memoryV4Repository)
+      return { ok: false, error: '图存储不可用。' }
+    if (typeof input?.id !== 'string' || typeof input.reason !== 'string' || !input.reason.trim()
+      || input.reason.length > 500 || !['accepted', 'rejected'].includes(String(input.outcome)))
+      return { ok: false, error: '请填写有效的审核决定与原因。' }
+    const assertion = projectOpenAssertions(graphCaptureRepository.snapshot(), graphExtractionStore, localMemoryScope)
+      .find(item => item.ref.id === input.id)
+    if (!assertion || assertion.review.status === 'rejected'
+      || (assertion.review.status === 'accepted' && input.outcome !== 'rejected') || assertion.extraction.sourceRevision !== input.sourceRevision)
+      return { ok: false, error: '候选或来源版本已变化，请刷新。' }
+    try {
+      graphExtractionStore.recordOpenReview({ assertionId: assertion.ref.id, sourceId: assertion.extraction.sourceId,
+        sourceRevision: assertion.extraction.sourceRevision,
+        status: input.outcome as 'accepted' | 'rejected', reason: input.reason.trim(), reviewedAt: Date.now() })
+      invalidateGraphL1Projection()
+      const synced = await graphSemanticRepository.syncFromClaims(graphL1Store, memoryV4Repository, createGraphPredicateRegistry(), localMemoryScope)
+      if (!synced.ok || !graphL1ProjectionRepository?.sync()) throw new Error('图视图尚未就绪，请刷新后重试。')
+      syncGraphRelationTasks()
+      return { ok: true }
+    } catch (error) { return { ok: false, error: errorMessage(error) } }
+  })
+
+  ipcMain.handle('memory:graph-open-search', async (_event, input: { query?: unknown; maximumDepth?: unknown }) => {
+    if (typeof input?.query !== 'string' || !input.query.trim() || input.query.length > 500)
+      return { ok: false, error: '请输入查询内容。' }
+    const view = graphL1ProjectionRepository?.snapshot()
+    if (!view) return { ok: false, error: '图视图尚未就绪，请刷新。' }
+    const needle = input.query.normalize('NFKC').toLocaleLowerCase().replace(/\s+/gu, '')
+    return { ok: true, items: searchOpenAssertions(view.semanticBundle, input.query,
+      { scope: localMemoryScope, maximumDepth: typeof input.maximumDepth === 'number' ? input.maximumDepth : 1, limit: 20 }),
+      sources: (view.semanticBundle.information ?? []).filter(item => item.content.normalize('NFKC').toLocaleLowerCase()
+        .replace(/\s+/gu, '').includes(needle)).slice(0, 20).map(item => ({ id: item.ref.id, text: item.content })) }
+  })
+
+  ipcMain.handle('memory:graph-custom-extract', async (_event, input: { sourceId?: unknown; targets?: unknown }) => {
+    if (!graphCaptureRepository || !graphExtractionStore || !localUie.isReady()) return { ok: false, error: '本地 UIE 或图存储不可用。' }
+    if (typeof input?.sourceId !== 'string' || typeof input.targets !== 'string' || !input.targets.trim() || input.targets.length > 2000)
+      return { ok: false, error: '请输入抽取目标，例如：样品→存放位置；设备→故障。' }
+    const source = graphCaptureRepository.snapshot().sources.find(item => item.id === input.sourceId && item.status === 'active')
+    if (!source?.turn || source.scope.ownerId !== localMemoryScope.ownerId || source.scope.agentId !== localMemoryScope.agentId)
+      return { ok: false, error: '原文来源不可用。' }
+    const store = graphExtractionStore
+    try {
+      const schema = parseUieExtractionTargets(input.targets)
+      const extraction = await localUie.extract(source.turn.userMessage, schema)
+      if (store !== graphExtractionStore || !graphCaptureRepository.snapshot().sources.some(item => item.id === source.id
+        && item.status === 'active' && item.revision === source.revision && item.contentHash === source.contentHash))
+        throw new Error('提取期间来源已变化，请刷新。')
+      await saveGraphExtraction(uieGraphExtractionRun(source.messageIds[0] ?? source.id, source.turn.userMessage, extraction))
+      return { ok: true }
+    } catch (error) { return { ok: false, error: errorMessage(error) } }
   })
 
   ipcMain.handle('memory:graph-relation-review', async (_event,

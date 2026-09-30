@@ -10,8 +10,8 @@ export function graphSourcesWithoutFactCandidates(runs: readonly GraphExtraction
   const withFacts = new Set<string>()
   for (const run of runs) {
     const key = `${run.sourceId}\0${run.sourceRevision}`
-    if (run.factCandidates.length) withFacts.add(key)
-    if (run.modelId === 'uie-base') {
+    if (run.factCandidates.length || run.assertionCandidates?.length) withFacts.add(key)
+    if (run.modelId === 'uie-base' || run.modelId === 'local-open-patterns-v1') {
       // Move retried sources to the end so an empty first batch cannot starve later sources.
       latest.delete(key)
       latest.set(key, run)

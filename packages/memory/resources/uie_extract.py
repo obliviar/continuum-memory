@@ -44,6 +44,27 @@ def main():
         text = request.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 4000:
             raise ValueError("text must contain 1–4000 characters")
+        schema = request.get("schema", SCHEMA)
+        if not isinstance(schema, list) or not 1 <= len(schema) <= 64:
+            raise ValueError("schema must contain 1–64 extraction targets")
+        count = 0
+        for target in schema:
+            if isinstance(target, str):
+                labels = [target]
+            elif isinstance(target, dict) and len(target) == 1:
+                label, children = next(iter(target.items()))
+                if not isinstance(children, list) or not 1 <= len(children) <= 32:
+                    raise ValueError("relation targets must contain 1–32 labels")
+                labels = [label] + children
+            else:
+                raise ValueError("invalid extraction target")
+            if any(not isinstance(label, str) or not label.strip() or len(label) > 100 for label in labels):
+                raise ValueError("invalid extraction label")
+            count += len(labels)
+        if count > 128:
+            raise ValueError("too many extraction labels")
+        # Reset on every request so a custom schema cannot affect the next default request.
+        extractor.set_schema(schema)
         result = extractor(text)
         if not isinstance(result, list) or len(result) != 1:
             raise ValueError("UIE returned an unexpected number of results")

@@ -290,3 +290,7 @@ export type {
 // stable V3 port until migration, rollback and quality gates pass.
 export * from './v4'
 export * from './graph-core'
+export type { OpenAssertionCandidate, OpenAssertionReview } from './long-term/graph-extraction-result'
+export { extractLocalOpenAssertions } from './long-term/open-assertion-extractor'
+export { parseUieExtractionTargets } from './long-term/local-uie'
+export type { UieSchema } from './long-term/local-uie'

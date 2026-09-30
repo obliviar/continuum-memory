@@ -41,6 +41,27 @@ export interface FactCandidate {
   context: FactContext
 }
 
+/** A source assertion can have any relation label and any number of participants. */
+export interface OpenAssertionCandidate {
+  id: string
+  relationText: string
+  relationSpan?: SourceSpan
+  participants: { mentionId: string; role: string }[]
+  evidenceSpan: SourceSpan
+  modelScore: number
+  context: FactContext
+}
+
+export interface OpenAssertionReview {
+  assertionId: string
+  sourceId: string
+  sourceRevision: string
+  status: 'accepted' | 'rejected'
+  reason: string
+  reviewedAt: number
+  context?: FactContext
+}
+
 export interface GraphExtractionRun {
   id: string
   sourceId: string
@@ -56,6 +77,8 @@ export interface GraphExtractionRun {
   rawOutput: unknown
   entityMentions: EntityMention[]
   factCandidates: FactCandidate[]
+  /** Optional for extraction snapshots written before open assertions. */
+  assertionCandidates?: OpenAssertionCandidate[]
   createdAt: number
 }
 
@@ -73,16 +96,21 @@ export function createGraphExtractionRun(input: GraphExtractionInput): GraphExtr
   const graph = object(raw?.graph) ?? raw
   const rawEntities = Array.isArray(graph?.entities) ? graph.entities : []
   const rawFacts = Array.isArray(graph?.facts) ? graph.facts : []
+  const rawAssertions = Array.isArray(graph?.assertions) ? graph.assertions : []
   const unprocessedEntityCount = Math.max(0, rawEntities.length - MAX_PARSED_ITEMS_PER_KIND)
   const unprocessedFactCount = Math.max(0, rawFacts.length - MAX_PARSED_ITEMS_PER_KIND)
   const parsedEntities = rawEntities.slice(0, MAX_PARSED_ITEMS_PER_KIND)
   const parsedFacts = rawFacts.slice(0, MAX_PARSED_ITEMS_PER_KIND)
   const entityMentions = parsedEntities.map(value => parseEntity(value, input.sourceText)).filter(isPresent)
   const entityIds = new Set(entityMentions.map(mention => mention.id))
+  const entityById = new Map(entityMentions.map(mention => [mention.id, mention]))
   const factCandidates = parsedFacts.map(value => parseFact(value, input.sourceText, entityIds)).filter(isPresent)
+  const assertionCandidates = rawAssertions.slice(0, MAX_PARSED_ITEMS_PER_KIND)
+    .map(value => parseAssertion(value, input.sourceText, entityById)).filter(isPresent)
   const invalidCount = parsedEntities.length - entityMentions.length + parsedFacts.length - factCandidates.length
+    + Math.min(rawAssertions.length, MAX_PARSED_ITEMS_PER_KIND) - assertionCandidates.length
   const missingGraph = !graph || !Array.isArray(graph.entities) || !Array.isArray(graph.facts)
-  const budgetExceeded = unprocessedEntityCount > 0 || unprocessedFactCount > 0
+  const budgetExceeded = unprocessedEntityCount > 0 || unprocessedFactCount > 0 || rawAssertions.length > MAX_PARSED_ITEMS_PER_KIND
   return {
     id: randomUUID(),
     sourceId: input.sourceId,
@@ -100,6 +128,7 @@ export function createGraphExtractionRun(input: GraphExtractionInput): GraphExtr
     rawOutput: input.rawOutput,
     entityMentions,
     factCandidates,
+    assertionCandidates,
     createdAt: Date.now(),
   }
 }
@@ -114,31 +143,50 @@ export interface GraphExtractionResultStore {
   list: () => GraphExtractionRun[]
   removeSources: (sourceIds: string[]) => void
   clear: () => void
+  openReviews: () => OpenAssertionReview[]
+  recordOpenReview: (review: OpenAssertionReview) => void
 }
 
 /** Caller supplies encrypted persistence because source text can be private. */
 export function createGraphExtractionResultStore(persistence: GraphExtractionPersistence): GraphExtractionResultStore {
   const payload = persistence.load()
-  const parsed = payload ? JSON.parse(payload) as { version?: unknown; runs?: unknown } : undefined
-  if (parsed && (parsed.version !== 1 || !Array.isArray(parsed.runs)))
+  const parsed = payload ? JSON.parse(payload) as { version?: unknown; runs?: unknown; openReviews?: OpenAssertionReview[] } : undefined
+  if (parsed && (parsed.version !== 1 || !Array.isArray(parsed.runs)
+    || (parsed.openReviews !== undefined && !Array.isArray(parsed.openReviews))))
     throw new Error('Invalid graph extraction result store')
   const runs = (parsed?.runs ?? []) as GraphExtractionRun[]
+  let reviews = parsed?.openReviews ?? []
+  const save = (nextRuns: GraphExtractionRun[], nextReviews: OpenAssertionReview[]) =>
+    persistence.save(JSON.stringify({ version: 1, runs: nextRuns, openReviews: nextReviews }))
   return {
     append(run) {
       const next = [...runs, run]
-      persistence.save(JSON.stringify({ version: 1, runs: next }))
-      runs.push(run)
+      save(next, reviews)
+      runs.push(structuredClone(run))
     },
-    list: () => [...runs],
+    list: () => structuredClone(runs),
+    openReviews: () => structuredClone(reviews),
+    recordOpenReview(review) {
+      if (!review.assertionId || !review.reason.trim() || !['accepted', 'rejected'].includes(review.status)
+        || !Number.isSafeInteger(review.reviewedAt) || review.reviewedAt < 1
+        || !runs.some(run => run.sourceId === review.sourceId && run.sourceRevision === review.sourceRevision))
+        throw new Error('Open assertion review needs an exact retained extraction source')
+      const next = [...reviews.filter(item => item.assertionId !== review.assertionId), structuredClone(review)]
+      save(runs, next)
+      reviews = next
+    },
     removeSources(sourceIds) {
       const removed = new Set(sourceIds)
       const next = runs.filter(run => !removed.has(run.sourceId))
-      persistence.save(JSON.stringify({ version: 1, runs: next }))
+      const nextReviews = reviews.filter(review => !removed.has(review.sourceId))
+      save(next, nextReviews)
       runs.splice(0, runs.length, ...next)
+      reviews = nextReviews
     },
     clear() {
-      persistence.save(JSON.stringify({ version: 1, runs: [] }))
+      save([], [])
       runs.length = 0
+      reviews = []
     },
   }
 }
@@ -219,6 +267,34 @@ function parseFact(value: unknown, sourceText: string, entityIds: Set<string>): 
 }
 
 function isPresent<T>(value: T | undefined): value is T { return value !== undefined }
+
+function parseAssertion(value: unknown, sourceText: string, entities: Map<string, EntityMention>): OpenAssertionCandidate | undefined {
+  const raw = object(value)
+  const evidenceSpan = span(raw?.evidenceSpan, sourceText)
+  if (!raw || typeof raw.id !== 'string' || !raw.id || typeof raw.relationText !== 'string'
+    || !raw.relationText.trim() || raw.relationText.length > 200 || !evidenceSpan || !score(raw.modelScore)
+    || !Array.isArray(raw.participants) || raw.participants.length < 1 || raw.participants.length > 32) return undefined
+  const participants: OpenAssertionCandidate['participants'] = []
+  for (const item of raw.participants) {
+    const participant = object(item)
+    if (!participant || typeof participant.mentionId !== 'string' || !entities.has(participant.mentionId)
+      || typeof participant.role !== 'string' || !participant.role.trim() || participant.role.length > 100) return undefined
+    const mention = entities.get(participant.mentionId)!
+    if (mention.span.start < evidenceSpan.start || mention.span.end > evidenceSpan.end) return undefined
+    participants.push({ mentionId: participant.mentionId, role: participant.role })
+  }
+  const relationSpan = raw.relationSpan === undefined ? undefined : span(raw.relationSpan, sourceText)
+  if (raw.relationSpan !== undefined && (!relationSpan || sourceText.slice(relationSpan.start, relationSpan.end) !== raw.relationText
+    || relationSpan.start < evidenceSpan.start || relationSpan.end > evidenceSpan.end)) return undefined
+  const context = object(raw.context)
+  return { id: raw.id, relationText: raw.relationText, ...(relationSpan ? { relationSpan } : {}), participants,
+    evidenceSpan, modelScore: raw.modelScore, context: {
+      negation: contextValue(context?.negation, sourceText, (v): v is boolean => typeof v === 'boolean'),
+      condition: contextValue(context?.condition, sourceText, (v): v is string => typeof v === 'string'),
+      time: contextValue(context?.time, sourceText, (v): v is string => typeof v === 'string'),
+      speaker: contextValue(context?.speaker, sourceText, (v): v is string => typeof v === 'string'),
+    } }
+}
 
 export interface GraphWritePolicy {
   minimumModelScore: number

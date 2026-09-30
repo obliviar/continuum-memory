@@ -21,6 +21,7 @@ import type {
   MemorySharePolicy,
   NonEmptyReadonlyArray,
 } from '@continuum-memory/contracts'
+import type { GraphOpenAssertionRecord } from './open-assertion-types'
 
 /** Independent of the persisted V4 schema. No existing V4 payload is rewritten by these types. */
 export const MEMORY_GRAPH_SCHEMA_VERSION = 1 as const
@@ -214,6 +215,7 @@ export interface GraphSemanticBundle {
   readonly entities: readonly GraphEntityRecord[]
   /** Optional on disk for bundles written before source-grounded information nodes. */
   readonly information?: readonly GraphInformationRecord[]
+  readonly openAssertions?: readonly GraphOpenAssertionRecord[]
   readonly aliases: readonly GraphAliasDecision[]
   readonly predicates: readonly GraphPredicateSpec[]
   readonly contexts: readonly GraphContextRecord[]
@@ -239,11 +241,13 @@ export interface GraphProjectionManifest {
 
 export type GraphNavigationRef = GraphVersionRef<'navigation'>
 export type GraphSemanticNodeRef = GraphEntityRef | GraphInformationRef | GraphClaimRef | GraphStatementRef
-  | GraphRuleRef | GraphProofRef | GraphDerivedClaimRef
+  | GraphRuleRef | GraphProofRef | GraphDerivedClaimRef | GraphVersionRef<'open-assertion'> | GraphVersionRef<'mention'>
 export type GraphNodeRef = GraphSemanticNodeRef | GraphNavigationRef
 
 /** Proof dependence points FROM the proof TO its prerequisites, not independent entailment edges. */
 export type GraphSemanticEdge = { readonly id: string; readonly layer: 'semantic' } & (
+  | { readonly kind: 'open-participant'; readonly from: GraphVersionRef<'open-assertion'>; readonly to: GraphVersionRef<'mention'>; readonly role: string }
+  | { readonly kind: 'open-evidence'; readonly from: GraphVersionRef<'open-assertion'>; readonly to: GraphInformationRef }
   | { readonly kind: 'has-argument'; readonly from: GraphClaimRef | GraphDerivedClaimRef; readonly to: GraphEntityRef; readonly role: string }
   | { readonly kind: 'uses-premise'; readonly from: GraphProofRef; readonly to: GraphAnswerRef; readonly bodyPath: readonly number[] }
   | { readonly kind: 'uses-rule'; readonly from: GraphProofRef; readonly to: GraphRuleRef }

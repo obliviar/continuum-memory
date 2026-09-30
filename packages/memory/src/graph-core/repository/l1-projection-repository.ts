@@ -7,6 +7,8 @@ import { projectCapturedInformation } from './captured-information'
 import type { GraphProjectionSnapshot, GraphSemanticBundle, GraphSemanticEdge } from '../domain/types'
 import type { GraphSemanticRepository } from './semantic-repository'
 import { exactClaimAvailable } from './semantic-repository'
+import type { GraphExtractionResultStore } from '../../long-term/graph-extraction-result'
+import { projectOpenAssertions } from './open-assertions'
 
 export const GRAPH_L1_PROJECTION_VERSION = 'accepted-l1-projection-v1'
 
@@ -20,7 +22,7 @@ export interface GraphL1ProjectionRepository {
 
 export function createGraphL1ProjectionRepository(persistence: { load: () => string | undefined; save: (value: string) => void },
   semantic: GraphSemanticRepository, v4: MemoryV4Repository, l1?: GraphL1Store,
-  captures?: CaptureRepository): GraphL1ProjectionRepository {
+  captures?: CaptureRepository, extractions?: GraphExtractionResultStore): GraphL1ProjectionRepository {
   const raw = persistence.load()
   let current = raw ? JSON.parse(raw) as GraphProjectionSnapshot : undefined
   if (current && (current.manifest?.schemaVersion !== 1 || current.manifest.builderVersion !== GRAPH_L1_PROJECTION_VERSION
@@ -37,7 +39,7 @@ export function createGraphL1ProjectionRepository(persistence: { load: () => str
     const snapshot = v4.snapshot()
     try {
       const expected = buildProjection(bundle)
-      return sameLiveClaims(bundle, snapshot, l1) && sameLiveInformation(bundle, captures)
+      return sameLiveClaims(bundle, snapshot, l1) && sameLiveInformation(bundle, captures, extractions)
         && bundle.claims.every(claim => exactClaimAvailable(claim, snapshot))
         && fingerprint(bundle) === view.manifest.semanticFingerprint
         && JSON.stringify(bundle) === JSON.stringify(view.semanticBundle)
@@ -61,7 +63,7 @@ export function createGraphL1ProjectionRepository(persistence: { load: () => str
     sync() {
       const bundle = semantic.snapshot()
       if (!bundle || bundle.revisions.v4 !== v4.snapshot().revision
-        || !sameLiveClaims(bundle, v4.snapshot(), l1) || !sameLiveInformation(bundle, captures)
+        || !sameLiveClaims(bundle, v4.snapshot(), l1) || !sameLiveInformation(bundle, captures, extractions)
         || !bundle.claims.every(claim => exactClaimAvailable(claim, v4.snapshot())))
         return undefined
       if (eligible(current, bundle)) return structuredClone(current)
@@ -73,8 +75,10 @@ export function createGraphL1ProjectionRepository(persistence: { load: () => str
   }
 }
 
-function sameLiveInformation(bundle: GraphSemanticBundle, captures?: CaptureRepository): boolean {
-  return !captures || JSON.stringify(bundle.information ?? []) === JSON.stringify(projectCapturedInformation(captures.snapshot(), bundle.scope))
+function sameLiveInformation(bundle: GraphSemanticBundle, captures?: CaptureRepository, extractions?: GraphExtractionResultStore): boolean {
+  return (!captures || JSON.stringify(bundle.information ?? []) === JSON.stringify(projectCapturedInformation(captures.snapshot(), bundle.scope)))
+    && (!extractions || !!captures && JSON.stringify(bundle.openAssertions ?? [])
+      === JSON.stringify(projectOpenAssertions(captures.snapshot(), extractions, bundle.scope)))
 }
 
 function sameLiveClaims(bundle: GraphSemanticBundle,
@@ -91,6 +95,14 @@ function sameLiveClaims(bundle: GraphSemanticBundle,
 function buildProjection(bundle: GraphSemanticBundle): GraphProjectionSnapshot {
   const entities = new Set(bundle.entities.map(entity => `${entity.ref.id}\0${entity.ref.version}`))
   const edges: GraphSemanticEdge[] = []
+  for (const assertion of bundle.openAssertions ?? []) {
+    if (assertion.review.status !== 'accepted') continue
+    edges.push({ id: `open-evidence:${hash(assertion.ref)}`, layer: 'semantic', kind: 'open-evidence',
+      from: assertion.ref, to: { kind: 'information', id: `information:${assertion.source.captureId}`, version: assertion.source.revision } })
+    for (const participant of assertion.participants)
+      edges.push({ id: `open-participant:${hash([assertion.ref, participant.ref, participant.role])}`, layer: 'semantic',
+        kind: 'open-participant', from: assertion.ref, to: participant.ref, role: participant.role })
+  }
   for (const claim of bundle.claims) {
     for (const [role, term] of Object.entries(claim.atom.args)) {
       if (term.kind !== 'entity') continue

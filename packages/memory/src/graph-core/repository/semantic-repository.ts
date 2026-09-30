@@ -7,6 +7,8 @@ import type { GraphPredicateRegistry } from '../../long-term/graph-identity-norm
 import type { GraphClaimRecord, GraphEntityRecord, GraphGroundTerm, GraphSemanticBundle } from '../domain/types'
 import type { GraphSemanticWritePort } from '../ports/graph-ports'
 import { projectCapturedInformation } from './captured-information'
+import type { GraphExtractionResultStore } from '../../long-term/graph-extraction-result'
+import { projectOpenAssertions } from './open-assertions'
 
 export interface GraphSemanticPersistence {
   load: () => string | undefined
@@ -23,7 +25,7 @@ export interface GraphSemanticRepository extends GraphSemanticWritePort {
 
 /** CAS publication of immutable, complete bundles. The V4 repository remains the fact authority. */
 export function createGraphSemanticRepository(persistence: GraphSemanticPersistence,
-  v4: MemoryV4Repository, captures?: CaptureRepository): GraphSemanticRepository {
+  v4: MemoryV4Repository, captures?: CaptureRepository, extractions?: GraphExtractionResultStore): GraphSemanticRepository {
   const raw = persistence.load()
   let current = raw ? JSON.parse(raw) as GraphSemanticBundle : undefined
   if (current && (current.schemaVersion !== 1 || !current.bundleId || !Array.isArray(current.claims)))
@@ -39,7 +41,7 @@ export function createGraphSemanticRepository(persistence: GraphSemanticPersiste
     const previous = operations.get(request.operationId)
     if (previous && previous !== serialized)
       return failure('invalid-request', 'Graph operation ID reused with different content')
-    if (!validBundle(request.bundle, v4, captures))
+    if (!validBundle(request.bundle, v4, captures, extractions))
       return failure('source-unavailable', 'Graph Claim or source information lacks active exact evidence')
     writing = true
     try {
@@ -57,7 +59,7 @@ export function createGraphSemanticRepository(persistence: GraphSemanticPersiste
     publish,
     snapshot: () => current ? structuredClone(current) : undefined,
     async syncFromClaims(l1, repository, registry, scope) {
-      const next = buildBundle(l1, repository, registry, scope, current, captures)
+      const next = buildBundle(l1, repository, registry, scope, current, captures, extractions)
       if (current && sameContents(current, next))
         return { ok: true, value: { bundleId: current.bundleId } }
       return publish({ operationId: `graph-sync:${next.bundleId}`,
@@ -67,7 +69,8 @@ export function createGraphSemanticRepository(persistence: GraphSemanticPersiste
 }
 
 function buildBundle(l1: GraphL1Store, v4: MemoryV4Repository, registry: GraphPredicateRegistry,
-  scope: GraphSemanticBundle['scope'], previous?: GraphSemanticBundle, captures?: CaptureRepository): GraphSemanticBundle {
+  scope: GraphSemanticBundle['scope'], previous?: GraphSemanticBundle, captures?: CaptureRepository,
+  extractions?: GraphExtractionResultStore): GraphSemanticBundle {
   const snapshot = v4.snapshot()
   const claims = l1.claims().filter(claim => sameScope(claim.scope, scope) && exactClaimAvailable(claim, snapshot))
     .sort((a, b) => a.ref.id.localeCompare(b.ref.id)) as GraphClaimRecord[]
@@ -105,6 +108,7 @@ function buildBundle(l1: GraphL1Store, v4: MemoryV4Repository, registry: GraphPr
   const revisions = { v4: snapshot.revision, semantics: (previous?.revisions.semantics ?? 0) + 1,
     predicates: 1, rules: 0, aliases: 0 }
   const content = { scope, information: captures ? projectCapturedInformation(captures.snapshot(), scope) : [],
+    openAssertions: captures && extractions ? projectOpenAssertions(captures.snapshot(), extractions, scope) : [],
     entities: [...entities.values()].sort((a, b) => a.ref.id.localeCompare(b.ref.id)),
     aliases: [], predicates, contexts, claims, statements: [], rules: [] } as const
   const bundleId = `graph-semantic:${hash([content, revisions])}`
@@ -112,19 +116,22 @@ function buildBundle(l1: GraphL1Store, v4: MemoryV4Repository, registry: GraphPr
 }
 
 function sameContents(a: GraphSemanticBundle, b: GraphSemanticBundle): boolean {
-  return JSON.stringify([a.scope, a.information ?? [], a.entities, a.aliases, a.predicates, a.contexts, a.claims, a.statements, a.rules,
-    a.revisions.v4]) === JSON.stringify([b.scope, b.information ?? [], b.entities, b.aliases, b.predicates, b.contexts, b.claims,
+  return JSON.stringify([a.scope, a.information ?? [], a.openAssertions ?? [], a.entities, a.aliases, a.predicates, a.contexts, a.claims, a.statements, a.rules,
+    a.revisions.v4]) === JSON.stringify([b.scope, b.information ?? [], b.openAssertions ?? [], b.entities, b.aliases, b.predicates, b.contexts, b.claims,
     b.statements, b.rules, b.revisions.v4])
 }
 
-function validBundle(bundle: GraphSemanticBundle, v4: MemoryV4Repository, captures?: CaptureRepository): boolean {
+function validBundle(bundle: GraphSemanticBundle, v4: MemoryV4Repository, captures?: CaptureRepository,
+  extractions?: GraphExtractionResultStore): boolean {
   if (bundle.schemaVersion !== 1 || !bundle.bundleId || !bundle.scope.ownerId || !bundle.scope.agentId
     || !Array.isArray(bundle.claims) || !Array.isArray(bundle.contexts) || !Array.isArray(bundle.entities)
     || !Array.isArray(bundle.predicates) || !Array.isArray(bundle.aliases)
     || !Array.isArray(bundle.statements) || !Array.isArray(bundle.rules)
     || (captures
       ? JSON.stringify(bundle.information ?? []) !== JSON.stringify(projectCapturedInformation(captures.snapshot(), bundle.scope))
-      : (bundle.information?.length ?? 0) > 0)) return false
+      : (bundle.information?.length ?? 0) > 0)
+    || JSON.stringify(bundle.openAssertions ?? []) !== JSON.stringify(captures && extractions
+      ? projectOpenAssertions(captures.snapshot(), extractions, bundle.scope) : [])) return false
   const snapshot = v4.snapshot()
   if (bundle.revisions.v4 !== snapshot.revision) return false
   const contexts = new Set(bundle.contexts.map(record => `${record.ref.id}:${record.ref.version}`))

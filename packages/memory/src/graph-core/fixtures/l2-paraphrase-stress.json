@@ -1,0 +1,30 @@
+{
+  "version": "l2-fallback-stress-v1",
+  "corpus": "synthetic-not-human-reviewed; frozen before first run; includes changed outcomes and unseen targets",
+  "pairs": [
+    ["停电","电梯停用"],
+    ["电路故障","照明熄灭"],
+    ["水管破裂","办公室积水"],
+    ["持续降雨","户外演出延期"],
+    ["软件升级","服务暂停"],
+    ["网络故障","文件上传失败"],
+    ["教室维修","课程改为线上"],
+    ["车胎漏气","自行车无法骑行"]
+  ],
+  "cases": [
+    {"id":"stress-0","category":"paraphrase","query":"为什么坐不了电梯了","pair":0,"seed":1},
+    {"id":"stress-1","category":"paraphrase","query":"为什么照明设备不工作了","pair":1,"seed":3},
+    {"id":"stress-2","category":"paraphrase","query":"为什么办公室被水淹了","pair":2,"seed":5},
+    {"id":"stress-3","category":"paraphrase","query":"为什么演出挪到后面举办","pair":3,"seed":7},
+    {"id":"stress-4","category":"paraphrase","query":"为什么资料无法上传","pair":5,"seed":11},
+    {"id":"stress-5","category":"paraphrase","query":"为什么自行车骑不动了","pair":7,"seed":15},
+    {"id":"stress-6","category":"no-answer","query":"为什么手机无法充电","pair":null,"seed":null},
+    {"id":"stress-7","category":"no-answer","query":"为什么冰箱不制冷了","pair":null,"seed":null},
+    {"id":"stress-8","category":"no-answer","query":"为什么网络恢复正常","pair":null,"seed":null},
+    {"id":"stress-9","category":"no-answer","query":"为什么课程停课了","pair":null,"seed":null},
+    {"id":"stress-10","category":"no-answer","query":"为什么电梯恢复运行","pair":null,"seed":null},
+    {"id":"stress-11","category":"no-answer","query":"为什么文件上传成功","pair":null,"seed":null},
+    {"id":"stress-12","category":"no-answer","query":"为什么护照遗失","pair":null,"seed":null},
+    {"id":"stress-13","category":"no-answer","query":"为什么银行扣款失败","pair":null,"seed":null}
+  ]
+}

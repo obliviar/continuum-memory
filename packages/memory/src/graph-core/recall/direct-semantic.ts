@@ -15,7 +15,13 @@ export interface DirectSemanticOptions {
   timeoutMs?: number
 }
 interface Hit { id: string; score: number }
-interface SemanticResult { hits: Hit[]; scope: string[]; incomplete: boolean }
+export interface SemanticResult {
+  hits: Hit[]
+  /** Top two distinct facts BEFORE the admission threshold, for optional ambiguity checks. */
+  competition: Hit[]
+  scope: string[]
+  incomplete: boolean
+}
 
 function validVector(vector: number[] | undefined, dimensions: number): vector is number[] {
   return Array.isArray(vector) && vector.length === dimensions && vector.every(Number.isFinite)
@@ -29,8 +35,8 @@ export async function searchDirectSemantic(
   options: DirectSemanticOptions | undefined,
   remainingMs: number,
 ): Promise<SemanticResult> {
-  const result = (status: string, hits: Hit[] = [], incomplete = false, extra: string[] = []): SemanticResult =>
-    ({ hits, incomplete, scope: [`semantic:${status}`, ...extra] })
+  const result = (status: string, hits: Hit[] = [], incomplete = false, extra: string[] = [], competition: Hit[] = []): SemanticResult =>
+    ({ hits, competition, incomplete, scope: [`semantic:${status}`, ...extra] })
   if (!options) return result('disabled')
   if (!facts.length) return result('no-eligible-facts')
   const started = performance.now()
@@ -65,9 +71,10 @@ export async function searchDirectSemantic(
     if (embedded === timeout) return result('query-timeout', [], true, scope)
     if (!embedded || embedded.model !== options.model || !validVector(embedded.vector, options.dimensions))
       return result('query-unavailable', [], true, scope)
-    const hits = index.search(embedded.vector, { limit: facts.length, minScore: threshold })
+    const ranked = index.search(embedded.vector, { limit: facts.length, minScore: -1 })
+    const hits = ranked.filter(hit => hit.score >= threshold)
     const partial = index.size() !== facts.length
-    return result(partial ? 'partial' : 'ready', hits, partial, scope)
+    return result(partial ? 'partial' : 'ready', hits, partial, scope, ranked.slice(0, 2))
   } catch { return result('query-or-index-failed', [], true, scope) }
 }
 

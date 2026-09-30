@@ -1,0 +1,41 @@
+{
+  "version": "l2-rewrite-development-v1",
+  "corpus": "synthetic-not-human-reviewed",
+  "pairs": [
+    ["暴雨","比赛取消"],
+    ["机场大雾","航班延误"],
+    ["电池耗尽","电脑无法开机"],
+    ["道路封闭","快递派送延迟"],
+    ["道路积水","公交停运"],
+    ["主讲人生病","会议改期"],
+    ["工作人员发布通知","比赛取消通知已发送"],
+    ["大雾散去","航班恢复正常"]
+  ],
+  "cases": [
+    {"id":"literal-0","category":"literal","query":"为什么比赛取消","pair":0,"seed":1},
+    {"id":"rewrite-0-0","category":"paraphrase","query":"为什么赛事被叫停","pair":0,"seed":1},
+    {"id":"rewrite-0-1","category":"paraphrase","query":"为什么原定的球赛不办了","pair":0,"seed":1},
+    {"id":"literal-1","category":"literal","query":"为什么航班延误","pair":1,"seed":3},
+    {"id":"rewrite-1-0","category":"paraphrase","query":"为什么飞机没能准时起飞","pair":1,"seed":3},
+    {"id":"rewrite-1-1","category":"paraphrase","query":"为什么这趟飞机晚点了","pair":1,"seed":3},
+    {"id":"literal-2","category":"literal","query":"为什么电脑无法开机","pair":2,"seed":5},
+    {"id":"rewrite-2-0","category":"paraphrase","query":"为什么笔记本按电源键没反应","pair":2,"seed":5},
+    {"id":"rewrite-2-1","category":"paraphrase","query":"为什么计算机启动不了","pair":2,"seed":5},
+    {"id":"literal-3","category":"literal","query":"为什么快递派送延迟","pair":3,"seed":7},
+    {"id":"rewrite-3-0","category":"paraphrase","query":"为什么包裹没有按时送到","pair":3,"seed":7},
+    {"id":"rewrite-3-1","category":"paraphrase","query":"为什么物流配送比预计更晚","pair":3,"seed":7},
+    {"id":"literal-4","category":"literal","query":"为什么公交停运","pair":4,"seed":9},
+    {"id":"rewrite-4-0","category":"paraphrase","query":"为什么公共汽车暂停运营","pair":4,"seed":9},
+    {"id":"rewrite-4-1","category":"paraphrase","query":"为什么巴士不再发车","pair":4,"seed":9},
+    {"id":"literal-5","category":"literal","query":"为什么会议改期","pair":5,"seed":11},
+    {"id":"rewrite-5-0","category":"paraphrase","query":"为什么讨论会换了日子","pair":5,"seed":11},
+    {"id":"rewrite-5-1","category":"paraphrase","query":"为什么开会时间推迟了","pair":5,"seed":11},
+    {"id":"no-answer-0","category":"no-answer","query":"为什么手机屏幕碎了","pair":null,"seed":null},
+    {"id":"no-answer-1","category":"no-answer","query":"为什么火车晚点","pair":null,"seed":null},
+    {"id":"no-answer-2","category":"no-answer","query":"为什么会议取消","pair":null,"seed":null},
+    {"id":"effect-literal-0","category":"literal","query":"暴雨导致什么","pair":0,"seed":0},
+    {"id":"effect-rewrite-0","category":"paraphrase","query":"强降雨造成了什么后果","pair":0,"seed":0},
+    {"id":"effect-literal-1","category":"literal","query":"机场大雾导致什么","pair":1,"seed":2},
+    {"id":"effect-rewrite-1","category":"paraphrase","query":"机场被浓雾笼罩带来了什么影响","pair":1,"seed":2}
+  ]
+}

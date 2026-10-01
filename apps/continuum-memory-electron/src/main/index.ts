@@ -36,6 +36,7 @@ import {
   createCaptureRepository,
   createSmartMemoryExtractor,
   createUieRuleFallbackExtractor,
+  planUieSchema,
   createGraphExtractionResultStore,
   createGraphNormalizationStore,
   recoverGraphClaimReviews,
@@ -51,6 +52,7 @@ import {
   createGraphL1Writer,
   createGraphSemanticRepository,
   projectOpenAssertions,
+  recallOpenSources,
   needsOpenFactRepresentation,
   searchOpenAssertionsWithContext,
   canNavigateOpenAssertion,
@@ -76,6 +78,7 @@ import {
   LOCAL_HASH_EMBEDDING_MODEL,
   migrateV3SourceIntoV4,
 } from '@continuum-memory/memory'
+import { isUserSourceWithdrawal } from './source-recall-review-policy'
 import type {
   JournaledV4Persistence,
   EncryptedMemoryPersistence,
@@ -408,6 +411,7 @@ interface MemorySettings {
   extractionMode: MemoryExtractionMode
   /** Run local UIE graph capture alongside the stable rules memory extractor. */
   graphExtractionEnabled: boolean
+  openSourceRecallEnabled: boolean
   semanticEnabled: boolean
   imageMemoryEnabled: boolean
   remotePolicy: MemoryRemotePolicy
@@ -418,6 +422,7 @@ interface MemorySettings {
 const defaultMemorySettings: MemorySettings = {
   extractionMode: 'rules',
   graphExtractionEnabled: true,
+  openSourceRecallEnabled: false,
   semanticEnabled: false,
   imageMemoryEnabled: true,
   remotePolicy: 'normal-only',
@@ -428,6 +433,7 @@ function normalizeMemorySettings(value: Partial<MemorySettings> | undefined): Me
   return {
     extractionMode: value?.extractionMode === 'smart' || value?.extractionMode === 'uie' ? value.extractionMode : 'rules',
     graphExtractionEnabled: value?.graphExtractionEnabled !== false,
+    openSourceRecallEnabled: value?.openSourceRecallEnabled === true,
     semanticEnabled: value?.semanticEnabled === true,
     imageMemoryEnabled: value?.imageMemoryEnabled !== false,
     remotePolicy: value?.remotePolicy === 'allow-private' || value?.remotePolicy === 'disabled'
@@ -481,6 +487,7 @@ let graphNormalizationStore: GraphNormalizationStore | undefined
 let graphL1Store: GraphL1Store | undefined
 let graphCaptureRepository: CaptureRepository | undefined
 let graphL1Writer: GraphL1Writer | undefined
+let graphSourceUpgradePromise: Promise<void> = Promise.resolve()
 let graphSemanticRepository: GraphSemanticRepository | undefined
 let graphL1ProjectionRepository: GraphL1ProjectionRepository | undefined
 let graphRelationTaskQueue: GraphRelationTaskQueue | undefined
@@ -894,6 +901,7 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
   })
   const uieWithRules = createUieRuleFallbackExtractor({
     uie: localUie,
+    adaptiveSchema: true,
     rules: extractMemoryCandidates,
     onGraphExtraction: async (_turn, run) => {
       if (captureSettings.graphExtractionEnabled || captureSettings.extractionMode === 'uie')
@@ -1277,10 +1285,16 @@ function initializeMemory(): void {
       graphL1ProjectionRepository.sync()
       syncGraphRelationTasks()
       const predicateRegistry = createGraphPredicateRegistry()
+      const writerStore = graphL1Store, writerSemantic = graphSemanticRepository, writerProjection = graphL1ProjectionRepository
+      const writerIsCurrent = () => graphL1Store === writerStore && graphSemanticRepository === writerSemantic
+        && graphL1ProjectionRepository === writerProjection
       graphL1Writer = createGraphL1Writer(v4Repository, graphL1Store!, predicateRegistry, localMemoryScope, {
+        isCurrent: writerIsCurrent,
         syncFromClaims: async () => {
-          const result = await graphSemanticRepository!.syncFromClaims(graphL1Store!, v4Repository,
+          if (!writerIsCurrent()) throw new Error('Graph store changed during publication')
+          const result = await writerSemantic!.syncFromClaims(writerStore!, v4Repository,
             predicateRegistry, localMemoryScope)
+          if (!writerIsCurrent()) throw new Error('Graph store changed during publication')
           if (!result.ok) throw new Error(result.error.message)
           if (!graphL1ProjectionRepository?.sync()) throw new Error('Stable L1 graph view is not ready')
           syncGraphRelationTasks()
@@ -1314,7 +1328,21 @@ function initializeMemory(): void {
         writeBootLog(`Memory V4 dual-write ready: ${memoryV4Reconciliation.mirroredCount}/${memoryV4Reconciliation.sourceCount} facts reconciled, ${memoryV4Reconciliation.deletedCount} tombstoned`)
         writeBootLog(`Memory V4 diff audit: ${(memoryV4Audit.consistency * 100).toFixed(4)}% exact, ${memoryV4Audit.issues.length} issues`)
       }
-      void graphL1Writer.retryPending().catch(error => writeBootLog(`Graph L1 publication retry failed: ${errorMessage(error)}`))
+      const upgradeWriter = graphL1Writer, upgradeL1 = graphL1Store!, upgradeCaptures = graphCaptureRepository!
+      const upgradeExtractions = graphExtractionStore!, upgradeNormalization = graphNormalizationStore!
+      const current = () => upgradeWriter === graphL1Writer && upgradeL1 === graphL1Store
+        && upgradeCaptures === graphCaptureRepository && upgradeExtractions === graphExtractionStore
+        && upgradeNormalization === graphNormalizationStore
+      const upgradeIds = upgradeL1.reviews().filter(r => r.status === 'pending' && r.reviewer === 'policy').map(r => r.id)
+      graphSourceUpgradePromise = upgradeWriter.retryPending().then(async () => {
+        for (let offset = 0; current() && offset < upgradeIds.length; offset += 20) {
+          const result = await reassessRetainedUieGraphFacts({ extractions: upgradeExtractions,
+            normalization: upgradeNormalization, l1: upgradeL1, writer: upgradeWriter,
+            captureSnapshot: () => upgradeCaptures.snapshot(), scope: localMemoryScope,
+            reviewIds: upgradeIds.slice(offset, offset + 20), isCurrent: current })
+          writeBootLog(`Graph source-record upgrade: ${JSON.stringify(result)}`)
+        }
+      }).catch(error => writeBootLog(`Graph source-record upgrade failed: ${errorMessage(error)}`))
       if (memorySemanticActive && embeddingIndex) {
         try {
           const semanticGeneration = memoryV4ShadowGeneration
@@ -1624,6 +1652,7 @@ function invalidateMemoryV4ShadowComparisons(): void {
 }
 
 async function prepareDesktopGraphRecall(flushCaptures: () => Promise<void>): Promise<void> {
+  await graphSourceUpgradePromise
   const repository = memoryV4Repository, semantic = graphSemanticRepository, projection = graphL1ProjectionRepository
   const store = graphL1Store, shadow = memoryV4Shadow
   await prepareGraphRecallInputs({ flushCaptures, flushV4: () => { shadow?.flush() },
@@ -1808,7 +1837,7 @@ function rebuildRuntime() {
     persona: { systemPrompt: currentPersona, model: apiConfig.model },
     llm, session: sessionStore, memory: remoteMemory,
     resolveMemoryScope: () => localMemoryScope,
-    ...(graphMemoryEnabled && remoteMemory?.graph ? { graphRecall: {
+    ...(graphMemoryEnabled && remoteMemory?.graph && !memorySettings.openSourceRecallEnabled ? { graphRecall: {
       countTokens: countGraphTokens,
       awaitCaptureWrites: () => prepareDesktopGraphRecall(() => remoteMemory.flushPendingCaptures()),
       createRequest: (query: string) => {
@@ -1819,6 +1848,28 @@ function rebuildRuntime() {
           sharePolicies: ['allow-remote' as const],
           sensitivities: memorySettings.remotePolicy === 'allow-private'
             ? ['normal' as const, 'private' as const] : ['normal' as const] }
+      },
+    } } : {}),
+    ...(memorySettings.openSourceRecallEnabled && remoteMemory ? { sourceRecall: {
+      countTokens: countGraphTokens,
+      maxTokens: 4000,
+      recall: async (query: string) => {
+        const allowed = () => memorySettings.openSourceRecallEnabled && memorySettings.remotePolicy !== 'disabled'
+        await remoteMemory.flushPendingCaptures()
+        if (!allowed()
+          || !graphCaptureRepository || !graphExtractionStore) return []
+        // A broken extraction is not a rejection of its valid raw source. Only
+        // an explicit user rejection/use withdrawal blocks this separate route.
+        const blocked = new Set(graphL1Store?.reviews().filter(isUserSourceWithdrawal).map(r => r.sourceId) ?? [])
+        const stored = await memory?.list(localMemoryScope) ?? []
+        for (const item of stored) if (item.sharePolicy !== 'allow-remote'
+          || ['suppressed', 'deleted', 'orphaned'].includes(item.status ?? ''))
+          for (const id of item.sourceMessageIds ?? []) blocked.add(id)
+        if (!allowed()) return []
+        // This separate opt-in authorizes ordinary historical quotations, not secret/private sources.
+        return recallOpenSources({ captures: graphCaptureRepository.snapshot(), extractions: graphExtractionStore,
+          scope: localMemoryScope, query, canRead: source => !source.messageIds.some(id => blocked.has(id))
+            && inferMemoryPrivacy(source.turn!.userMessage).sensitivity === 'normal' })
       },
     } } : {}),
     tools: tools.hasTools() ? tools : undefined,
@@ -2161,6 +2212,7 @@ function setupIPC() {
   }))
 
   ipcMain.handle('memory:list', async (_event, limit = 200) => {
+    await graphSourceUpgradePromise
     const openAssertions = graphCaptureRepository && graphExtractionStore
       ? projectOpenAssertions(graphCaptureRepository.snapshot(), graphExtractionStore, localMemoryScope) : []
     const openCandidateKeys = new Set(openAssertions.map(item => `${item.extraction.runId}\0${item.extraction.candidateId}`))
@@ -2269,6 +2321,8 @@ function setupIPC() {
         object: (source && ('literal' in source.object ? source.object.literal
           : run?.entityMentions.find(item => 'mentionId' in source.object && item.id === source.object.mentionId)?.text)) ?? '',
         sourceText: run?.sourceText ?? '',
+        privacyOrigin: run?.modelId === 'uie-base' && review.sensitivity === 'private'
+          && inferMemoryPrivacy(run.sourceText).sensitivity === 'normal' ? 'uie-default-local' : 'content-policy',
         evidence: run && source ? run.sourceText.slice(source.evidenceSpan.start, source.evidenceSpan.end) : '',
         context: source?.context,
         mentions: mentionIds.map(id => {
@@ -2718,7 +2772,7 @@ function setupIPC() {
     graphReextractBusy = true
     try {
       for (const source of sources) {
-        const extraction = await localUie.extract(source.sourceText)
+        const extraction = await localUie.extract(source.sourceText, planUieSchema(source.sourceText).schema)
         // Settings reload, clear, or source deletion while the model is running
         // must not restore removed material into a new store.
         if (graphExtractionStore !== store || !store.list().some(run => run.id === source.id))

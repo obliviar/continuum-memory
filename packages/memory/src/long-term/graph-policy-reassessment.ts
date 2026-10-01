@@ -25,12 +25,17 @@ export async function reassessRetainedUieGraphFacts(options: {
   captureSnapshot: () => CaptureSnapshot
   scope: GraphEntityRecord['scope']
   limit?: number
+  reviewIds?: readonly string[]
+  isCurrent?: () => boolean
 }): Promise<GraphPolicyReassessmentResult> {
   const { extractions, normalization, l1, writer, captureSnapshot, scope } = options
   const registry = createGraphPredicateRegistry()
+  const currentStore = () => options.isCurrent?.() !== false
+  const requested = options.reviewIds ? new Set(options.reviewIds) : undefined
   const limit = Math.max(1, Math.min(20, Math.floor(options.limit ?? 20)))
   const stats = { reviewed: 0, published: 0, deferred: 0, failed: 0 }
   const activeSource = (run: GraphExtractionRun): boolean => {
+    if (!currentStore()) return false
     const matches = captureSnapshot().sources.filter(source => source.status === 'active'
       && source.scope.ownerId === scope.ownerId && source.scope.agentId === scope.agentId
       && (scope.sessionId === undefined || source.scope.sessionId === scope.sessionId)
@@ -39,13 +44,15 @@ export async function reassessRetainedUieGraphFacts(options: {
     return matches.length === 1
   }
   for (const prior of l1.reviews().filter(item => item.status === 'pending' && item.reviewer === 'policy')) {
+    if (!currentStore()) break
+    if (requested && !requested.has(prior.id)) continue
     if (stats.reviewed >= limit) break
     if (l1.tasks().some(task => task.review.id === prior.id)) { stats.deferred++; continue }
     const retained = extractions.list().find(run => run.id === prior.runId)
     if (!retained || retained.sourceRevision !== prior.sourceRevision || !activeSource(retained)) {
       stats.deferred++; continue
     }
-    const run = refreshUieGraphReviewContext(retained)
+    const run = retained.modelId === 'uie-base' ? refreshUieGraphReviewContext(retained) ?? retained : retained
     const sourceFact = run?.factCandidates.find(fact => fact.id === prior.sourceFactId)
     if (!run || !sourceFact || needsOpenFactRepresentation(run, sourceFact, registry)) {
       stats.deferred++; continue
@@ -62,13 +69,16 @@ export async function reassessRetainedUieGraphFacts(options: {
       const fact = (automatic?.normalized ?? baseline).facts.find(item => item.sourceFactId === sourceFact.id)
       if (!fact) { stats.deferred++; continue }
       const review = assessGraphClaim(run, fact, { sensitivity: 'private', sharePolicy: 'local-only' })
+      const current = l1.reviews().find(item => item.id === prior.id)
       if (review.id !== prior.id || review.status !== 'approved' || !activeSource(run)
-        || l1.reviews().find(item => item.id === prior.id)?.status !== 'pending') {
+        || current?.status !== 'pending' || current.reviewer !== 'policy') {
         stats.deferred++; continue
       }
       const task = await writer.submit(run, fact, review, automatic?.entities ?? normalization.entities())
+      if (!currentStore() || !activeSource(run)) { stats.deferred++; continue }
       if (task?.state !== 'published') { stats.failed++; continue }
-      if (automatic) normalization.replaceCatalog(automatic.entities, normalization.aliasDecisions())
+      if (automatic) normalization.replaceCatalog([...new Map([...automatic.entities, ...normalization.entities()]
+        .map(entity => [entity.ref.id, entity])).values()], normalization.aliasDecisions())
       normalization.appendResult(automatic?.normalized ?? baseline)
       stats.published++
     }

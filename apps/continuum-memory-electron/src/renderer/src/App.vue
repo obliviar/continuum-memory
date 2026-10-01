@@ -3,6 +3,7 @@ import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
 import { graphReviewIpcFields, graphReviewTimeError } from '../../shared/graph-review-ipc'
 import type { GraphOpenAssertionRecord } from '@continuum-memory/memory'
 import GraphOpenAssertions from './components/GraphOpenAssertions.vue'
+import MemoryRecallNotice from './components/MemoryRecallNotice.vue'
 
 const { ipcRenderer } = (window as any).require('electron')
 
@@ -95,6 +96,7 @@ interface MemoryItem {
 interface MemorySettings {
   extractionMode: 'rules' | 'smart' | 'uie'
   graphExtractionEnabled: boolean
+  openSourceRecallEnabled: boolean
   semanticEnabled: boolean
   imageMemoryEnabled: boolean
   remotePolicy: 'normal-only' | 'allow-private' | 'disabled'
@@ -136,6 +138,7 @@ interface GraphReviewItem {
   subject: string
   object: string
   sourceText: string
+  privacyOrigin?: 'uie-default-local' | 'content-policy'
   context?: { negation: { value: boolean | null; resolution: string }; condition: { value: string | null; resolution: string };
     time: { value: string | null; resolution: string }; speaker: { value: string | null; resolution: string } }
   mentions: Array<{ id: string; text: string; type: string; resolvedEntityId?: string;
@@ -335,6 +338,7 @@ const confirmClearMemories = ref(false)
 const memorySettings = ref<MemorySettings>({
   extractionMode: 'rules',
   graphExtractionEnabled: true,
+  openSourceRecallEnabled: false,
   semanticEnabled: false,
   imageMemoryEnabled: true,
   remotePolicy: 'normal-only',
@@ -721,7 +725,7 @@ async function reviewGraphCandidate(id: string, outcome: 'approved' | 'rejected'
     }
     memoryStatusMessage.value = outcome === 'approved'
       ? result.published ? '图事实已确认并写入。' : '审核已保存，发布任务等待重试。'
-      : outcome === 'rejected' ? '图事实已拒绝。' : '图事实保持待确认。'
+      : outcome === 'rejected' ? '已拒绝规范事实，并限制对应来源使用。' : '已保留未发布状态，不因此撤销原文召回权限。'
     delete graphReviewReasons.value[id]
     await refreshMemoryList()
   }
@@ -1652,14 +1656,18 @@ async function doReset() {
           <summary>查看最近入图的原文信息（{{ graphInformationItems.length }} 条；仅来源记录，不代表事实已审核）</summary>
           <div v-for="item in graphInformationItems" :key="item.id" :title="item.sourceId">{{ item.text }}</div>
         </details>
-        <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条关系/事件候选、{{ graphExtractionStatus.pendingReviews }} 条待审、{{ graphExtractionStatus.claims }} 条规范 L1 Claim</div>
-        <div v-if="graphExtractionStatus?.pendingReviews" class="field-hint">
-          旧候选不会在启动时自动批准；可根据保留的原文重新审核策略待审项，手动决定与已拒绝项不会被覆盖。
+        <MemoryRecallNotice :enabled="memorySettings.openSourceRecallEnabled" :memory-enabled="memoryEnabled"
+          :remote-policy="memorySettings.remotePolicy" :busy="memoryMutating"
+          @enable="saveMemorySettings({ openSourceRecallEnabled: true })" />
+        <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用，可使用本地回退') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条关系/事件记录、{{ graphExtractionStatus.claims }} 条规范 L1 Claim；未发布 Claim 的记录不因此失去获准原文召回资格。</div>
+        <details v-if="graphExtractionStatus?.pendingReviews" class="field-hint">
+          <summary>可选：规范事实自动评估（{{ graphExtractionStatus.pendingReviews }} 条尚未发布）</summary>
+          此处仅处理旧记录的自动发布重试，不是原文召回的审核待办。启动时会分批处理旧的机器待审项，用户拒绝与明确暂缓不会被覆盖。
           <button class="secondary-btn" :disabled="memoryMutating || !graphExtractionStatus.enabled" @click="reassessPendingGraphFacts">按新策略自动重审图事实（每次最多 20 条）</button>
-        </div>
+        </details>
         <div v-if="graphExtractionStatus" class="field-hint">开放关系：{{ graphExtractionStatus.automaticOpenNavigation ?? 0 }} 条自动准入本地查询，{{ graphExtractionStatus.deferredOpenCandidates ?? 0 }} 条按需核实候选；无需逐条审核，也不会自动发布 Claim。</div>
         <div v-if="graphExtractionStatus?.sourcesWithoutFacts" class="field-hint">
-          {{ graphExtractionStatus.sourcesWithoutFacts }} 条来源尚未提取出可审核的关系；实体或字段提取成功不代表已形成图事实。
+          {{ graphExtractionStatus.sourcesWithoutFacts }} 条来源尚未提取出关系；获准原文仍可直接检索，补充提取仅用于改善关联导航。
           <button class="secondary-btn" :disabled="memoryMutating || !graphExtractionStatus.enabled || !graphExtractionStatus.modelReady" @click="reextractEmptyGraphSources">重新提取无事实记录（每次最多 5 条）</button>
         </div>
         <div v-if="graphExtractionStatus?.error" class="api-status-message error">图提取最近一次失败：{{ graphExtractionStatus.error }}</div>
@@ -1674,7 +1682,7 @@ async function doReset() {
         <GraphOpenAssertions :ready="!!graphL1View" :busy="memoryMutating" :items="graphOpenAssertionItems"
           :sources="graphInformationItems" @refresh="refreshMemoryList" @busy="memoryMutating = $event" />
 
-        <div class="field-hint">原文信息与已确认开放断言支持本地查看和关联搜索。规范 L1 Claim 和已发布 L2 关系仍按原有图模式参与聊天召回；开放断言不会自动变成推理结论或发送给聊天模型。</div>
+        <div class="field-hint">本地开放记录搜索与聊天原文召回是不同路径。开启原文召回并允许远程记忆发送后，获准来源可沿开放关系参与聊天；发送的是原文而不是图推导结论。关闭时保留原有规范 Claim 图模式。</div>
 
         <section class="memory-settings-panel">
           <div class="memory-settings-title">
@@ -1702,6 +1710,10 @@ async function doReset() {
           <label class="memory-check-row">
             <input v-model="memorySettings.graphExtractionEnabled" type="checkbox" :disabled="memoryMutating || memorySettings.extractionMode === 'uie'" @change="saveMemorySettings({ graphExtractionEnabled: memorySettings.graphExtractionEnabled })" />
             <span>保存 UIE 图提取结果供审核（所有模式均尝试 UIE；失败保留规则记忆；此开关不改变召回策略）</span>
+          </label>
+          <label class="memory-check-row">
+            <input v-model="memorySettings.openSourceRecallEnabled" type="checkbox" :disabled="memoryMutating" @change="saveMemorySettings({ openSourceRecallEnabled: memorySettings.openSourceRecallEnabled })" />
+            <span>允许普通历史原文参与聊天：自动沿开放关系寻找关联记忆并发送给当前 API（包含已保存原文；隐私与密钥内容除外）</span>
           </label>
           <details class="uie-preview">
             <summary>试提取实体与信息（仅本地预览，不写入记忆）</summary>
@@ -1775,7 +1787,7 @@ async function doReset() {
               <strong>原文捕获与抽取任务</strong>
               <span>{{ captureStatus.activeSources }} 条加密原文</span>
             </div>
-            <div class="field-hint">原文独立保存，不参与记忆召回。任务完成 {{ captureStatus.tasks.succeeded }} 个，失败 {{ captureStatus.tasks.failed }} 个；完成不代表已生成或审核通过记忆。</div>
+            <div class="field-hint">原文独立保存。{{ memorySettings.openSourceRecallEnabled && memorySettings.remotePolicy !== 'disabled' ? '获准来源可直接参与原文关联召回，无需先发布规范事实。' : '当前未启用聊天原文召回；请查看上方授权及发送策略。' }}任务完成 {{ captureStatus.tasks.succeeded }} 个，失败 {{ captureStatus.tasks.failed }} 个；完成不代表已发布正式 Claim。</div>
             <div v-if="captureStatus.awaitingProcessor" class="field-hint">{{ captureStatus.awaitingProcessor }} 个任务等待原抽取配置，不会使用当前配置自动重放。</div>
             <div v-if="captureStatus.retryable" class="memory-queue-status">
               <span>{{ captureStatus.retryable }} 个任务可处理或重试（每项最多尝试 3 次）</span>
@@ -1784,8 +1796,8 @@ async function doReset() {
           </section>
           <section v-if="memoryReviewItems.length > 0 || pendingCaptureSegments > 0" class="memory-review-panel">
             <div class="memory-list-header">
-              <strong>待确认候选</strong>
-              <span>隔离内容不会参与回答</span>
+              <strong>规范长期记忆候选（与原文召回分开）</strong>
+              <span>隔离的规范候选不直接参与回答；原始来源另按原文召回权限筛选</span>
             </div>
             <div v-if="pendingCaptureSegments > 0" class="memory-queue-status">
               <span>后台仍有 {{ pendingCaptureSegments }} 个长消息分段待处理</span>
@@ -1795,7 +1807,7 @@ async function doReset() {
               <div class="memory-item-main">
                 <div class="memory-item-meta">
                   <span class="memory-kind">{{ review.candidate.predicate }}</span>
-                  <span class="memory-state conflicted">待确认</span>
+                  <span class="memory-state conflicted">规范条目待确认</span>
                   <span v-if="review.candidate.calibrationStatus === 'calibrated'">
                     校准概率 {{ Math.round((review.candidate.calibratedActiveProbability || 0) * 100) }}%
                     （保守下界 {{ Math.round((review.candidate.calibrationLowerBound || 0) * 100) }}%）
@@ -1821,22 +1833,25 @@ async function doReset() {
             </div>
           </section>
 
-          <section v-if="graphReviewItems.length > 0" class="memory-review-panel">
+          <details v-if="graphReviewItems.length > 0" class="memory-review-panel">
+            <summary>可选：规范事实发布与身份管理（当前列表 {{ graphReviewItems.length }} 条；无需为原文召回逐条确认）</summary>
             <div class="memory-list-header">
-              <strong>待确认图事实</strong>
-              <span>可检索资料与主动偏好分开审核</span>
+              <strong>正式 Claim 管理</strong>
+              <span>仅在需要发布规范事实、绑定实体或主动使用偏好时操作</span>
             </div>
+            <div class="field-hint">以下状态仅表示尚未发布正式 Claim，不是原文不可召回。确认会改变正式事实及身份绑定；拒绝或撤销检索会限制对应原文使用，请谨慎操作。</div>
             <div v-for="item in graphReviewItems" :key="item.review.id" class="memory-review-item">
               <div class="memory-item-main">
                 <div class="memory-item-meta">
                   <span class="memory-kind">{{ item.predicate || '未识别关系' }}</span>
-                  <span class="memory-state conflicted">待确认</span>
+                  <span class="memory-state">尚未发布 Claim</span>
                   <span>模型分数 {{ Math.round(item.review.modelScore * 100) }}%</span>
                 </div>
                 <div class="memory-content">候选：{{ item.subject }} — {{ item.predicate }} → {{ item.object }}</div>
                 <div class="memory-content">证据：{{ item.evidence || '[来源证据不可用]' }}</div>
                 <details v-if="item.sourceText && item.sourceText !== item.evidence" class="field-hint"><summary>查看完整原文及语境</summary>{{ item.sourceText }}</details>
-                <div class="field-hint">原因：{{ item.review.reason }} · 来源：{{ item.review.sourceId }} · 隐私：{{ item.review.sensitivity }}</div>
+                <div class="field-hint">正式 Claim 未发布原因：{{ item.review.reason }} · 来源：{{ item.review.sourceId }} · Claim 发送级别：{{ item.review.sensitivity }}</div>
+                <div v-if="item.privacyOrigin === 'uie-default-local'" class="field-hint">此 private 是 UIE 正式 Claim 的默认本地隔离策略，不代表原文被识别为敏感隐私；原文召回使用独立权限检查。</div>
                 <div v-for="mention in item.mentions" :key="mention.id" class="field-hint">
                   实体「{{ mention.text }}」（{{ mention.type }}）
                   <select v-model="graphIdentityChoice(item.review.id)[mention.id]" class="settings-input">
@@ -1846,7 +1861,7 @@ async function doReset() {
                   </select>
                 </div>
                 <div class="field-hint">抽取语境：否定 {{ item.context?.negation?.value ?? '未判定' }}；条件 {{ item.context?.condition?.value ?? '未判定' }}；时间 {{ item.context?.time?.value ?? '未判定' }}；说话者 {{ item.context?.speaker?.value ?? '未判定' }}</div>
-                <div class="field-hint">请逐项确认语境；“未知”会保留不确定性，不会自动当作肯定事实。</div>
+                <div class="field-hint">仅在需要发布正式 Claim 时填写以下语境；原文召回无需填写。“未知”会保留不确定性，不会自动当作肯定事实。</div>
                 <select v-model="graphContextChoice(item.review.id).negation" class="settings-input">
                   <option value="">选择肯定或否定</option><option value="positive">肯定</option><option value="negative">否定</option><option value="unknown">未知</option>
                 </select>
@@ -1863,7 +1878,7 @@ async function doReset() {
                 <input v-model="graphReviewReasons[item.review.id]" class="settings-input" maxlength="500" placeholder="填写审核原因" />
                 <label class="memory-check-row">
                   <input v-model="graphRetrievalRetain[item.review.id]" type="checkbox" />
-                  <span>保留为可检索资料</span>
+                  <span>保留正式 Claim 的检索资格（撤销会同时限制对应来源）</span>
                 </label>
                 <label class="memory-check-row">
                   <input v-model="graphProactivePreferences[item.review.id]" type="checkbox" />
@@ -1872,20 +1887,21 @@ async function doReset() {
               </div>
               <div class="memory-item-actions">
                 <div v-if="graphReviewErrors[item.review.id]" class="api-status-message error">{{ graphReviewErrors[item.review.id] }}</div>
-                <button class="memory-restore-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim() || !graphApprovalReady(item)" @click="reviewGraphCandidate(item.review.id, 'approved')">确认</button>
-                <button class="memory-delete-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'rejected')">拒绝</button>
-                <button class="secondary-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'pending')">继续待确认</button>
+                <button class="memory-restore-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim() || !graphApprovalReady(item)" @click="reviewGraphCandidate(item.review.id, 'approved')">确认并发布规范事实</button>
+                <button class="memory-delete-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'rejected')">拒绝并限制来源使用</button>
+                <button class="secondary-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'pending')">保留未发布状态</button>
               </div>
             </div>
-          </section>
+          </details>
 
-          <section v-if="graphRelationReviewItems.length > 0" class="memory-review-panel">
-            <div class="memory-list-header"><strong>待审信息关系</strong><span>NLI 分数是判断线索；审核记录不会自动成为正式 L2 关系</span></div>
+          <details v-if="graphRelationReviewItems.length > 0" class="memory-review-panel">
+            <summary>可选：规范信息关系管理（{{ graphRelationReviewItems.length }} 条）</summary>
+            <div class="memory-list-header"><strong>规范信息关系</strong><span>仅用于正式关系确认，不是原文关联召回的前置步骤</span></div>
             <div v-for="item in graphRelationReviewItems" :key="item.key" class="memory-review-item">
               <div class="memory-item-main">
                 <div class="memory-item-meta">
                   <span class="memory-kind">{{ item.result.label }}</span>
-                  <span class="memory-state conflicted">待确认</span>
+                  <span class="memory-state">未确认规范关系</span>
                   <span>模型分数 {{ Math.round((item.result.scores?.[item.result.label] || 0) * 100) }}%</span>
                 </div>
                 <div class="memory-content">{{ item.evidence[0] || '[第一条证据不可用]' }}</div>
@@ -1899,9 +1915,10 @@ async function doReset() {
                 <button class="secondary-btn" :disabled="memoryMutating || !graphRelationReviewReasons[item.key]?.trim()" @click="reviewGraphRelation(item.key, 'pending')">继续待确认</button>
               </div>
             </div>
-          </section>
+          </details>
 
-          <section v-if="graphL2Candidates.length > 0" class="memory-review-panel">
+          <details v-if="graphL2Candidates.length > 0" class="memory-review-panel">
+            <summary>可选：正式 L2 关系发布（{{ graphL2Candidates.length }} 条）</summary>
             <div class="memory-list-header"><strong>L2 关系候选</strong><span>必须核实两条原文之间的语义；图中连接和 NLI 分数都不足以自动发布关系</span></div>
             <div v-for="item in graphL2Candidates" :key="item.id" class="memory-review-item">
               <div class="memory-item-main">
@@ -1919,7 +1936,7 @@ async function doReset() {
                 <button class="memory-restore-btn" :disabled="memoryMutating || !graphL2PublishReasons[item.id]?.trim() || !item.observations.some(obs => !obs.truncated)" @click="publishGraphL2Relation(item.id)">核实并发布 L2</button>
               </div>
             </div>
-          </section>
+          </details>
 
           <div class="memory-list-header">
             <strong>已保存的记忆</strong>

@@ -1,6 +1,7 @@
 import type {
   GraphRecallRequest,
   GraphRecallResult,
+  SourceRecallEvidence,
   AdaptiveMemoryRecallResult,
   AgentContextPort,
   AgentForegroundStreamPort,
@@ -21,6 +22,7 @@ import type {
 } from '@continuum-memory/contracts'
 
 import { buildGraphEvidencePrompt } from '../prompt/graph-evidence-prompt'
+import { buildSourceEvidencePrompt } from '../prompt/source-evidence-prompt'
 import { createChatHooks } from './hooks'
 import { buildSystemPrompt } from '../prompt/system-prompt'
 
@@ -41,6 +43,11 @@ export interface AgentRuntimeDeps {
   session: AgentSessionPort
   context?: AgentContextPort
   memory?: AgentMemoryPort
+  sourceRecall?: {
+    recall: (query: string, scope: MemoryScope) => Promise<SourceRecallEvidence[]>
+    countTokens: (text: string) => number
+    maxTokens: number
+  }
   /** Explicit graph route. Never falls back to legacy recall on graph errors. */
   graphRecall?: {
     createRequest: (query: string, scope: MemoryScope) => GraphRecallRequest
@@ -289,6 +296,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
         // Recollect immediately before every model round, including after tool-driven deletions.
         // Await capture so its V4 changes cannot silently invalidate the selected source version.
         let graphResult: GraphRecallResult | undefined
+        let memoryPrompt = systemPrompt
         if (deps.graphRecall) {
           await capturePromise
           await deps.graphRecall.awaitCaptureWrites()
@@ -304,8 +312,29 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
           const promptCost = deps.graphRecall.countTokens(graphPrompt)
           if (!Number.isSafeInteger(promptCost) || promptCost < 0 || promptCost > request.budget.maxEvidenceTokens)
             throw new Error('Graph memory prompt exceeds the evidence budget')
-          currentMessages = [{ role: 'system', content: `${systemPrompt}\n${graphPrompt}` }, ...currentMessages.slice(1)]
+          memoryPrompt += `\n${graphPrompt}`
         }
+        if (deps.sourceRecall) {
+          await capturePromise
+          if (!Number.isSafeInteger(deps.sourceRecall.maxTokens) || deps.sourceRecall.maxTokens < 0)
+            throw new Error('Invalid source evidence budget')
+          const entries = await deps.sourceRecall.recall(userMessage, memoryScope)
+          if (entries.some(e => e.scope.ownerId !== memoryScope.ownerId || e.scope.agentId !== memoryScope.agentId
+            || (memoryScope.sessionId !== undefined && e.scope.sessionId !== memoryScope.sessionId)))
+            throw new Error('Source memory returned a mismatched scope')
+          let sourcePrompt = buildSourceEvidencePrompt(entries)
+          const cost = () => {
+            const value = deps.sourceRecall!.countTokens(sourcePrompt)
+            if (!Number.isSafeInteger(value) || value < 0) throw new Error('Invalid source evidence token cost')
+            return value
+          }
+          while (entries.length && cost() > deps.sourceRecall.maxTokens) {
+            entries.pop()
+            sourcePrompt = buildSourceEvidencePrompt(entries)
+          }
+          memoryPrompt += `\n${sourcePrompt}`
+        }
+        currentMessages = [{ role: 'system', content: memoryPrompt }, ...currentMessages.slice(1)]
         result = await runLLMRound(currentMessages, model, ctx)
         if (graphResult && deps.memory?.graph) {
           try {

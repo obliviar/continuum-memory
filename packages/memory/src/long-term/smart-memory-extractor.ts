@@ -116,6 +116,7 @@ async function completeWithOpenAI(prompt: string, config: SmartExtractorConfig):
 
 function buildPrompt(userMessage: string): string {
   return [
+    'graph 用于寻找相关的已有记忆，不用于推导新的事实。memories 的长期事实筛选标准不限制 graph.assertions：原文明确出现的否定、计划、条件、转述关系也要保留，并准确标注语境。关系不属于已有类别时使用开放 assertions，不要为了进入图而改写成确定事实。不得生成原文没有的实体、关系、结论或补全缺失信息。',
     'graph may also contain assertions:[{id,relationText,relationSpan:{start,end},participants:[{mentionId,role}],evidenceSpan:{start,end},modelScore,context}]. Use assertions for events with multiple participants and relations outside existing categories. Preserve the exact relation wording, every participant and its source span. Entity type is an open proposal; use unknown when uncertain. Do not force a new domain into person/organization/location. Shared words never prove shared identity. Missing roles/context stay unknown. Assertions use the same context format as facts.',
     'Return all UIE graph elements before any filtering: graph:{entities:[{id,type,text,span:{start,end},modelScore}],facts:[{id,subjectMentionId,predicate,object:{mentionId}|{literal,valueType?,unit?},evidenceSpan:{start,end},modelScore,context:{negation,condition,time,speaker}}]}. Offsets are UTF-16 positions in the exact user text; end is exclusive. Each context field is {value,resolution:"resolved|unresolved|absent",evidenceSpan?}. Dates and amounts are typed literals, not entity mentions. Do not apply a 0.75 score threshold or an eight-item cap.',
     '从下面的用户原话中提取未来对话仍然有用的、明确陈述的事实。',
@@ -125,7 +126,7 @@ function buildPrompt(userMessage: string): string {
     '敏感隐私设为 private 或 secret；private 默认 sharePolicy=local-only，secret 必须 local-only。',
     '临时事实可填写 expiresAt（ISO 8601）；不确定时留空。',
     '输出：{"memories":[{"content":"简明事实","kind":"identity|preference|project|relationship|health|routine|goal|explicit|image|other","memoryKey":"可选稳定键","cardinality":"single|multiple|set","polarity":"positive|negative|unknown","modality":"asserted|planned|hypothetical|reported|unknown","condition":"可选条件","confidence":0到1,"importance":0到1,"sensitivity":"normal|private|secret","sharePolicy":"allow-remote|local-only|ask","validFrom":"可选ISO时间","validTo":"可选ISO时间","expiresAt":"可选ISO时间"}]}',
-    '在同一个 JSON 对象中同时输出 memories 和 graph；graph 必须含 entities 与 facts 数组。实体 type 使用 person、organization、location 等明确类型；日期和金额作为带 valueType 的字面值。没有抽取项时输出空数组。',
+    '在同一个 JSON 对象中同时输出 memories 和 graph；graph 必须含 entities 与 facts 数组，可以另含 assertions。实体 type 是开放的类型提议，可以使用设备、样品、模块等领域类型；无法确定则使用 unknown，不强制归入人物、组织、地点。日期和金额作为带 valueType 的字面值。没有抽取项时输出空数组。',
     `用户原话：${userMessage.slice(0, 6000)}`,
   ].join('\n')
 }

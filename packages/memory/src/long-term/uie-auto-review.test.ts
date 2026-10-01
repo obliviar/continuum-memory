@@ -93,15 +93,23 @@ describe('grounded UIE auto review', () => {
   })
 
   it.each(['我不太喜欢喝牛奶巧克力。', '我不再喜欢喝牛奶巧克力。',
-    '我可能喜欢喝牛奶巧克力。', '我喜欢喝牛奶巧克力吗？'])('does not auto-publish a risky preference: %s', text => {
+    '我可能喜欢喝牛奶巧克力。', '我喜欢喝牛奶巧克力吗？'])('automatically records uncertain preference context without asserting it as true: %s', async text => {
     const value = '牛奶巧克力'
     const start = Array.from(text.slice(0, text.indexOf(value))).length
     const extraction = parseUieOutput(text, { 喜好: [{ text: value, start,
       end: start + Array.from(value).length, probability: 0.95 }] })
     const run = uieGraphExtractionRun('risky-preference', text, extraction)
     expect(run.factCandidates).toHaveLength(1)
-    expect(autoNormalizeUieGraphFact(run, run.factCandidates[0]!.id,
-      { entities: [], aliases: [], scope })).toBeUndefined()
+    const automatic = autoNormalizeUieGraphFact(run, run.factCandidates[0]!.id,
+      { entities: [], aliases: [], scope })!
+    expect(automatic).toBeDefined()
+    const fact = automatic.normalized.facts[0]!
+    const review = assessGraphClaim(run, fact, { sensitivity: 'private', sharePolicy: 'local-only' })
+    const l1 = createGraphL1Store({ load: () => undefined, save: () => {} }), v4 = createMemoryV4Repository()
+    expect((await createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
+      .submit(run, fact, review, automatic.entities))?.state).toBe('published')
+    expect(l1.claims()[0]).toMatchObject({ polarity: 'unknown', modality: 'unknown' })
+    expect(automatic.entities.find(e => e.canonicalName === '我')!.ref.id).toMatch(/^source-entity:/)
   })
 
   it('can safely re-evaluate retained raw UIE context without mutating the original run', () => {
@@ -152,12 +160,15 @@ describe('grounded UIE auto review', () => {
     }, 180_000)
 
   it.each(['如果阿澈住在成都，就通知我。', '听说阿澈住在成都。', '阿澈不住在成都。',
-    '阿澈明天住在成都。', '阿澈住在成都吗？'])('keeps uncertain context in manual review: %s', text => {
+    '阿澈明天住在成都。', '阿澈住在成都吗？'])('keeps ordinary-memory quarantine but automatically admits a graph source record: %s', text => {
     const extraction = extracted(text, '阿澈', '居住地', '成都')
     expect(uieReviewCandidates(text, extraction)[0]?.metadata.requiresReview).toBe(true)
     const run = uieGraphExtractionRun('source', text, extraction)
-    expect(autoNormalizeUieGraphFact(run, run.factCandidates[0]!.id,
-      { entities: [], aliases: [], scope })).toBeUndefined()
+    const automatic = autoNormalizeUieGraphFact(run, run.factCandidates[0]!.id,
+      { entities: [], aliases: [], scope })!
+    expect(assessGraphClaim(run, automatic.normalized.facts[0]!,
+      { sensitivity: 'private', sharePolicy: 'local-only' }).status).toBe('approved')
+    expect(run.factCandidates[0]!.context.speaker.resolution).toBe('unresolved')
   })
 
   it('keeps low-confidence and ungrounded labels in review', () => {

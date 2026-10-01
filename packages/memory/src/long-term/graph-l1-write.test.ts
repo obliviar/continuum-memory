@@ -292,13 +292,14 @@ describe('reviewed graph L1 publication', () => {
     expect(v4.snapshot().factVersions).toHaveLength(1)
   })
 
-  it('keeps pending review out of V4 and records user confirmation separately from model score', async () => {
+  it('publishes low-score source records and preserves an explicit human deferral or confirmation', async () => {
     const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
     const l1 = createGraphL1Store(memoryPersistence())
     const writer = createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
     const { run, fact } = fixture(0.6)
-    const pending = assessGraphClaim(run, fact, { sensitivity: 'private', sharePolicy: 'local-only' }, 1_800_000_000_000)
-    expect(pending.status).toBe('pending')
+    const automatic = assessGraphClaim(run, fact, { sensitivity: 'private', sharePolicy: 'local-only' }, 1_800_000_000_000)
+    expect(automatic.status).toBe('approved')
+    const pending = deferGraphClaim(automatic, 'User requested an identity decision')
     expect(deferGraphClaim(pending, 'Wait for source check')).toMatchObject({ status: 'pending', reason: 'Wait for source check' })
     expect(rejectGraphClaim(pending, 'Incorrect company')).toMatchObject({ status: 'rejected', reason: 'Incorrect company' })
     expect(await writer.submit(run, fact, pending, entities)).toBeUndefined()

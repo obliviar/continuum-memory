@@ -30,7 +30,8 @@ function fixture(text = '我喜欢喝牛奶巧克力。', score = 0.82) {
   const baseline = normalizeGraphExtraction(run, { entities: [], scope })
   normalization.appendResult(baseline)
   const l1 = createGraphL1Store(persistence())
-  const review = assessGraphClaim(run, baseline.facts[0]!, { sensitivity: 'private', sharePolicy: 'local-only' })
+  const review = { ...assessGraphClaim(run, baseline.facts[0]!, { sensitivity: 'private', sharePolicy: 'local-only' }),
+    status: 'pending' as const, reason: 'legacy-unresolved-subject' }
   l1.recordReview(review)
   const v4 = createMemoryV4Repository()
   const writer = createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
@@ -68,11 +69,12 @@ describe('bounded graph policy re-assessment', () => {
     expect(deleted.v4.snapshot().facts).toHaveLength(0)
   })
 
-  it('leaves low-score and non-asserted retained candidates pending', async () => {
-    const low = fixture('我喜欢喝牛奶巧克力。', 0.69)
-    expect((await low.reassess()).published).toBe(0)
+  it('publishes low-score and uncertain sources with original scores and uncertainty', async () => {
+    const low = fixture('我喜欢喝牛奶巧克力。', 0.58)
+    expect((await low.reassess()).published).toBe(1)
+    expect(low.v4.snapshot().facts[0]?.extractionScore).toBe(0.58)
     const question = fixture('我喜欢喝牛奶巧克力吗？')
-    expect((await question.reassess()).published).toBe(0)
-    expect(question.l1.claims()).toHaveLength(0)
+    expect((await question.reassess()).published).toBe(1)
+    expect(question.l1.claims()[0]).toMatchObject({ polarity: 'unknown', modality: 'unknown' })
   })
 })

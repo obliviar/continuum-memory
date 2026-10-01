@@ -9,6 +9,7 @@ import { extractMemoryCandidates, inferMemoryPrivacy, isSafeMemoryContent } from
 import type { MemoryCandidate, MemoryExtractor } from './memory-extractor'
 import { personalUieRelations } from './uie-personal-relations'
 import { extractLocalOpenAssertions } from './open-assertion-extractor'
+import { planUieSchema } from './uie-schema-planner'
 
 const ENTITY_LABELS = new Set([
   '人物', '地点', '组织机构', '项目', '企业', '影视作品', '图书作品',
@@ -19,8 +20,6 @@ const MAX_OUTPUT_BYTES = 2_000_000
 const EXTRACTOR_VERSION = 'local-uie-base-v1'
 const AUTO_REVIEW_VERSION = 'uie-grounded-assertion-v2'
 const AUTO_REVIEW_SCORE = 0.85
-const GRAPH_AUTO_REVIEW_SCORE = 0.8
-const PERSONAL_GRAPH_AUTO_REVIEW_SCORE = 0.7
 
 const RELATION_CUES: Record<string, RegExp> = {
   居住地: /(?:居住地|住在|居住于|定居于)/u,
@@ -165,6 +164,7 @@ export interface UieRuleFallbackOptions {
   rules?: MemoryExtractor
   onGraphExtraction?: (turn: MemoryCapture, run: GraphExtractionRun) => void | Promise<void>
   onError?: (error: unknown) => void
+  adaptiveSchema?: boolean
 }
 
 /** Keep rules authoritative; UIE contributes review-only candidates and never blocks capture. */
@@ -174,7 +174,8 @@ export function createUieRuleFallbackExtractor(options: UieRuleFallbackOptions):
     const local = await rules(turn)
     let extracted = false
     try {
-      const extraction = await options.uie.extract(turn.userMessage)
+      const extraction = await options.uie.extract(turn.userMessage,
+        options.adaptiveSchema ? planUieSchema(turn.userMessage).schema : undefined)
       extracted = true
       if (options.onGraphExtraction) {
         const sourceIds = turn.metadata?.sourceMessageIds
@@ -405,7 +406,9 @@ export function uieGraphExtractionRun(sourceId: string, sourceText: string, extr
     }
   }
   const facts = relations.map((relation, index) => {
-    const minimumScore = index < extraction.relations.length ? GRAPH_AUTO_REVIEW_SCORE : PERSONAL_GRAPH_AUTO_REVIEW_SCORE
+    // Graph source records are not confidence-certified facts. Confidence remains
+    // attached, but must not prevent independent reading of explicit source context.
+    const minimumScore = 0
     const evidence = relationEvidenceSpan(sourceText, relation, minimumScore)
     return {
     id: `uie-fact:${index}`, subjectMentionId: index < extraction.relations.length

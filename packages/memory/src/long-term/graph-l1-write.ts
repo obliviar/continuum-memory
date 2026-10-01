@@ -6,8 +6,9 @@ import type { FactContext } from './graph-extraction-result'
 import type { GraphAdmissionDecision } from './graph-admission-review'
 import type { GraphEntityRecord, GraphNormalizedFact, GraphPredicateRegistry, GraphTypedValue } from './graph-identity-normalization'
 import type { GraphContextFrame } from '../graph-core/domain/types'
+import { graphSourceCandidateValid } from './graph-source-integrity'
 
-export const GRAPH_L1_WRITE_VERSION = 'graph-l1-write-v1'
+export const GRAPH_L1_WRITE_VERSION = 'graph-l1-source-record-v2'
 export type GraphEntityRef = { kind: 'entity'; id: string; version: number }
 export type GraphClaimRef = { kind: 'claim'; id: string; version: number }
 export type GraphFactRef = { kind: 'v4-fact'; id: string; version: number }
@@ -83,20 +84,12 @@ export function assessGraphClaim(run: GraphExtractionRun, fact: GraphNormalizedF
   if (!source)
     throw new Error('Normalized graph fact has no exact extraction source')
   const unresolved = fact.status !== 'ready'
-  const evidenceValid = source.evidenceSpan.start >= 0 && source.evidenceSpan.end <= run.sourceText.length
-    && source.evidenceSpan.start < source.evidenceSpan.end
-  const unsafeContext = source.context.negation.resolution === 'unresolved'
-    || source.context.condition.resolution !== 'absent'
-    || source.context.speaker.resolution === 'unresolved'
-  const minimumModelScore = run.modelId === 'uie-base' && source.subjectMentionId.startsWith('uie-personal:') ? 0.7 : 0.75
-  const status: GraphClaimReview['status'] = !evidenceValid ? 'rejected'
-    : run.status !== 'complete' || unresolved || unsafeContext || source.modelScore < minimumModelScore ? 'pending' : 'approved'
-  const reason = !evidenceValid ? 'invalid-evidence-span'
-    : run.status !== 'complete' ? 'incomplete-extraction'
-      : unresolved ? fact.reason ?? 'unresolved-fact'
-      : unsafeContext ? 'context-needs-review'
-        : source.modelScore < minimumModelScore ? 'low-model-score'
-          : run.modelId === 'uie-base' ? 'source-grounded-graph-fact:uie-auto-review-v2' : 'source-grounded-graph-fact'
+  const evidenceValid = graphSourceCandidateValid(run, source)
+  // Failed machine validation stays a rejection/open source, not a human task.
+  // Unknown context and low scores are preserved on approved source records.
+  const status: GraphClaimReview['status'] = evidenceValid && !unresolved ? 'approved' : 'rejected'
+  const reason = !evidenceValid ? 'invalid-source-evidence'
+    : unresolved ? fact.reason ?? 'unresolved-structure' : 'source-record-auto-publication:v2'
   return {
     id: stableId('graph-review', `${run.id}\0${source.id}`), runId: run.id, sourceFactId: source.id,
     status, reason, reviewer: 'policy', reviewedAt: now, modelScore: source.modelScore,
@@ -257,13 +250,15 @@ export interface GraphL1Writer {
   retryPending: () => Promise<void>
 }
 
-export interface GraphL1SemanticPublisher { syncFromClaims: () => Promise<void> }
+export interface GraphL1SemanticPublisher { syncFromClaims: () => Promise<void>; isCurrent?: () => boolean }
 
 export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
   registry: GraphPredicateRegistry, scope: { ownerId: string; agentId: string; sessionId?: string },
   semantic?: GraphL1SemanticPublisher): GraphL1Writer {
   let pending: Promise<void> = Promise.resolve()
+  const currentStore = () => semantic?.isCurrent?.() !== false
   const runTask = async (task: GraphPublicationTask): Promise<GraphPublicationTask> => {
+    if (!currentStore()) throw new Error('Graph publication store was reloaded')
     const current = l1.tasks().find(item => item.id === task.id) ?? task
     if (current.state === 'published')
       return current
@@ -283,6 +278,7 @@ export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
             && snapshot.evidenceLinks.some(link => link.factId === ref.id && link.episodeId === episode.id && link.active)))
       })
       await semantic?.syncFromClaims()
+      if (!currentStore() || !l1.tasks().some(t => t.id === task.id)) return persisted
       const published = { ...persisted, state: 'published' as const, lastError: undefined }
       l1.updateTask(published)
       return published
@@ -290,7 +286,7 @@ export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
     catch (error) {
       const failed = { ...(persisted ?? current), attempts: current.attempts + 1,
         lastError: error instanceof Error ? error.message.slice(0, 300) : 'publication-failed' }
-      l1.updateTask(failed)
+      if (currentStore() && l1.tasks().some(t => t.id === task.id)) l1.updateTask(failed)
       return failed
     }
   }
@@ -301,9 +297,14 @@ export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
   }
   return {
     submit: (run, fact, review, entities, admission) => serialize(async () => {
+      if (!currentStore()) throw new Error('Graph publication store was reloaded')
       if (fact.runId !== run.id || review.runId !== run.id || review.sourceFactId !== fact.sourceFactId
         || review.sourceId !== run.sourceId || review.sourceRevision !== run.sourceRevision)
         throw new Error('Graph review does not match the exact source candidate')
+      const priorReview = l1.reviews().find(item => item.id === review.id)
+      if (review.reviewer === 'policy' && priorReview?.reviewer === 'user') return undefined
+      const priorTask = l1.tasks().find(item => item.review.id === review.id)
+      if (priorTask) return runTask(priorTask)
       if (review.status !== 'approved') {
         // A review is durable before publication eligibility is considered. Replayed
         // policy assessments must not undo a human decision or an existing outbox task.
@@ -313,6 +314,8 @@ export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
           l1.recordReview(review)
         return undefined
       }
+      if (!graphSourceCandidateValid(run, sourceFact(run, fact)))
+        throw new Error('Graph publication requires exact source evidence')
       if (fact.status !== 'ready')
         throw new Error('Approved graph fact still needs identity or predicate resolution')
       if (admission && admission.sourceRevision !== run.sourceRevision)
@@ -410,6 +413,7 @@ function persistV4Fact(v4: MemoryV4Repository, task: GraphPublicationTask, regis
       sensitivity: review.sensitivity, sharePolicy: review.sharePolicy,
       origin: review.userConfirmed ? 'manual' : 'automatic',
       metadata: { graphReviewId: review.id, graphTaskId: task.id, modelScore: review.modelScore,
+        verificationMeaning: 'source-alignment-not-world-truth',
         userConfirmed: review.userConfirmed, retrievalRetain: review.retrieval.retain,
         proactivePreference: review.proactive.useAsPreference,
         sourceTime: context.time.value, timeResolution: context.time.resolution },

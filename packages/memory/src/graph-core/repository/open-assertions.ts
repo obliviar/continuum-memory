@@ -38,7 +38,7 @@ export function needsOpenFactRepresentation(run: GraphExtractionRun, fact: FactC
 
 /** Match the immutable extraction to a current capture, including exact planned segments. */
 export function projectOpenAssertions(captures: CaptureSnapshot, store: Pick<GraphExtractionResultStore, 'list' | 'openReviews'>,
-  scope: GraphScope): GraphOpenAssertionRecord[] {
+  scope: GraphScope, options: { includeKnownFacts?: boolean } = {}): GraphOpenAssertionRecord[] {
   const result = new Map<string, GraphOpenAssertionRecord>()
   const reviews = new Map(store.openReviews().map(review => [review.assertionId, review]))
   const registry = createGraphPredicateRegistry()
@@ -71,7 +71,7 @@ export function projectOpenAssertions(captures: CaptureSnapshot, store: Pick<Gra
     const { source, offset, text } = matched[0]!
     const mentions = new Map(run.entityMentions.map(mention => [mention.id, mention]))
     const candidates = [...(run.assertionCandidates ?? []).map(candidate => ({ ...candidate, attributes: [] as GraphOpenAssertionRecord['attributes'] })),
-      ...run.factCandidates.filter(fact => needsOpenFactRepresentation(run, fact, registry))
+      ...run.factCandidates.filter(fact => options.includeKnownFacts || needsOpenFactRepresentation(run, fact, registry))
       .map(fact => ({ id: fact.id, relationText: fact.predicate, evidenceSpan: fact.evidenceSpan,
         modelScore: fact.modelScore, context: fact.context,
         participants: [{ mentionId: fact.subjectMentionId, role: 'subject' },

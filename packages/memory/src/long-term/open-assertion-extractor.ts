@@ -13,7 +13,7 @@ export function extractLocalOpenAssertions(text: string): { entities: EntityMent
     let parts: { text: string; role: string }[] = []
     const explicit = /^(.+?)与(.+?)的关系(?:是|为)[：:]?(.+)$/u.exec(content)
     const placement = /^(.+?)把(.+?)(放入|放进|存入|移入|送到)(.+)$/u.exec(content)
-    const binary = /^(.+?)(存放在|保存在|依赖于|依赖|位于|安装在|连接到|连接着)(.+)$/u.exec(content)
+    const binary = /^(.+?)(存放在|保存在|放在|依赖于|依赖|位于|安装在|连接到|连接着|使用电源|供电来自|使用|负责)(.+)$/u.exec(content)
     const event = /^(.+?)发生(?:了)?(.+)$/u.exec(content)
     if (explicit) {
       relationText = explicit[3]!.trim()

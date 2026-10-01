@@ -3,6 +3,7 @@ import { normalizeGraphExtraction, type GraphEntityRecord } from './graph-identi
 import type { GraphNormalizationStore } from './graph-normalization-store'
 import { assessGraphClaim, type GraphL1Store } from './graph-l1-write'
 import { inferMemoryPrivacy } from './memory-extractor'
+import { autoNormalizeUieGraphFact } from './graph-auto-identity'
 
 /** Latest UIE attempt per source revision, excluding any source that already yielded facts. */
 export function graphSourcesWithoutFactCandidates(runs: readonly GraphExtractionRun[]): GraphExtractionRun[] {
@@ -38,11 +39,15 @@ export function recoverGraphClaimReviews(runs: readonly GraphExtractionRun[],
     for (const fact of normalized.facts) {
       const key = `${run.id}\0${fact.sourceFactId}`
       if (known.has(key) || !run.factCandidates.some(item => item.id === fact.sourceFactId)) continue
-      const review = assessGraphClaim(run, fact, inferMemoryPrivacy(run.sourceText))
-      // Recovery restores visibility, not authorization to publish old material.
+      const automatic = autoNormalizeUieGraphFact(run, fact.sourceFactId,
+        { entities: normalization.entities(), aliases: normalization.aliasDecisions(), scope })
+      const candidate = automatic?.normalized.facts.find(item => item.sourceFactId === fact.sourceFactId) ?? fact
+      const review = assessGraphClaim(run, candidate, inferMemoryPrivacy(run.sourceText))
+      // Synchronous recovery queues a machine replay; the host checks the live
+      // capture and exact revision before asynchronous automatic publication.
       if (review.status === 'approved') {
         review.status = 'pending'
-        review.reason = 'recovered-candidate-needs-review'
+        review.reason = 'source-record-auto-publication-queued'
       }
       l1.recordReview(review)
       known.add(key)

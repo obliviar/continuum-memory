@@ -297,3 +297,4 @@ export type { OpenAssertionCandidate, OpenAssertionReview } from './long-term/gr
 export { extractLocalOpenAssertions } from './long-term/open-assertion-extractor'
 export { parseUieExtractionTargets } from './long-term/local-uie'
 export type { UieSchema } from './long-term/local-uie'
+export { planUieSchema } from './long-term/uie-schema-planner'

@@ -35,6 +35,7 @@ import {
   createMemoryWriter,
   createCaptureRepository,
   createSmartMemoryExtractor,
+  createOpenGraphExtractor,
   createUieRuleFallbackExtractor,
   planUieSchema,
   createGraphExtractionResultStore,
@@ -400,7 +401,7 @@ function saveSessions() {
 }
 
 // ── Scheme A long-term memory ───────────────────────────
-type MemoryExtractionMode = 'rules' | 'smart' | 'uie'
+type MemoryExtractionMode = 'rules' | 'smart' | 'uie' | 'open'
 type MemoryRemotePolicy = 'normal-only' | 'allow-private' | 'disabled'
 const memoryV4InternalReviewEnvironmentOverride
   = typeof memoryV4InternalReviewEnvironment === 'string'
@@ -409,6 +410,7 @@ const memoryV4InternalReviewEnvironmentOverride
 
 interface MemorySettings {
   extractionMode: MemoryExtractionMode
+  uieSupplementEnabled: boolean
   /** Run local UIE graph capture alongside the stable rules memory extractor. */
   graphExtractionEnabled: boolean
   openSourceRecallEnabled: boolean
@@ -421,6 +423,7 @@ interface MemorySettings {
 
 const defaultMemorySettings: MemorySettings = {
   extractionMode: 'rules',
+  uieSupplementEnabled: true,
   graphExtractionEnabled: true,
   openSourceRecallEnabled: false,
   semanticEnabled: false,
@@ -431,7 +434,8 @@ const defaultMemorySettings: MemorySettings = {
 
 function normalizeMemorySettings(value: Partial<MemorySettings> | undefined): MemorySettings {
   return {
-    extractionMode: value?.extractionMode === 'smart' || value?.extractionMode === 'uie' ? value.extractionMode : 'rules',
+    extractionMode: value?.extractionMode === 'smart' || value?.extractionMode === 'uie' || value?.extractionMode === 'open' ? value.extractionMode : 'rules',
+    uieSupplementEnabled: value?.uieSupplementEnabled !== false,
     graphExtractionEnabled: value?.graphExtractionEnabled !== false,
     openSourceRecallEnabled: value?.openSourceRecallEnabled === true,
     semanticEnabled: value?.semanticEnabled === true,
@@ -894,10 +898,23 @@ async function saveGraphExtraction(run: GraphExtractionRun): Promise<void> {
 function createConfiguredMemoryExtractor(): MemoryExtractor {
   const captureSettings = { ...memorySettings }
   const captureApiConfig = { ...apiConfig }
+  const canSendSource = (turn: Parameters<MemoryExtractor>[0]): boolean => {
+    if (captureSettings.remotePolicy === 'disabled' || !isSafeMemoryContent(turn.userMessage)) return false
+    const privacy = inferMemoryPrivacy(turn.userMessage)
+    // Enabling an extraction mode never overrides local-only private/secret source policy.
+    return privacy.sensitivity === 'normal' && privacy.sharePolicy === 'allow-remote'
+  }
   const smartExtractor = createSmartMemoryExtractor({
     getConfig: () => captureApiConfig,
     fallback: extractMemoryCandidates,
+    canSendSource,
     saveGraphExtraction: run => captureSettings.graphExtractionEnabled ? saveGraphExtraction(run) : undefined,
+  })
+  const openExtractor = createOpenGraphExtractor({
+    getConfig: () => captureApiConfig,
+    fallback: extractMemoryCandidates,
+    canSendSource,
+    saveGraphExtraction,
   })
   const uieWithRules = createUieRuleFallbackExtractor({
     uie: localUie,
@@ -914,12 +931,13 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
     },
   })
   return async (turn) => {
-    let candidates: MemoryCandidate[] = await uieWithRules(turn)
-    if (captureSettings.extractionMode === 'smart' && captureSettings.remotePolicy !== 'disabled') {
-      const smart = await smartExtractor(turn)
-      const existing = new Set(candidates.map(candidate => candidate.content.toLocaleLowerCase()))
-      candidates = [...candidates, ...smart.filter(candidate => !existing.has(candidate.content.toLocaleLowerCase()))]
-    }
+    // Open discovery is persisted before UIE starts: UIE failure cannot gate arbitrary relations.
+    let candidates: MemoryCandidate[] = captureSettings.extractionMode === 'open'
+      ? await openExtractor(turn)
+      : captureSettings.extractionMode === 'smart'
+        ? await smartExtractor(turn) : await extractMemoryCandidates(turn)
+    if (captureSettings.uieSupplementEnabled || captureSettings.extractionMode === 'uie')
+      candidates = mergeMemoryCandidates([...candidates, ...await uieWithRules(turn)])
     if (!captureSettings.imageMemoryEnabled
       || !turn.attachments?.length
       || !isExplicitImageMemoryRequest(turn.userMessage))
@@ -1164,11 +1182,13 @@ function initializeMemory(): void {
       onCaptureSourcesChanged: () => syncGraphSemantic(),
       captureProcessorVersion: `capture-v1:${createHmac('sha256', 'capture-profile-v1').update(JSON.stringify({
         mode: memorySettings.extractionMode,
+        extractionPipeline: 'open-first-v1',
+        uieSupplementEnabled: memorySettings.uieSupplementEnabled,
         graphExtractionEnabled: memorySettings.graphExtractionEnabled,
         remotePolicy: memorySettings.remotePolicy,
         imageMemoryEnabled: memorySettings.imageMemoryEnabled,
         uieModelHome: config.uieModelPath ?? config.uieModelHome,
-        ...(memorySettings.extractionMode === 'smart' ? { model: apiConfig.model, baseURL: apiConfig.baseURL } : {}),
+        ...(memorySettings.extractionMode === 'smart' || memorySettings.extractionMode === 'open' ? { model: apiConfig.model, baseURL: apiConfig.baseURL } : {}),
       })).digest('hex')}`,
       extractor: createConfiguredMemoryExtractor(),
       onCaptured: (capture) => {
@@ -2294,9 +2314,11 @@ function setupIPC() {
     graphOpenAssertionItems: openAssertions.filter(item => item.review.status !== 'rejected')
       .sort((a, b) => Number(a.review.status === 'accepted') - Number(b.review.status === 'accepted')).slice(0, Number(limit)),
     graphExtraction: {
-      enabled: !!graphExtractionStore && (memorySettings.extractionMode === 'uie'
+      enabled: !!graphExtractionStore && (memorySettings.extractionMode === 'uie' || memorySettings.extractionMode === 'open'
         || memorySettings.graphExtractionEnabled),
-      modelReady: localUie.isReady(),
+      modelReady: memorySettings.extractionMode === 'open' || memorySettings.extractionMode === 'smart'
+        ? !!apiConfig.apiKey.trim() && !!apiConfig.model.trim() && memorySettings.remotePolicy !== 'disabled'
+        : localUie.isReady(),
       error: graphExtractionError || null,
       runs: graphExtractionStore?.list().length ?? 0,
       factCandidates: graphExtractionStore?.list().reduce((count, run) => count + run.factCandidates.length + (run.assertionCandidates?.length ?? 0), 0) ?? 0,
@@ -2762,9 +2784,11 @@ function setupIPC() {
   let graphReextractBusy = false
   ipcMain.handle('memory:graph-reextract-empty', async () => {
     if (graphReextractBusy) return { ok: false, error: '正在重新提取，请稍候。' }
-    if (!graphExtractionStore || !graphNormalizationStore || !graphL1Store || !localUie.isReady())
-      return { ok: false, error: '本地模型或图存储不可用。' }
-    if (!memorySettings.graphExtractionEnabled && memorySettings.extractionMode !== 'uie')
+    const useOpen = memorySettings.extractionMode === 'open' || memorySettings.extractionMode === 'smart'
+    if (!graphExtractionStore || !graphNormalizationStore || !graphL1Store
+      || (useOpen ? !apiConfig.apiKey.trim() || !apiConfig.model.trim() || memorySettings.remotePolicy === 'disabled' : !localUie.isReady()))
+      return { ok: false, error: '当前提取模型、发送权限或图存储不可用。' }
+    if (!memorySettings.graphExtractionEnabled && memorySettings.extractionMode !== 'uie' && memorySettings.extractionMode !== 'open')
       return { ok: false, error: '请先开启保存 UIE 图提取结果。' }
     const store = graphExtractionStore
     const sources = graphSourcesWithoutFactCandidates(store.list()).slice(0, 5)
@@ -2772,6 +2796,28 @@ function setupIPC() {
     graphReextractBusy = true
     try {
       for (const source of sources) {
+        if (useOpen) {
+          if (!isSafeMemoryContent(source.sourceText) || inferMemoryPrivacy(source.sourceText).sensitivity !== 'normal')
+            continue // Historical private sources are not authorized by selecting an extraction mode.
+          let extractionFailure: string | undefined
+          let saved = false
+          const extractor = createOpenGraphExtractor({ getConfig: () => ({ ...apiConfig }),
+            saveGraphExtraction: async run => {
+              if (graphExtractionStore !== store || !store.list().some(item => item.id === source.id)) {
+                extractionFailure = '记忆来源或设置已变化，请刷新后重试。'
+                throw new Error(extractionFailure)
+              }
+              await saveGraphExtraction(run)
+              saved = true
+              if (run.status === 'failed') extractionFailure = '开放提取失败，请检查 API 配置。'
+              candidates += run.assertionCandidates?.length ?? 0
+            } })
+          await extractor({ userMessage: source.sourceText, assistantMessage: '',
+            metadata: { sourceMessageIds: [source.sourceId] } })
+          if (extractionFailure || !saved) throw new Error(extractionFailure ?? '开放提取未保存，请检查配置与图存储。')
+          processed++
+          continue
+        }
         const extraction = await localUie.extract(source.sourceText, planUieSchema(source.sourceText).schema)
         // Settings reload, clear, or source deletion while the model is running
         // must not restore removed material into a new store.

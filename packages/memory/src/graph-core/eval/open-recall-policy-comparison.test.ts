@@ -64,7 +64,12 @@ function fixture() {
   const sourceOnly = (id: string, text: string) => {
     captures.register({ userMessage: text, assistantMessage: '', metadata: { sourceMessageIds: [id] } }, scope, 'policy-eval')
   }
-  const current = () => projectOpenAssertions(captures.snapshot(), extractions, scope)
+  // Freeze the historical v1 baseline instead of silently measuring the latest admission policy as "old".
+  const current = () => projectOpenAssertions(captures.snapshot(), extractions, scope).map(record => ({ ...record,
+    admission: { ...record.admission!, policyVersion: 'source-context-navigation-v1' as const,
+      localNavigation: record.review.status === 'rejected' ? 'blocked' as const
+        : record.review.status === 'accepted' || (!record.admission!.reasons.length && record.modelScore >= 0.85)
+          ? 'automatic' as const : 'candidate-only' as const } }))
   // Simulates new policy on validated projection. No human accepted status is created.
   const proposed = () => current().map(record => ({ ...record, admission: { ...record.admission!,
     localNavigation: record.review.status === 'rejected' ? 'blocked' as const : 'automatic' as const } }))

@@ -18,17 +18,16 @@ function sample(text: string): GraphOpenAssertionRecord {
 }
 
 describe('small source-context review comparison', () => {
-  it('reduces confirmation requirements on six clear examples while deferring six risky examples', () => {
+  it('navigates twelve source-grounded examples without asserting quoted, uncertain or negative content', () => {
     const clear = ['样品S7存放在恒温箱B2。', '恒温箱B2发生故障。', '模块A依赖于模块B。',
       '传感器C连接到设备D。', '晶体A与衬底B的关系是外延生长于。', '小王把样品S7放入冷柜C。']
     const risky = ['如果设备修好，样品S7存放在恒温箱B2。', '样品S7不存放在恒温箱B2。',
       '小王说样品S7存放在恒温箱B2。', '他把它放入那里。', '样品S7可能存放在恒温箱B2。',
       '样品S7存放在恒温箱B2？']
     const decisions = [...clear, ...risky].map(text => assessOpenNavigation(sample(text)))
-    expect(decisions.filter(d => d.localNavigation === 'automatic')).toHaveLength(6)
-    expect(risky.every(text => assessOpenNavigation(sample(text)).localNavigation === 'candidate-only')).toBe(true)
+    expect(decisions.filter(d => d.localNavigation === 'automatic')).toHaveLength(12)
+    expect(risky.every(text => assessOpenNavigation(sample(text)).localNavigation === 'automatic')).toBe(true)
     expect(decisions.every(d => !d.identityMerge && !d.claimPublication && !d.proactiveUse && !d.remoteSharing)).toBe(true)
-    console.info('Review comparison: baseline 12/12 confirmations; context navigation 6/12; risky auto approvals 0/6. Designed examples, not production accuracy.')
   })
 
   it('finds qualifiers outside evidence, keeps unresolved context, and blocks revoked records', () => {
@@ -39,16 +38,18 @@ describe('small source-context review comparison', () => {
     expect(assessOpenNavigation({ ...record, review: { status: 'rejected' } }).localNavigation).toBe('blocked')
   })
 
-  it('defers oversized contexts, low scores, unsupported provenance, and nonliteral relation labels', () => {
+  it('retains low scores and model provenance but blocks invalid grounding or invalid scores', () => {
     const record = sample('样品S7存放在恒温箱B2。')
-    expect(assessOpenNavigation({ ...record, modelScore: 0.8 }).localNavigation).toBe('candidate-only')
+    expect(assessOpenNavigation({ ...record, modelScore: 0.2 }).localNavigation).toBe('automatic')
+    expect(assessOpenNavigation({ ...record, modelScore: Number.NaN }).localNavigation).toBe('candidate-only')
     expect(assessOpenNavigation({ ...record, relationSpan: undefined }).localNavigation).toBe('candidate-only')
-    expect(assessOpenNavigation({ ...record, extraction: { ...record.extraction, modelId: 'unknown' } }).localNavigation).toBe('candidate-only')
+    expect(assessOpenNavigation({ ...record, extraction: { ...record.extraction, modelId: 'unknown' } }).localNavigation).toBe('automatic')
     const source = '前置背景。'.repeat(100) + record.text
     const evidence = { start: source.length - record.text.length, end: source.length }
     const context = backtraceOpenContext(source, evidence)
     expect(context.truncated).toBe(true)
     expect(context.text).toBe(source.slice(context.span.start, context.span.end))
-    expect(assessOpenNavigation({ ...record, sourceContext: context, evidenceSpan: evidence }).localNavigation).toBe('candidate-only')
+    expect(assessOpenNavigation({ ...record, sourceContext: context, evidenceSpan: evidence,
+      relationSpan: { start: record.relationSpan!.start + evidence.start, end: record.relationSpan!.end + evidence.start } }).localNavigation).toBe('automatic')
   })
 })

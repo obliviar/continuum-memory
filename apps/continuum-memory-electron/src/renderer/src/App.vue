@@ -94,7 +94,8 @@ interface MemoryItem {
 }
 
 interface MemorySettings {
-  extractionMode: 'rules' | 'smart' | 'uie'
+  extractionMode: 'rules' | 'smart' | 'uie' | 'open'
+  uieSupplementEnabled: boolean
   graphExtractionEnabled: boolean
   openSourceRecallEnabled: boolean
   semanticEnabled: boolean
@@ -337,6 +338,7 @@ const editingMemoryContent = ref('')
 const confirmClearMemories = ref(false)
 const memorySettings = ref<MemorySettings>({
   extractionMode: 'rules',
+  uieSupplementEnabled: true,
   graphExtractionEnabled: true,
   openSourceRecallEnabled: false,
   semanticEnabled: false,
@@ -1694,7 +1696,8 @@ async function doReset() {
               <span>事实提取</span>
               <select v-model="memorySettings.extractionMode" :disabled="memoryMutating" @change="saveMemorySettings({ extractionMode: memorySettings.extractionMode })">
                 <option value="rules">规则记忆 + 本地 UIE 自动/待审候选</option>
-                <option value="smart">规则 + 本地 UIE + 聊天模型</option>
+                <option value="open">开放关系优先（向当前 API 发送普通原文；无需领域 schema）</option>
+                <option value="smart">开放关系 + 智能长期记忆（当前 API）</option>
                 <option value="uie">本地 UIE-base（强制保存图候选）</option>
               </select>
             </label>
@@ -1708,9 +1711,14 @@ async function doReset() {
             </label>
           </div>
           <label class="memory-check-row">
-            <input v-model="memorySettings.graphExtractionEnabled" type="checkbox" :disabled="memoryMutating || memorySettings.extractionMode === 'uie'" @change="saveMemorySettings({ graphExtractionEnabled: memorySettings.graphExtractionEnabled })" />
-            <span>保存 UIE 图提取结果供审核（所有模式均尝试 UIE；失败保留规则记忆；此开关不改变召回策略）</span>
+            <input v-model="memorySettings.uieSupplementEnabled" type="checkbox" :disabled="memoryMutating || memorySettings.extractionMode === 'uie'" @change="saveMemorySettings({ uieSupplementEnabled: memorySettings.uieSupplementEnabled })" />
+            <span>启用本地 UIE 领域补充（可关闭；开放关系保存不依赖 UIE 成功）</span>
           </label>
+          <label class="memory-check-row">
+            <input v-model="memorySettings.graphExtractionEnabled" type="checkbox" :disabled="memoryMutating || memorySettings.extractionMode === 'uie'" @change="saveMemorySettings({ graphExtractionEnabled: memorySettings.graphExtractionEnabled })" />
+            <span>保存补充图提取结果（开放模式始终保存开放关系；无需逐条审核原文线索；不改变召回策略）</span>
+          </label>
+          <div class="field-hint">开放模式使用当前聊天 API 提取实体与原文关系，不依赖 UIE schema；API 不可用时保留本地规则结果，但不能保证发现任意陌生关系。旧的规则模式不会自动向 API 发送原文。</div>
           <label class="memory-check-row">
             <input v-model="memorySettings.openSourceRecallEnabled" type="checkbox" :disabled="memoryMutating" @change="saveMemorySettings({ openSourceRecallEnabled: memorySettings.openSourceRecallEnabled })" />
             <span>允许普通历史原文参与聊天：自动沿开放关系寻找关联记忆并发送给当前 API（包含已保存原文；隐私与密钥内容除外）</span>

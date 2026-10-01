@@ -98,7 +98,7 @@ export type {
   MemoryCandidateVerificationContext,
   MemoryWriteMatches,
 } from './long-term/memory-write-policy'
-export { createSmartMemoryExtractor } from './long-term/smart-memory-extractor'
+export { createSmartMemoryExtractor, createOpenGraphExtractor, buildOpenGraphPrompt } from './long-term/smart-memory-extractor'
 export type { SmartExtractorConfig, SmartMemoryExtractorOptions } from './long-term/smart-memory-extractor'
 export {
   createLocalUieExtractor,

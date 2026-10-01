@@ -88,6 +88,8 @@ export interface GraphExtractionInput {
   modelId: string
   rawOutput: unknown
   statusReason?: string
+  /** Open-model output must ground its arbitrary relation label in an exact span. */
+  requireRelationSpan?: boolean
 }
 
 /** Retain all UIE output; parse up to a safety budget without graph write filtering. */
@@ -106,7 +108,7 @@ export function createGraphExtractionRun(input: GraphExtractionInput): GraphExtr
   const entityById = new Map(entityMentions.map(mention => [mention.id, mention]))
   const factCandidates = parsedFacts.map(value => parseFact(value, input.sourceText, entityIds)).filter(isPresent)
   const assertionCandidates = rawAssertions.slice(0, MAX_PARSED_ITEMS_PER_KIND)
-    .map(value => parseAssertion(value, input.sourceText, entityById)).filter(isPresent)
+    .map(value => parseAssertion(value, input.sourceText, entityById, input.requireRelationSpan)).filter(isPresent)
   const invalidCount = parsedEntities.length - entityMentions.length + parsedFacts.length - factCandidates.length
     + Math.min(rawAssertions.length, MAX_PARSED_ITEMS_PER_KIND) - assertionCandidates.length
   const missingGraph = !graph || !Array.isArray(graph.entities) || !Array.isArray(graph.facts)
@@ -268,7 +270,7 @@ function parseFact(value: unknown, sourceText: string, entityIds: Set<string>): 
 
 function isPresent<T>(value: T | undefined): value is T { return value !== undefined }
 
-function parseAssertion(value: unknown, sourceText: string, entities: Map<string, EntityMention>): OpenAssertionCandidate | undefined {
+function parseAssertion(value: unknown, sourceText: string, entities: Map<string, EntityMention>, requireRelationSpan = false): OpenAssertionCandidate | undefined {
   const raw = object(value)
   const evidenceSpan = span(raw?.evidenceSpan, sourceText)
   if (!raw || typeof raw.id !== 'string' || !raw.id || typeof raw.relationText !== 'string'
@@ -284,6 +286,7 @@ function parseAssertion(value: unknown, sourceText: string, entities: Map<string
     participants.push({ mentionId: participant.mentionId, role: participant.role })
   }
   const relationSpan = raw.relationSpan === undefined ? undefined : span(raw.relationSpan, sourceText)
+  if (requireRelationSpan && !relationSpan) return undefined
   if (raw.relationSpan !== undefined && (!relationSpan || sourceText.slice(relationSpan.start, relationSpan.end) !== raw.relationText
     || relationSpan.start < evidenceSpan.start || relationSpan.end > evidenceSpan.end)) return undefined
   const context = object(raw.context)

@@ -30,17 +30,18 @@ describe('contextual navigation without review permission escalation', () => {
     expect(result.items).toEqual(hits)
   })
 
-  it('offers qualified records only with explicit candidate display and retains unknown context', async () => {
+  it('navigates qualified source records while retaining unknown context rather than asserting truth', async () => {
     const openAssertions = records(['如果设备修好，样品S7存放在恒温箱B2。'])
-    expect(searchOpenAssertions({ openAssertions }, '样品S7', { scope })).toEqual([])
+    expect(searchOpenAssertions({ openAssertions }, '样品S7', { scope })).toHaveLength(1)
     const result = await searchOpenAssertionsWithContext({ openAssertions }, '样品S7', { scope, includeCandidates: true })
     expect(result.items).toHaveLength(1)
-    expect(result.items[0]?.verification).toBe('unverified-candidate')
+    expect(result.items[0]?.verification).toBe('automatic-navigation')
+    expect(result.items[0]?.assertion.inferenceAllowed).toBe(false)
     expect(result.items[0]?.assertion.context.condition.resolution).toBe('unresolved')
     expect(result.items[0]?.assertion.sourceContext?.text).toContain('如果')
   })
 
-  it('uses mock contextual vectors to rank and expand semantic seeds, never to accept even maximally similar risky material', async () => {
+  it('uses contextual vectors to navigate source records without manufacturing user acceptance', async () => {
     const openAssertions = records(['样品S7存放在恒温箱B2。', '恒温箱B2发生故障。', '如果下雨，模块A依赖于模块B。'])
     const embed = vi.fn(async (text: string) => text.includes('存放在') || text === '储存位置' ? [1, 0] : [0, 1])
     const result = await searchOpenAssertionsWithContext({ openAssertions }, '储存位置', { scope, embed, maximumDepth: 2 })
@@ -50,7 +51,7 @@ describe('contextual navigation without review permission escalation', () => {
     expect(result.items[1]?.via?.contextSimilarity).toBe(0)
     const risky = await searchOpenAssertionsWithContext({ openAssertions }, '如果', {
       scope, embed: async () => [1, 0], includeCandidates: true })
-    expect(risky.items.find(hit => hit.assertion.text.includes('如果'))?.verification).toBe('unverified-candidate')
+    expect(risky.items.find(hit => hit.assertion.text.includes('如果'))?.verification).toBe('automatic-navigation')
     expect(openAssertions.every(a => a.review.status === 'candidate')).toBe(true)
   })
 

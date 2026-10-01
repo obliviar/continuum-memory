@@ -9,7 +9,7 @@ export interface OpenSourceContext {
 }
 
 export interface OpenNavigationAdmission {
-  policyVersion: 'source-context-navigation-v1'
+  policyVersion: 'source-context-navigation-v1' | 'source-context-navigation-v2'
   localNavigation: 'automatic' | 'candidate-only' | 'blocked'
   reasons: string[]
   identityMerge: false

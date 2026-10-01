@@ -677,6 +677,26 @@ async function reextractEmptyGraphSources() {
   finally { memoryMutating.value = false }
 }
 
+async function reassessPendingGraphFacts() {
+  if (memoryMutating.value) return
+  memoryMutating.value = true
+  memoryStatusError.value = false
+  memoryStatusMessage.value = '正在根据保留的原文与 UIE 结果重新审核图事实…'
+  try {
+    const result = await ipcRenderer.invoke('memory:graph-auto-reassess')
+    memoryStatusError.value = !result?.ok || result.failed > 0
+    memoryStatusMessage.value = result?.ok
+      ? `已尝试自动审核 ${result.reviewed} 条，发布 ${result.published} 条；另有 ${result.deferred} 条保持待审，${result.failed} 条发布未完成。`
+      : result?.error || '图事实自动重审失败。'
+    await refreshMemoryList()
+  }
+  catch (error) {
+    memoryStatusError.value = true
+    memoryStatusMessage.value = error instanceof Error ? error.message : '图事实自动重审失败。'
+  }
+  finally { memoryMutating.value = false }
+}
+
 async function reviewGraphCandidate(id: string, outcome: 'approved' | 'rejected' | 'pending') {
   if (memoryMutating.value) return
   const reason = graphReviewReasons.value[id]?.trim()
@@ -1633,6 +1653,10 @@ async function doReset() {
           <div v-for="item in graphInformationItems" :key="item.id" :title="item.sourceId">{{ item.text }}</div>
         </details>
         <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条关系/事件候选、{{ graphExtractionStatus.pendingReviews }} 条待审、{{ graphExtractionStatus.claims }} 条规范 L1 Claim</div>
+        <div v-if="graphExtractionStatus?.pendingReviews" class="field-hint">
+          旧候选不会在启动时自动批准；可根据保留的原文重新审核策略待审项，手动决定与已拒绝项不会被覆盖。
+          <button class="secondary-btn" :disabled="memoryMutating || !graphExtractionStatus.enabled" @click="reassessPendingGraphFacts">按新策略自动重审图事实（每次最多 20 条）</button>
+        </div>
         <div v-if="graphExtractionStatus" class="field-hint">开放关系：{{ graphExtractionStatus.automaticOpenNavigation ?? 0 }} 条自动准入本地查询，{{ graphExtractionStatus.deferredOpenCandidates ?? 0 }} 条按需核实候选；无需逐条审核，也不会自动发布 Claim。</div>
         <div v-if="graphExtractionStatus?.sourcesWithoutFacts" class="field-hint">
           {{ graphExtractionStatus.sourcesWithoutFacts }} 条来源尚未提取出可审核的关系；实体或字段提取成功不代表已形成图事实。
@@ -1661,7 +1685,7 @@ async function doReset() {
             <label>
               <span>事实提取</span>
               <select v-model="memorySettings.extractionMode" :disabled="memoryMutating" @change="saveMemorySettings({ extractionMode: memorySettings.extractionMode })">
-                <option value="rules">规则记忆 + 本地 UIE 待审候选</option>
+                <option value="rules">规则记忆 + 本地 UIE 自动/待审候选</option>
                 <option value="smart">规则 + 本地 UIE + 聊天模型</option>
                 <option value="uie">本地 UIE-base（强制保存图候选）</option>
               </select>

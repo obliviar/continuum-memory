@@ -64,6 +64,8 @@ import {
   publishReviewedGraphRelation,
   createGraphPredicateRegistry,
   confirmGraphFactIdentities,
+  autoNormalizeUieGraphFact,
+  reassessRetainedUieGraphFacts,
   createV4ShadowWriter,
   createVectorStore,
   extractMemoryCandidates,
@@ -851,14 +853,30 @@ async function saveGraphExtraction(run: GraphExtractionRun): Promise<void> {
     graphNormalizationStore.appendResult(normalized)
     const registry = createGraphPredicateRegistry()
     const openCandidateIds = new Set(run.factCandidates.filter(fact => needsOpenFactRepresentation(run, fact, registry)).map(fact => fact.id))
-    for (const fact of normalized.facts) {
+    for (const initialFact of normalized.facts) {
+      let fact = initialFact
       if (openCandidateIds.has(fact.sourceFactId)) continue
       const evidence = run.factCandidates.find(item => item.id === fact.sourceFactId)
       if (!evidence) continue
-      const privacy = inferMemoryPrivacy(run.sourceText)
+      const sourcePrivacy = inferMemoryPrivacy(run.sourceText)
+      const automatic = fact.status !== 'ready' && sourcePrivacy.sensitivity !== 'secret'
+        ? autoNormalizeUieGraphFact(run, fact.sourceFactId, {
+        entities: graphNormalizationStore.entities(), aliases: graphNormalizationStore.aliasDecisions(),
+        scope: localMemoryScope, registry,
+      }) : undefined
+      if (automatic) fact = automatic.normalized.facts.find(item => item.sourceFactId === fact.sourceFactId) ?? fact
+      const privacy = run.modelId === 'uie-base' && sourcePrivacy.sensitivity !== 'secret'
+        ? { sensitivity: 'private' as const, sharePolicy: 'local-only' as const } : sourcePrivacy
       const review = assessGraphClaim(run, fact, privacy)
-      if (graphL1Writer && review.status === 'approved')
-        await graphL1Writer.submit(run, fact, review, graphNormalizationStore.entities())
+      if (graphL1Writer && review.status === 'approved') {
+        const entities = automatic?.entities ?? graphNormalizationStore.entities()
+        const task = await graphL1Writer.submit(run, fact, review, entities)
+        if (task?.state === 'published' && automatic) {
+          graphNormalizationStore.replaceCatalog(entities, graphNormalizationStore.aliasDecisions())
+          graphNormalizationStore.appendResult(automatic.normalized)
+        }
+        if (task && task.state !== 'published') graphExtractionError = task.lastError ?? '图事实发布尚未完成'
+      }
       else if (!graphL1Store?.reviews().some(item => item.id === review.id))
         graphL1Store?.recordReview(review)
     }
@@ -2720,6 +2738,23 @@ function setupIPC() {
       return { ok: false, error: graphExtractionError, processed, candidates }
     }
     finally { graphReextractBusy = false }
+  })
+
+  let graphAutoReassessBusy = false
+  ipcMain.handle('memory:graph-auto-reassess', async () => {
+    if (graphAutoReassessBusy) return { ok: false, error: '图事实正在自动重审，请稍候。' }
+    if (!graphCaptureRepository || !graphExtractionStore || !graphNormalizationStore || !graphL1Store || !graphL1Writer)
+      return { ok: false, error: '图事实审核存储当前不可用。' }
+    graphAutoReassessBusy = true
+    try {
+      const result = await reassessRetainedUieGraphFacts({
+        extractions: graphExtractionStore, normalization: graphNormalizationStore,
+        l1: graphL1Store, writer: graphL1Writer,
+        captureSnapshot: () => graphCaptureRepository!.snapshot(), scope: localMemoryScope,
+      })
+      return { ok: true, ...result }
+    }
+    finally { graphAutoReassessBusy = false }
   })
 
   ipcMain.handle('memory:uie-extract', async (_event, text: unknown) => {

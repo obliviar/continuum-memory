@@ -88,13 +88,15 @@ export function assessGraphClaim(run: GraphExtractionRun, fact: GraphNormalizedF
   const unsafeContext = source.context.negation.resolution === 'unresolved'
     || source.context.condition.resolution !== 'absent'
     || source.context.speaker.resolution === 'unresolved'
+  const minimumModelScore = run.modelId === 'uie-base' && source.subjectMentionId.startsWith('uie-personal:') ? 0.7 : 0.75
   const status: GraphClaimReview['status'] = !evidenceValid ? 'rejected'
-    : run.status !== 'complete' || unresolved || unsafeContext || source.modelScore < 0.75 ? 'pending' : 'approved'
+    : run.status !== 'complete' || unresolved || unsafeContext || source.modelScore < minimumModelScore ? 'pending' : 'approved'
   const reason = !evidenceValid ? 'invalid-evidence-span'
     : run.status !== 'complete' ? 'incomplete-extraction'
       : unresolved ? fact.reason ?? 'unresolved-fact'
       : unsafeContext ? 'context-needs-review'
-        : source.modelScore < 0.75 ? 'low-model-score' : 'source-grounded-graph-fact'
+        : source.modelScore < minimumModelScore ? 'low-model-score'
+          : run.modelId === 'uie-base' ? 'source-grounded-graph-fact:uie-auto-review-v2' : 'source-grounded-graph-fact'
   return {
     id: stableId('graph-review', `${run.id}\0${source.id}`), runId: run.id, sourceFactId: source.id,
     status, reason, reviewer: 'policy', reviewedAt: now, modelScore: source.modelScore,

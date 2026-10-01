@@ -108,6 +108,7 @@ export {
   parseUieOutput,
   uieGraphExtractionRun,
   uieReviewCandidates,
+  refreshUieGraphReviewContext,
 } from './long-term/local-uie'
 export type {
   LocalUieOptions,
@@ -145,6 +146,8 @@ export { createGraphNormalizationStore } from './long-term/graph-normalization-s
 export { recoverGraphClaimReviews, graphSourcesWithoutFactCandidates } from './long-term/graph-review-recovery'
 export { graphEntityVectorCandidates } from './long-term/graph-entity-vector-candidates'
 export { confirmGraphFactIdentities } from './long-term/graph-confirmed-identity'
+export { autoNormalizeUieGraphFact } from './long-term/graph-auto-identity'
+export { reassessRetainedUieGraphFacts } from './long-term/graph-policy-reassessment'
 export { reviewGraphAdmission } from './long-term/graph-admission-review'
 export type { GraphAdmissionChoices, GraphAdmissionDecision } from './long-term/graph-admission-review'
 export type { GraphNormalizationStore } from './long-term/graph-normalization-store'

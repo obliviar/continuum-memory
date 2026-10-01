@@ -11,6 +11,8 @@ export async function runDirectModelHarnessRegression() {
   const checks = [
     { id: 'baseline-labels-and-count-preserved', passed: report.baseline.summary.exactMatches === 11
       && report.baseline.summary.tests === 12 },
+    { id: 'structured-gain-is-separated-from-vector-gain', passed: report.structuredBaseline.summary.exactMatches === 12
+      && report.vectorOnlyControl.structuredRecall === false && report.vectorOnlyControl.summary.exactMatches === 12 },
     { id: 'paired-comparison-with-fixed-gold', passed: report.trials.length === 2 && report.trials.every(t =>
       t.summary.exactMatches === 12 && t.comparison.length === 12
       && t.comparison.find(c => c.id === 'semantic-rewrite')?.change === 'improved') },

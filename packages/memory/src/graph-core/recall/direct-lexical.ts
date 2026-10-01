@@ -11,13 +11,16 @@ function normalizedText(text: string): string {
 }
 
 /** Query-specific lexical index for authorized direct facts only. No polarity or semantic inference. */
-export function createDirectLexicalIndex(query: string) {
+export function directLexicalTerms(query: string, text: string): string[] {
   const normalized = normalizedText(query).trim()
   const singleHanQuery = /^[\u3400-\u9fff]$/.test(normalized)
-  const tokenizer = (text: string) => (normalizedText(text).match(/[\u3400-\u9fff]+|[a-z0-9]+/g) ?? [])
+  return (normalizedText(text).match(/[\u3400-\u9fff]+|[a-z0-9]+/g) ?? [])
     .flatMap(run => tokenizeBm25(run))
     .filter(term => (singleHanQuery || !term.startsWith('c:'))
       && !(term.startsWith('w:') && ENGLISH_FUNCTION_WORDS.has(term.slice(2))))
+}
+
+export function createDirectLexicalIndex(query: string) {
   // Keep the shared V3/V4 tokenizer unchanged. Only this direct graph route changes matching units.
-  return createMemoryBm25Index({ tokenizer })
+  return createMemoryBm25Index({ tokenizer: text => directLexicalTerms(query, text) })
 }

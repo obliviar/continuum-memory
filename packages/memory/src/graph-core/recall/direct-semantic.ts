@@ -13,9 +13,17 @@ export interface DirectSemanticOptions {
   embedQuery: (query: string) => Promise<{ model: string; vector: number[] } | undefined>
   minCosine?: number
   timeoutMs?: number
+  /** Candidate navigation only. Never interpret the top-ranked item as sufficient answer evidence. */
+  rankOnly?: boolean
 }
 interface Hit { id: string; score: number }
-interface SemanticResult { hits: Hit[]; scope: string[]; incomplete: boolean }
+export interface SemanticResult {
+  hits: Hit[]
+  /** Top two distinct facts BEFORE the admission threshold, for optional ambiguity checks. */
+  competition: Hit[]
+  scope: string[]
+  incomplete: boolean
+}
 
 function validVector(vector: number[] | undefined, dimensions: number): vector is number[] {
   return Array.isArray(vector) && vector.length === dimensions && vector.every(Number.isFinite)
@@ -29,8 +37,8 @@ export async function searchDirectSemantic(
   options: DirectSemanticOptions | undefined,
   remainingMs: number,
 ): Promise<SemanticResult> {
-  const result = (status: string, hits: Hit[] = [], incomplete = false, extra: string[] = []): SemanticResult =>
-    ({ hits, incomplete, scope: [`semantic:${status}`, ...extra] })
+  const result = (status: string, hits: Hit[] = [], incomplete = false, extra: string[] = [], competition: Hit[] = []): SemanticResult =>
+    ({ hits, competition, incomplete, scope: [`semantic:${status}`, ...extra] })
   if (!options) return result('disabled')
   if (!facts.length) return result('no-eligible-facts')
   const started = performance.now()
@@ -39,7 +47,7 @@ export async function searchDirectSemantic(
   if (!options.model.trim() || !Number.isSafeInteger(options.dimensions) || options.dimensions <= 0
     || !Number.isFinite(threshold) || threshold <= 0 || threshold > 1
     || !Number.isFinite(maxWait) || maxWait <= 0) return result('invalid-config', [], true)
-  const scope = [`semantic-model:${options.model}`, `semantic-min-cosine:${threshold}`]
+  const scope = [`semantic-model:${options.model}`, `semantic-min-cosine:${threshold}`, 'semantic-index:exact-flat']
   try {
     const index = createDenseVectorCandidateIndex()
     for (const fact of facts) {
@@ -65,9 +73,12 @@ export async function searchDirectSemantic(
     if (embedded === timeout) return result('query-timeout', [], true, scope)
     if (!embedded || embedded.model !== options.model || !validVector(embedded.vector, options.dimensions))
       return result('query-unavailable', [], true, scope)
-    const hits = index.search(embedded.vector, { limit: facts.length, minScore: threshold })
+    const ranked = index.search(embedded.vector, { limit: facts.length, minScore: -1 })
+    scope.push(`semantic-vectors-scored:${index.size()}`)
+    scope.push(`semantic-selection:${options.rankOnly ? 'rank-only' : 'threshold'}`)
+    const hits = options.rankOnly ? ranked : ranked.filter(hit => hit.score >= threshold)
     const partial = index.size() !== facts.length
-    return result(partial ? 'partial' : 'ready', hits, partial, scope)
+    return result(partial ? 'partial' : 'ready', hits, partial, scope, ranked.slice(0, 2))
   } catch { return result('query-or-index-failed', [], true, scope) }
 }
 

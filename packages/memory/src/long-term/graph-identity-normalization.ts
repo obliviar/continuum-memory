@@ -34,6 +34,8 @@ export interface GraphPredicateSpec {
   readonly transitivity: 'none' | 'approved'
   readonly inferenceAllowed: boolean
   readonly world: 'open'
+  readonly registrationKind?: 'basic'
+  readonly relationText?: string
 }
 
 export interface GraphPredicateRegistration {
@@ -289,6 +291,31 @@ function normalizeFact(runId: string, fact: FactCandidate, mentions: Map<string,
   if (!mapped)
     return { ...base, status: 'unresolved', reason: 'unknown-predicate' }
   const { registration, direction } = mapped
+  if ((registration.spec.registrationKind === 'basic' || fact.registrationKind === 'basic') && fact.participants) {
+    const args: Record<string, { kind: 'entity'; entityId: string } | GraphTypedValue> = {}
+    for (const participant of fact.participants) {
+      const resolution = resolutions.get(participant.mentionId)
+      const role = fact.roleMapping?.[participant.role] ?? participant.role
+      const type = registration.spec.roles[role]?.type
+      if (resolution?.status !== 'resolved' || !resolution.entityId)
+        return { ...base, status: 'unresolved', reason: 'unresolved-object', predicate: registration.spec.name }
+      if (!type || (registration.spec.registrationKind === 'basic'
+        ? typeof type !== 'object' || !entities.get(resolution.entityId)?.entityType
+        : !isEntityType(type, entities.get(resolution.entityId)?.entityType)))
+        return { ...base, status: 'unresolved', reason: 'wrong-entity-type', predicate: registration.spec.name }
+      args[role] = { kind: 'entity', entityId: resolution.entityId }
+    }
+    if ('literal' in fact.object) {
+      const type = registration.spec.roles[registration.targetRole]?.type
+      const literal = type ? parseLiteral(fact.object, type, registration.literalFormat) : undefined
+      if (!literal) return { ...base, status: 'unresolved', reason: 'invalid-literal', predicate: registration.spec.name }
+      args[registration.targetRole] = literal
+    }
+    if (Object.keys(args).length !== Object.keys(registration.spec.roles).length)
+      return { ...base, status: 'unresolved', reason: 'unresolved-object', predicate: registration.spec.name }
+    return { ...base, status: 'ready', predicate: registration.spec.name,
+      predicateVersion: registration.spec.ref.version, arguments: args }
+  }
   const sourceRole = direction === 'forward' ? registration.sourceRole : registration.targetRole
   const targetRole = direction === 'forward' ? registration.targetRole : registration.sourceRole
   const subject = resolutions.get(fact.subjectMentionId)

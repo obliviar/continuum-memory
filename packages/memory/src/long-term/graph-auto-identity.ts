@@ -19,28 +19,37 @@ export function autoNormalizeUieGraphFact(run: GraphExtractionRun, sourceFactId:
   if (!mapping) return undefined
   const sourceRole = mapping.direction === 'forward' ? mapping.registration.sourceRole : mapping.registration.targetRole
   const targetRole = mapping.direction === 'forward' ? mapping.registration.targetRole : mapping.registration.sourceRole
-  const required = [{ id: fact.subjectMentionId, role: sourceRole },
-    ...('mentionId' in fact.object ? [{ id: fact.object.mentionId, role: targetRole }] : [])]
+  const required = (mapping.registration.spec.registrationKind === 'basic' || fact.registrationKind === 'basic') && fact.participants
+    ? fact.participants.map(p => ({ id: p.mentionId, role: fact.roleMapping?.[p.role] ?? p.role }))
+    : [{ id: fact.subjectMentionId, role: sourceRole },
+      ...('mentionId' in fact.object ? [{ id: fact.object.mentionId, role: targetRole }] : [])]
   const entities = [...options.entities]
   const baseline = normalizeGraphExtraction(run, { entities, aliasDecisions: options.aliases, scope: options.scope, registry })
   const explicitIdentityByMentionId: Record<string, string> = {}
   for (const item of required) {
     const mention = run.entityMentions.find(value => value.id === item.id)
     const expected = mapping.registration.spec.roles[item.role]?.type
-    if (!mention || typeof expected !== 'object' || mention.type !== expected.entityType) return undefined
+    if (!mention || typeof expected !== 'object'
+      || (mapping.registration.spec.registrationKind !== 'basic' && mention.type !== expected.entityType)) return undefined
     const resolution = baseline.resolutions.find(value => value.mentionId === item.id)
     const self = mention.type === 'person' && mention.text === '我'
       && fact.context.speaker.resolution === 'resolved' && fact.context.speaker.value === 'user'
       && !/[“”"「」『』‘’']/u.test(run.sourceText.slice(fact.evidenceSpan.start, fact.evidenceSpan.end))
     const key = self ? `${options.scope.ownerId}\0${options.scope.agentId}\0${options.scope.sessionId ?? ''}\0self`
-      : `${options.scope.ownerId}\0${options.scope.agentId}\0${options.scope.sessionId ?? ''}\0${run.sourceId}\0${run.sourceRevision}\0${mention.id}`
-    const id = self ? `owner-entity:${createHash('sha256').update(key).digest('hex').slice(0, 32)}`
-      : resolution?.status === 'resolved' && resolution.entityId ? resolution.entityId : `source-entity:${createHash('sha256')
+      : `${options.scope.ownerId}\0${options.scope.agentId}\0${options.scope.sessionId ?? ''}\0${run.sourceId}\0${run.sourceRevision}\0${mention.id}${mention.resolvedText ? '\0' + mention.resolvedText : ''}`
+    let id = self ? `owner-entity:${createHash('sha256').update(key).digest('hex').slice(0, 32)}`
+      : resolution?.status === 'resolved' && resolution.entityId
+        && (!mention.resolvedText || entities.find(e => e.ref.id === resolution.entityId)?.canonicalName === mention.resolvedText)
+        ? resolution.entityId : `source-entity:${createHash('sha256')
       .update(key)
       .digest('hex').slice(0, 32)}`
+    const prior = entities.find(entity => entity.ref.id === id)
+    if (!self && prior && (prior.entityType !== mention.type || prior.canonicalName !== (mention.resolvedText ?? mention.text)))
+      id = `source-entity:${createHash('sha256').update(JSON.stringify([key, mention.type,
+        mention.resolvedText ?? mention.text, mention.span])).digest('hex').slice(0, 32)}`
     if (!entities.some(entity => entity.ref.id === id)) entities.push({
       ref: { kind: 'entity', id, version: 1 }, scope: options.scope,
-      entityType: mention.type, canonicalName: mention.text, aliases: [], review: { status: 'accepted' },
+      entityType: mention.type, canonicalName: mention.resolvedText ?? mention.text, aliases: [], review: { status: 'accepted' },
     })
     explicitIdentityByMentionId[mention.id] = id
   }

@@ -20,18 +20,21 @@ const scopeContains = (query: GraphScope, record: GraphScope, sessions: boolean)
   && (query.sessionId === record.sessionId || (sessions && query.sessionId === undefined))
 
 /** Build a query-independent read projection; preserve authoritative Claim IDs and versions. */
-export function collectCurrentL1(options: Options, scope: GraphScope, at: number) {
+export function collectCurrentL1(options: Options, scope: GraphScope, at: number,
+  visibleFacts?: readonly { id: string; version: number }[]) {
   const source = options.repository.snapshot()
   const gathered = collectV4RecallInputs(options.repository, { scope, expectedRevision: source.revision,
     includeOwnedSessions: options.includeOwnedSessions, now: at, canRead: options.canRead })
   // Graph-writer facts must never bypass retrieval consent or an unavailable native publication.
-  const scalarInputs = gathered.inputs.filter(input => !input.fact.metadata?.graphTaskId)
+  const visible = (id: string, version: number) => visibleFacts === undefined || visibleFacts.some(ref => ref.id === id && ref.version === version)
+  const scalarInputs = gathered.inputs.filter(input => !input.fact.metadata?.graphTaskId && visible(input.fact.id, input.version.version))
   const base = projectV4ScalarInputs(scalarInputs, scope, source.revision)
   const bundle = options.acceptedBundle?.()
   const accepted: { input: V4RecallInput; claim: GraphClaimRecord }[] = []
   if (bundle && bundle.revisions.v4 === source.revision && scopeContains(scope, bundle.scope, !!options.includeOwnedSessions)) {
     if (bundle.claims.length > 10000 || bundle.entities.length > 20000) throw new Error('Accepted L1 scan limit exceeded')
     for (const claim of bundle.claims) {
+      if (!visible(claim.fact.id, claim.fact.version)) continue
       const fact = source.facts.find(f => f.id === claim.fact.id)
       const version = source.factVersions.find(v => v.factId === claim.fact.id && v.version === claim.fact.version)
       const context = bundle.contexts.find(c => same(c.ref, claim.context))
@@ -46,7 +49,7 @@ export function collectCurrentL1(options: Options, scope: GraphScope, at: number
         || fact.verificationState !== 'verified' || fact.updatedAt > at
         || (fact.expiresAt !== undefined && fact.expiresAt <= at) || !options.canRead(structuredClone(fact)) || !readable(fact)) continue
       const fields = ['subjectId', 'predicate', 'object', 'objectType', 'normalizedValue', 'canonicalText',
-        'polarity', 'modality', 'condition', 'status', 'validFrom', 'validTo', 'evidenceLinkIds'] as const
+        'polarity', 'modality', 'condition', 'status', 'validFrom', 'validTo', 'evidenceLinkIds', 'sourceStatement'] as const
       if (version.recordedAt > at || fields.some(key => !same(fact[key], version[key]))) continue
       if (!bundle.predicates.some(p => p.name === claim.atom.predicate)
         || Object.values(claim.atom.args).some(term => term.kind === 'entity' && !bundle.entities.some(entity =>

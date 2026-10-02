@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { MemoryV4Repository } from '../v4/repository/memory-v4-repository'
-import type { MemoryEpisodeV4, MemoryFactV4, MemoryFactVersionV4 } from '../v4/domain/types'
+import type { MemoryEpisodeV4, MemoryFactV4, MemoryFactVersionV4, MemorySourceStatementV4 } from '../v4/domain/types'
 import type { GraphExtractionRun, FactCandidate } from './graph-extraction-result'
 import type { FactContext } from './graph-extraction-result'
 import type { GraphAdmissionDecision } from './graph-admission-review'
@@ -27,12 +27,13 @@ export interface GraphClaimRecord {
   sharePolicy: 'allow-remote' | 'local-only' | 'ask'
   atom: { predicate: string; args: Record<string, GraphGroundTerm> }
   polarity: 'positive' | 'negative' | 'unknown'
-  modality: 'asserted' | 'reported' | 'hypothetical' | 'unknown'
+  modality: 'asserted' | 'planned' | 'reported' | 'hypothetical' | 'unknown'
   condition: { kind: 'none' } | { kind: 'unsupported'; text: string; reason: string }
   context: { kind: 'context'; id: string; version: number }
   validTime: { kind: 'unknown' } | { kind: 'interval'; from: number; to: number }
   temporalSource: { value: string | null; resolution: 'resolved' | 'unresolved' | 'absent' }
   evidence: [{ source: GraphSourceRef; role: 'supports'; strength: 'direct' }, ...Array<{ source: GraphSourceRef; role: 'supports'; strength: 'direct' }>]
+  sourceStatement?: Omit<MemorySourceStatementV4, 'arguments'>
 }
 
 export interface GraphEntityRelationEdge {
@@ -87,15 +88,19 @@ export function assessGraphClaim(run: GraphExtractionRun, fact: GraphNormalizedF
   const evidenceValid = graphSourceCandidateValid(run, source)
   // Failed machine validation stays a rejection/open source, not a human task.
   // Unknown context and low scores are preserved on approved source records.
-  const status: GraphClaimReview['status'] = evidenceValid && !unresolved ? 'approved' : 'rejected'
+  const needsSemanticReview = run.modelId === 'uie-base'
+    && !(run.semanticReview?.runId === run.id && run.semanticReview.candidateIds.includes(source.id))
+  const status: GraphClaimReview['status'] = !evidenceValid || unresolved ? 'rejected'
+    : needsSemanticReview ? 'pending' : 'approved'
   const reason = !evidenceValid ? 'invalid-source-evidence'
-    : unresolved ? fact.reason ?? 'unresolved-structure' : 'source-record-auto-publication:v2'
+    : unresolved ? fact.reason ?? 'unresolved-structure'
+      : needsSemanticReview ? 'uie-requires-semantic-review' : 'source-record-auto-publication:v3'
   return {
     id: stableId('graph-review', `${run.id}\0${source.id}`), runId: run.id, sourceFactId: source.id,
     status, reason, reviewer: 'policy', reviewedAt: now, modelScore: source.modelScore,
     userConfirmed: false, sourceId: run.sourceId, sourceRevision: run.sourceRevision,
     sensitivity: privacy.sensitivity, sharePolicy: privacy.sharePolicy,
-    retrieval: { retain: evidenceValid && !unresolved, reason: evidenceValid && !unresolved ? 'entity-fact-with-evidence' : reason },
+    retrieval: { retain: status === 'approved', reason: status === 'approved' ? 'entity-fact-with-evidence' : reason },
     proactive: { useAsPreference: false, reason: 'entity-fact-is-not-a-user-preference' },
   }
 }
@@ -146,7 +151,7 @@ export interface GraphPublicationTask {
   review: GraphClaimReview
   entities: GraphEntityRecord[]
   admission?: GraphAdmissionDecision
-  state: 'queued' | 'fact-persisted' | 'published'
+  state: 'queued' | 'fact-persisted' | 'published' | 'retired'
   factRef?: GraphFactRef
   attempts: number
   lastError?: string
@@ -167,6 +172,7 @@ export interface GraphL1Store {
     frame: GraphContextFrame, factExists: (ref: GraphFactRef) => boolean) => void
   removeSources: (sourceIds: readonly string[]) => void
   clear: () => void
+  retireClaims: (ids: readonly string[]) => void
 }
 
 /** Encrypted persistence is supplied by the host; L1 never contains an unbacked Claim. */
@@ -209,6 +215,12 @@ export function createGraphL1Store(persistence: GraphL1Persistence): GraphL1Stor
   return {
     claims: () => [...claims], edges: () => [...edges], contexts: () => [...contexts],
     tasks: () => [...tasks], reviews: () => [...reviews],
+    retireClaims(ids) {
+      const retired = new Set(ids), nextClaims = claims.filter(c => !retired.has(c.ref.id))
+      save(nextClaims, edges.filter(e => !retired.has(e.claimRef.id)), reconcileContexts(nextClaims, contexts),
+        tasks.map(task => retired.has(task.id) ? { ...task, state: 'retired' as const,
+          lastError: 'Claim retired; a new reviewed extraction is required' } : task), reviews)
+    },
     recordReview(review) { save(claims, edges, contexts, tasks, [...reviews.filter(item => item.id !== review.id), review]) },
     enqueue(task) {
       if (task.review.status !== 'approved')
@@ -260,8 +272,14 @@ export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
   const runTask = async (task: GraphPublicationTask): Promise<GraphPublicationTask> => {
     if (!currentStore()) throw new Error('Graph publication store was reloaded')
     const current = l1.tasks().find(item => item.id === task.id) ?? task
-    if (current.state === 'published')
+    if (current.state === 'retired') return current
+    if (current.state === 'published' && l1.claims().some(claim => claim.ref.id === current.id))
       return current
+    if (current.state === 'published') {
+      const retired = { ...current, state: 'retired' as const, lastError: 'Published Claim is no longer present' }
+      l1.updateTask(retired)
+      return retired
+    }
     let persisted: GraphPublicationTask | undefined
     try {
       const factRef = current.factRef ?? persistV4Fact(v4, current, registry, scope)
@@ -331,7 +349,7 @@ export function createGraphL1Writer(v4: MemoryV4Repository, l1: GraphL1Store,
       return runTask(task)
     }),
     retryPending: () => serialize(async () => {
-      for (const task of l1.tasks().filter(item => item.state !== 'published'))
+      for (const task of l1.tasks().filter(item => item.state !== 'published' && item.state !== 'retired'))
         await runTask(task)
       await semantic?.syncFromClaims()
     }),
@@ -356,18 +374,35 @@ function persistV4Fact(v4: MemoryV4Repository, task: GraphPublicationTask, regis
   const versionId = stableId('graph-version', factId)
   const episodeId = stableId('graph-episode', `${run.sourceId}\0${run.sourceRevision}`)
   const evidenceId = stableId('graph-evidence', `${factId}\0${episodeId}`)
+  const supplements = (run.supplementalEvidence ?? []).map(extra => {
+    if (!extra.text || createHash('sha256').update(extra.text).digest('hex') !== extra.sourceRevision)
+      throw new Error('Invalid supplemental source revision')
+    const id = stableId('graph-episode', `${extra.sourceId}\0${extra.sourceRevision}`)
+    return { ...extra, id, evidenceId: stableId('graph-evidence', `${factId}\0${id}`) }
+  })
+  const evidenceIds = [evidenceId, ...supplements.map(s => s.evidenceId)]
   const now = Math.max(1, review.reviewedAt)
   const object = objectTerm.kind === 'entity' ? objectTerm.entityId : objectTerm.value
   const objectType = objectTerm.kind === 'entity' ? 'entity' : objectTerm.kind
   const canonicalText = run.sourceText.slice(source.evidenceSpan.start, source.evidenceSpan.end)
+  const sourceStatement: MemorySourceStatementV4 | undefined = source.registrationKind === 'basic'
+    && source.relationText && source.relationSpan ? {
+      predicateId: registration.spec.name, predicateVersion: registration.spec.ref.version,
+      relationText: source.relationText, relationSpan: source.relationSpan,
+      arguments: JSON.parse(JSON.stringify(publicationArguments(task))),
+      qualifiers: JSON.parse(JSON.stringify(context)),
+      ...(source.mappingId ? { mappingId: source.mappingId, roleMapping: source.roleMapping } : {}),
+    } : undefined
+  if (source.registrationKind === 'basic' && !sourceStatement)
+    throw new Error('Basic relation publication lost its source expression')
   const polarity = context.negation.resolution === 'resolved' && context.negation.value === true ? 'negative'
     : context.negation.resolution === 'unresolved' ? 'unknown' : 'positive'
-  const modality = context.speaker.resolution === 'resolved' && context.speaker.value !== 'user'
+  const modality = context.modality ? context.modality.value ?? 'unknown' : context.speaker.resolution === 'resolved' && context.speaker.value !== 'user'
     ? 'reported' : context.condition.resolution === 'resolved' ? 'hypothetical'
       : context.speaker.resolution === 'unresolved' || context.condition.resolution === 'unresolved' ? 'unknown' : 'asserted'
   const condition = context.condition.resolution === 'resolved' && context.condition.value
     ? context.condition.value : undefined
-  const validTime = parseDay(context.time.value)
+  const validTime = parseGraphTimeInterval(context.time.value)
   const priorSnapshot = v4.snapshot()
   if (priorSnapshot.episodes.some(item => item.sourceMessageId === run.sourceId && item.contentState === 'deleted'))
     throw new Error('Deleted source message cannot be republished')
@@ -404,7 +439,7 @@ function persistV4Fact(v4: MemoryV4Repository, task: GraphPublicationTask, regis
       cardinality: registration.spec.cardinality, polarity, modality,
       ...(condition ? { condition } : {}),
       status: 'active', ...(validTime ? { validFrom: validTime.from, validTo: validTime.to } : {}),
-      recordedAt: now, updatedAt: now, evidenceLinkIds: [evidenceId],
+      recordedAt: now, updatedAt: now, evidenceLinkIds: evidenceIds,
       extractionScore: review.modelScore, verificationScore: review.userConfirmed ? 1 : 0.8,
       evidenceScore: 1, utilityScore: review.retrieval.retain ? 0.8 : 0.2,
       importance: review.proactive.useAsPreference ? 0.8 : 0.3,
@@ -412,6 +447,7 @@ function persistV4Fact(v4: MemoryV4Repository, task: GraphPublicationTask, regis
       verificationState: 'verified', supersedesFactIds: [], conflictsWithFactIds: [],
       sensitivity: review.sensitivity, sharePolicy: review.sharePolicy,
       origin: review.userConfirmed ? 'manual' : 'automatic',
+      ...(sourceStatement ? { sourceStatement } : {}),
       metadata: { graphReviewId: review.id, graphTaskId: task.id, modelScore: review.modelScore,
         verificationMeaning: 'source-alignment-not-world-truth',
         userConfirmed: review.userConfirmed, retrievalRetain: review.retrieval.retain,
@@ -425,10 +461,22 @@ function persistV4Fact(v4: MemoryV4Repository, task: GraphPublicationTask, regis
       normalizedValue: record.normalizedValue, canonicalText, polarity, modality,
       ...(condition ? { condition } : {}), status: 'active',
       ...(validTime ? { validFrom: validTime.from, validTo: validTime.to } : {}),
-      evidenceLinkIds: [evidenceId], recordedAt: now, reason: review.reason,
+      evidenceLinkIds: evidenceIds, recordedAt: now, reason: review.reason,
+      ...(sourceStatement ? { sourceStatement } : {}),
     }
     draft.facts.push(record)
     draft.evidenceLinks.push({ id: evidenceId, factId, episodeId, role: 'supports', strength: 'direct', active: true, createdAt: now })
+    for (const extra of supplements) {
+      const existing = draft.episodes.find(e => e.id === extra.id)
+      if (existing && (existing.contentState !== 'available' || existing.contentHash !== extra.sourceRevision))
+        throw new Error('Supplemental evidence is unavailable')
+      if (!existing) draft.episodes.push({ id: extra.id, scope, actor: 'user', kind: 'manual-declaration',
+        contentState: 'available', content: extra.text, contentHash: extra.sourceRevision, recordedAt: now,
+        sourceMessageId: extra.sourceId, sourceAttachmentIds: [], sensitivity: review.sensitivity,
+        sharePolicy: review.sharePolicy, provenance: 'native-v4' })
+      draft.evidenceLinks.push({ id: extra.evidenceId, factId, episodeId: extra.id, role: 'supports',
+        strength: 'direct', active: true, createdAt: now })
+    }
     draft.factVersions.push(version)
     draft.domainEvents.push({ id: stableId('graph-event', versionId), idempotencyKey: `graph-fact:${versionId}`,
       type: 'FACT_CREATED', scope, factId, episodeId, createdAt: now, actor: review.userConfirmed ? 'user' : 'system',
@@ -446,32 +494,26 @@ function buildClaim(task: GraphPublicationTask, factRef: GraphFactRef, registry:
   const registration = registry.registrations.find(item => item.spec.name === fact.predicate)
   if (!registration || !fact.arguments)
     throw new Error('Graph claim has no registered predicate arguments')
-  const entityMap = new Map(task.entities.map(entity => [entity.ref.id, entity.ref]))
-  const args: Record<string, GraphGroundTerm> = {}
-  for (const [role, term] of Object.entries(fact.arguments)) {
-    if (term.kind === 'entity') {
-      const ref = entityMap.get(term.entityId)
-      if (!ref)
-        throw new Error('Graph claim references an entity absent from the reviewed catalog')
-      args[role] = { kind: 'entity', ref }
-    }
-    else { args[role] = term }
-  }
+  const args = publicationArguments(task)
   const sourceRef: GraphSourceRef = { episodeId: stableId('graph-episode', `${run.sourceId}\0${run.sourceRevision}`),
     contentHash: run.sourceRevision,
     locator: { kind: 'text-span', unit: 'utf16', ...source.evidenceSpan } }
+  const extraRefs: GraphSourceRef[] = (run.supplementalEvidence ?? []).map(extra => ({
+    episodeId: stableId('graph-episode', `${extra.sourceId}\0${extra.sourceRevision}`), contentHash: extra.sourceRevision,
+    locator: { kind: 'text-span', unit: 'utf16', start: 0, end: extra.text.length },
+  }))
   const polarity = reviewedContext.negation.resolution === 'resolved' && reviewedContext.negation.value === true ? 'negative'
     : reviewedContext.negation.resolution === 'unresolved' ? 'unknown' : 'positive'
-  const modality = reviewedContext.speaker.resolution === 'resolved' && reviewedContext.speaker.value !== 'user'
+  const modality = reviewedContext.modality ? reviewedContext.modality.value ?? 'unknown' : reviewedContext.speaker.resolution === 'resolved' && reviewedContext.speaker.value !== 'user'
     ? 'reported' : reviewedContext.condition.resolution === 'resolved' ? 'hypothetical'
       : reviewedContext.speaker.resolution === 'unresolved' || reviewedContext.condition.resolution === 'unresolved' ? 'unknown' : 'asserted'
-  const validTime = parseDay(reviewedContext.time.value)
+  const validTime = parseGraphTimeInterval(reviewedContext.time.value)
   const claimRef: GraphClaimRef = { kind: 'claim', id: task.id, version: 1 }
   const context = normalizedContext(run, fact.sourceFactId, scope, reviewedContext)
   const claim: GraphClaimRecord = {
     ref: claimRef, fact: factRef, scope,
     transactionTime: { recordedAt: review.reviewedAt, closedAt: null },
-    provenance: { sources: [sourceRef], producer: review.userConfirmed ? 'user' : 'extractor',
+    provenance: { sources: [sourceRef, ...extraRefs], producer: review.userConfirmed ? 'user' : 'extractor',
       extractorVersion: run.modelId, normalizerVersion: GRAPH_L1_WRITE_VERSION },
     review: { status: 'accepted', reviewedAt: review.reviewedAt, reviewer: review.reviewer },
     sensitivity: review.sensitivity, sharePolicy: review.sharePolicy,
@@ -482,16 +524,37 @@ function buildClaim(task: GraphPublicationTask, factRef: GraphFactRef, registry:
     context: context.ref,
     validTime: validTime ?? { kind: 'unknown' },
     temporalSource: { value: reviewedContext.time.value, resolution: reviewedContext.time.resolution },
-    evidence: [{ source: sourceRef, role: 'supports', strength: 'direct' }],
+    evidence: [sourceRef, ...extraRefs].map(ref => ({ source: ref, role: 'supports' as const, strength: 'direct' as const })) as GraphClaimRecord['evidence'],
+    ...(source.registrationKind === 'basic' && source.relationText && source.relationSpan ? {
+      sourceStatement: { predicateId: registration.spec.name, predicateVersion: registration.spec.ref.version,
+        relationText: source.relationText, relationSpan: source.relationSpan,
+        qualifiers: JSON.parse(JSON.stringify(reviewedContext)),
+        ...(source.mappingId ? { mappingId: source.mappingId, roleMapping: source.roleMapping } : {}) },
+    } : {}),
   }
   const from = args[registration.sourceRole]
   const to = args[registration.targetRole]
-  const edge: GraphEntityRelationEdge | undefined = from?.kind === 'entity' && to?.kind === 'entity'
+  const edge: GraphEntityRelationEdge | undefined = source.registrationKind !== 'basic'
+    && Object.keys(args).length === 2 && from?.kind === 'entity' && to?.kind === 'entity'
     ? { id: stableId('graph-edge', claimRef.id), from: from.ref, to: to.ref,
         predicate: registration.spec.name, claimRef,
         roles: { from: registration.sourceRole, to: registration.targetRole } }
     : undefined
   return { claim, frame: context.frame, ...(edge ? { edge } : {}) }
+}
+
+function publicationArguments(task: GraphPublicationTask): Record<string, GraphGroundTerm> {
+  const entities = new Map(task.entities.map(entity => [entity.ref.id, entity.ref]))
+  const args: Record<string, GraphGroundTerm> = {}
+  for (const [role, term] of Object.entries(task.fact.arguments ?? {})) {
+    if (term.kind === 'entity') {
+      const ref = entities.get(term.entityId)
+      if (!ref) throw new Error('Graph claim references an entity absent from the reviewed catalog')
+      args[role] = { kind: 'entity', ref }
+    }
+    else args[role] = term
+  }
+  return args
 }
 
 /** Stable across distinct Claims only when the discourse frame is actually known. */
@@ -571,12 +634,19 @@ function sourceFact(run: GraphExtractionRun, fact: GraphNormalizedFact): FactCan
   return source
 }
 
-function parseDay(value: string | null): { kind: 'interval'; from: number; to: number } | undefined {
-  if (!value || !/^\d{4}-\d{2}-\d{2}$/u.test(value))
-    return undefined
-  const from = Date.parse(`${value}T00:00:00.000Z`)
-  if (!Number.isFinite(from) || new Date(from).toISOString().slice(0, 10) !== value)
-    return undefined
+export function parseGraphTimeInterval(value: string | null): { kind: 'interval'; from: number; to: number } | undefined {
+  if (!value) return undefined
+  const month = /^(\d{4})(?:-|年)(\d{1,2})月?$/u.exec(value)
+  if (month) {
+    const year = Number(month[1]), index = Number(month[2]) - 1
+    if (year < 100 || index < 0 || index > 11) return undefined
+    return { kind: 'interval', from: Date.UTC(year, index, 1), to: Date.UTC(year, index + 1, 1) }
+  }
+  const day = /^(\d{4})(?:-|年)(\d{1,2})(?:-|月)(\d{1,2})日?$/u.exec(value)
+  if (!day) return undefined
+  const normalized = `${day[1]}-${day[2]!.padStart(2, '0')}-${day[3]!.padStart(2, '0')}`
+  const from = Date.parse(`${normalized}T00:00:00.000Z`)
+  if (!Number.isFinite(from) || new Date(from).toISOString().slice(0, 10) !== normalized) return undefined
   return { kind: 'interval', from, to: from + 86_400_000 }
 }
 

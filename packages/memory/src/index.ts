@@ -147,6 +147,11 @@ export { recoverGraphClaimReviews, graphSourcesWithoutFactCandidates } from './l
 export { graphEntityVectorCandidates } from './long-term/graph-entity-vector-candidates'
 export { confirmGraphFactIdentities } from './long-term/graph-confirmed-identity'
 export { autoNormalizeUieGraphFact } from './long-term/graph-auto-identity'
+export { createBasicGraphRelationRegistry } from './long-term/graph-basic-relations'
+export type { BasicGraphRelation, BasicGraphRelationRegistry } from './long-term/graph-basic-relations'
+export { createGraphSemanticWorkflow, completeGraphSemanticJson, GRAPH_SEMANTIC_WORKFLOW_VERSION } from './long-term/graph-semantic-workflow'
+export type { GraphSemanticWorkflow, SemanticWorkItem, SemanticCandidateDecision } from './long-term/graph-semantic-workflow'
+export { renderSourceStatementComparison } from './graph-core/domain/source-statement-comparison'
 export { reassessRetainedUieGraphFacts } from './long-term/graph-policy-reassessment'
 export { reviewGraphAdmission } from './long-term/graph-admission-review'
 export type { GraphAdmissionChoices, GraphAdmissionDecision } from './long-term/graph-admission-review'
@@ -160,6 +165,7 @@ export {
   setGraphUseAssessment,
   createGraphL1Store,
   createGraphL1Writer,
+  parseGraphTimeInterval,
 } from './long-term/graph-l1-write'
 export type {
   GraphClaimRecord, GraphClaimReview, GraphContextRecord, GraphEntityRelationEdge,

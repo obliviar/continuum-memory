@@ -273,6 +273,10 @@ const apiStatusError = ref(false)
 const showMemoryManager = ref(false)
 const memoryEnabled = ref(false)
 const memoryCount = ref(0)
+const memoryL1Count = ref<number | null>(null)
+const graphClaimItems = ref<{ id: string; relation: string; arguments: { role: string; text: string }[];
+  polarity: string; modality: string; time: string; sourceText: string;
+  supplementalEvidence: { sourceId: string; text: string }[] }[]>([])
 const memoryStoragePath = ref('')
 const memoryItems = ref<MemoryItem[]>([])
 const memoryReviewItems = ref<MemoryReviewItem[]>([])
@@ -282,7 +286,52 @@ const graphOpenAssertionItems = ref<GraphOpenAssertionRecord[]>([])
 const graphInformationItems = ref<Array<{ id: string; text: string; recordedAt: number; sourceId: string }>>([])
 const graphExtractionStatus = ref<{ enabled: boolean; modelReady: boolean; error: string | null; runs: number;
   factCandidates: number; sourcesWithoutFacts: number; pendingReviews: number; claims: number;
-  automaticOpenNavigation?: number; deferredOpenCandidates?: number } | null>(null)
+  automaticOpenNavigation?: number; deferredOpenCandidates?: number; basicClaims?: number; basicRelations?: number } | null>(null)
+const clarificationItems = ref<Array<{ id: string; candidateId: string; sourceRevision: string; sourceText: string; question: string; options?: string[] }>>([])
+const clarificationContexts = ref<Array<{ id: string; text: string }>>([])
+const clarificationReplies = ref<Record<string, string>>({})
+const clarificationContextIds = ref<Record<string, string>>({})
+const clarificationBusy = ref(false)
+const clarificationError = ref('')
+const semanticFailures = ref(0)
+const semanticMigrationMessage = ref('')
+const graphRelationMappings = ref<Array<{ id: string; active: boolean; sourceText: string; targetText: string }>>([])
+async function revokeRelationMapping(id: string) {
+  clarificationBusy.value = true
+  try {
+    const result = await ipcRenderer.invoke('memory:relation-mapping-revoke', id)
+    semanticMigrationMessage.value = result?.ok ? '已撤销归并，相关记录将按独立关系重新整理。' : '撤销失败。'
+    await refreshMemoryList()
+  } finally { clarificationBusy.value = false }
+}
+async function migrateOpenL1() {
+  clarificationBusy.value = true
+  try {
+    const result = await ipcRenderer.invoke('memory:open-l1-migrate')
+    semanticMigrationMessage.value = result?.ok ? '已处理 ' + result.processed + ' 条，剩余 ' + result.remaining + ' 条。' : result?.error || '处理失败。'
+    await refreshMemoryList()
+  } finally { clarificationBusy.value = false }
+}
+
+async function answerClarification(item: typeof clarificationItems.value[number]) {
+  clarificationBusy.value = true; clarificationError.value = ''
+  try {
+    const result = await ipcRenderer.invoke('memory:clarification-answer', { id: item.id, candidateId: item.candidateId,
+      sourceRevision: item.sourceRevision, text: clarificationReplies.value[item.id + item.candidateId] ?? '',
+      contextSourceId: clarificationContextIds.value[item.id + item.candidateId] || undefined })
+    if (!result?.ok) clarificationError.value = result?.error || '补充信息处理失败。'
+    await refreshMemoryStatus()
+  } finally { clarificationBusy.value = false }
+}
+async function dismissClarification(item: typeof clarificationItems.value[number]) {
+  await ipcRenderer.invoke('memory:clarification-dismiss', { id: item.id, candidateId: item.candidateId })
+  await refreshMemoryStatus()
+}
+async function retrySemanticFailures() {
+  clarificationBusy.value = true
+  try { await ipcRenderer.invoke('memory:semantic-retry'); await refreshMemoryStatus() }
+  finally { clarificationBusy.value = false }
+}
 const graphRelationReviewItems = ref<GraphRelationReviewItem[]>([])
 const graphRelationReviewReasons = ref<Record<string, string>>({})
 const graphL2Candidates = ref<GraphL2CandidateItem[]>([])
@@ -455,11 +504,13 @@ onMounted(async () => {
 
   ipcRenderer.on('chat:token', onToken)
   ipcRenderer.on('memory:model-progress', onMemoryModelProgress)
+  ipcRenderer.on('memory:changed', onMemoryChanged)
 })
 
 onUnmounted(() => {
   ipcRenderer.removeListener('chat:token', onToken)
   ipcRenderer.removeListener('memory:model-progress', onMemoryModelProgress)
+  ipcRenderer.removeListener('memory:changed', onMemoryChanged)
   if (resetTimer) clearTimeout(resetTimer)
   if (mediaRecorder) {
     mediaRecorder.stop()
@@ -536,11 +587,17 @@ async function saveApiSettings() {
 }
 
 // ── Long-term memory manager ────────────────────────────
+function onMemoryChanged() { if (!isLoading.value) void refreshMemoryStatus() }
 async function refreshMemoryStatus() {
   try {
     const status = await ipcRenderer.invoke('memory:status')
+    const clarifications = await ipcRenderer.invoke('memory:clarifications-list')
+    clarificationItems.value = clarifications?.items ?? []
+    clarificationContexts.value = clarifications?.contexts ?? []
+    semanticFailures.value = clarifications?.failed ?? 0
     memoryEnabled.value = !!status?.enabled
     memoryCount.value = Number(status?.count) || 0
+    memoryL1Count.value = Number(status?.graphClaimCount) || 0
     memoryStoragePath.value = status?.storagePath || ''
     applyMemoryRuntimeStatus(status)
     if (status?.error) {
@@ -606,9 +663,12 @@ async function refreshMemoryList() {
     memoryReviewItems.value = Array.isArray(result.reviewItems) ? result.reviewItems : []
     graphReviewItems.value = Array.isArray(result.graphReviewItems) ? result.graphReviewItems : []
     graphL1View.value = result.graphL1View ?? null
+    graphRelationMappings.value = result.relationMappings ?? []
     graphInformationItems.value = Array.isArray(result.graphInformationItems) ? result.graphInformationItems : []
     graphOpenAssertionItems.value = Array.isArray(result.graphOpenAssertionItems) ? result.graphOpenAssertionItems : []
     graphExtractionStatus.value = result.graphExtraction ?? null
+    memoryL1Count.value = Number(result.graphExtraction?.claims) || 0
+    graphClaimItems.value = result.graphClaimItems ?? []
     graphRelationReviewItems.value = Array.isArray(result.graphRelationReviewItems) ? result.graphRelationReviewItems : []
     graphL2Candidates.value = Array.isArray(result.graphL2Candidates) ? result.graphL2Candidates : []
     graphL2View.value = result.graphL2View ?? null
@@ -1564,7 +1624,7 @@ async function doReset() {
       <span class="badge">在线</span>
       <span class="spacer" />
       <button class="icon-btn memory-btn" :class="{ active: memoryEnabled }" title="长期记忆管理" @click="openMemoryManager">
-        🧠 记忆<span v-if="memoryEnabled" class="memory-count">{{ memoryCount }}</span>
+        🧠 记忆<span v-if="memoryEnabled" class="memory-count">传统 {{ memoryCount }} · L1 {{ memoryL1Count ?? '…' }}</span>
       </button>
       <button class="icon-btn api-btn" :class="{ active: apiConfigured }" title="API 设置" @click="openApiSettings">
         <span class="api-dot" /> API
@@ -1645,7 +1705,7 @@ async function doReset() {
 
         <div class="memory-summary">
           <span :class="['configured-state', { ready: memoryEnabled }]">
-            {{ memoryEnabled ? `● 已启用 · ${memoryCount} 条` : '○ 已关闭' }}
+            {{ memoryEnabled ? `● 已启用 · 传统记忆 ${memoryCount} 条 · 正式 L1 ${memoryL1Count ?? '…'} 条` : '○ 已关闭' }}
           </span>
           <span class="dialog-spacer" />
           <button class="secondary-btn" :disabled="memoryLoading" @click="refreshMemoryList">{{ memoryLoading ? '读取中...' : '刷新' }}</button>
@@ -1661,13 +1721,36 @@ async function doReset() {
         <MemoryRecallNotice :enabled="memorySettings.openSourceRecallEnabled" :memory-enabled="memoryEnabled"
           :remote-policy="memorySettings.remotePolicy" :busy="memoryMutating"
           @enable="saveMemorySettings({ openSourceRecallEnabled: true })" />
-        <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用，可使用本地回退') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条关系/事件记录、{{ graphExtractionStatus.claims }} 条规范 L1 Claim；未发布 Claim 的记录不因此失去获准原文召回资格。</div>
+        <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用，可使用本地回退') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条关系/事件记录、{{ graphExtractionStatus.claims }} 条正式 L1 Claim（其中 {{ graphExtractionStatus.basicClaims ?? 0 }} 条使用基础注册关系）；未发布的记录仍可按权限参与原文召回。</div>
         <details v-if="graphExtractionStatus?.pendingReviews" class="field-hint">
           <summary>可选：规范事实自动评估（{{ graphExtractionStatus.pendingReviews }} 条尚未发布）</summary>
           此处仅处理旧记录的自动发布重试，不是原文召回的审核待办。启动时会分批处理旧的机器待审项，用户拒绝与明确暂缓不会被覆盖。
           <button class="secondary-btn" :disabled="memoryMutating || !graphExtractionStatus.enabled" @click="reassessPendingGraphFacts">按新策略自动重审图事实（每次最多 20 条）</button>
         </details>
-        <div v-if="graphExtractionStatus" class="field-hint">开放关系：{{ graphExtractionStatus.automaticOpenNavigation ?? 0 }} 条自动准入本地查询，{{ graphExtractionStatus.deferredOpenCandidates ?? 0 }} 条按需核实候选；无需逐条审核，也不会自动发布 Claim。</div>
+        <div v-if="graphExtractionStatus" class="field-hint">开放关系：{{ graphExtractionStatus.automaticOpenNavigation ?? 0 }} 条自动准入本地查询，{{ graphExtractionStatus.deferredOpenCandidates ?? 0 }} 条按需核实候选；已基础注册 {{ graphExtractionStatus.basicRelations ?? 0 }} 种关系。证据完整、角色明确的新关系可自动发布为 L1；含义不明的结果继续保留为候选。</div>
+        <details v-if="graphClaimItems.length" class="formal-claims">
+          <summary>查看正式 L1 事实与原文证据（最近 {{ graphClaimItems.length }} 条）</summary>
+          <article v-for="claim in graphClaimItems" :key="claim.id" class="memory-item">
+            <div>
+              <strong>{{ claim.relation }}</strong>
+              <p>{{ claim.arguments.map(arg => `${arg.role}：${arg.text}`).join('；') }}</p>
+              <p class="field-hint">{{ claim.polarity === 'negative' ? '否定' : claim.polarity === 'positive' ? '肯定' : '极性未知' }} · {{ { asserted: '陈述', planned: '计划', reported: '转述', hypothetical: '假设', unknown: '模态未知' }[claim.modality] ?? claim.modality }} · 时间：{{ claim.time }}</p>
+              <blockquote>{{ claim.sourceText }}</blockquote>
+              <div v-for="extra in claim.supplementalEvidence" :key="extra.sourceId" class="field-hint">补充证据：{{ extra.text }}</div>
+            </div>
+          </article>
+        </details>
+        <div class="field-hint">
+          <button class="secondary-btn" :disabled="clarificationBusy || !apiConfigured" @click="migrateOpenL1">使用当前 API 处理历史开放记录（每批 5 条）</button>
+          <span>{{ semanticMigrationMessage }}</span>
+        </div>
+        <details v-if="graphRelationMappings.some(m => m.active)">
+          <summary>已启用的关系归并</summary>
+          <div v-for="mapping in graphRelationMappings.filter(m => m.active)" :key="mapping.id" class="field-hint">
+            {{ mapping.sourceText }} → {{ mapping.targetText }}
+            <button class="secondary-btn" :disabled="clarificationBusy" @click="revokeRelationMapping(mapping.id)">撤销归并并重新整理</button>
+          </div>
+        </details>
         <div v-if="graphExtractionStatus?.sourcesWithoutFacts" class="field-hint">
           {{ graphExtractionStatus.sourcesWithoutFacts }} 条来源尚未提取出关系；获准原文仍可直接检索，补充提取仅用于改善关联导航。
           <button class="secondary-btn" :disabled="memoryMutating || !graphExtractionStatus.enabled || !graphExtractionStatus.modelReady" @click="reextractEmptyGraphSources">重新提取无事实记录（每次最多 5 条）</button>
@@ -2110,6 +2193,25 @@ async function doReset() {
     <!-- Voice error toast -->
     <div v-if="voiceError" class="voice-error">{{ voiceError }}</div>
 
+    <div v-if="!isLoading && (clarificationItems.length || semanticFailures)" class="memory-clarifications">
+      <div v-if="clarificationError" class="field-hint">{{ clarificationError }}</div>
+      <div v-for="item in clarificationItems" :key="item.id + item.candidateId" class="memory-card">
+        <strong>补充记忆信息</strong>
+        <blockquote>{{ item.sourceText }}</blockquote>
+        <p>{{ item.question }}</p>
+        <button v-for="choice in item.options" :key="choice" class="secondary-btn"
+          @click="clarificationReplies[item.id + item.candidateId] = choice">{{ choice }}</button>
+        <textarea class="settings-input clarification-input" rows="3" v-model="clarificationReplies[item.id + item.candidateId]" placeholder="补充说明，也可以在下面选择已有消息" :disabled="clarificationBusy" />
+        <select class="settings-input" v-model="clarificationContextIds[item.id + item.candidateId]" :disabled="clarificationBusy">
+          <option value="">不引用其他消息</option>
+          <option v-for="context in clarificationContexts" :key="context.id" :value="context.id">{{ context.text }}</option>
+        </select>
+        <button class="secondary-btn" :disabled="clarificationBusy" @click="answerClarification(item)">提交补充</button>
+        <button class="secondary-btn" :disabled="clarificationBusy" @click="dismissClarification(item)">不保存这条候选</button>
+        <span class="field-hint">可以稍后再答，正常聊天无需等待。</span>
+      </div>
+      <button v-if="semanticFailures" class="secondary-btn" :disabled="clarificationBusy" @click="retrySemanticFailures">重试未完成的记忆整理（{{ semanticFailures }}）</button>
+    </div>
     <div class="input-area">
       <button class="tool-btn" :disabled="isCapturing || isLoading" title="识屏" @click="captureScreen">
         {{ isCapturing ? '⏳' : '📷' }}
@@ -2128,6 +2230,14 @@ async function doReset() {
 </template>
 
 <style>
+.memory-clarifications { flex-shrink: 0; max-height: 260px; overflow-y: auto; padding: 12px 16px; border-top: 1px solid var(--border); }
+.memory-clarifications .memory-card { padding: 12px; margin-bottom: 10px; border-radius: 10px; background: var(--surface); border: 1px solid var(--border); }
+.formal-claims { margin: 12px 0; }
+.formal-claims .memory-item { margin-top: 8px; overflow-wrap: anywhere; }
+.formal-claims blockquote { margin: 8px 0; padding-left: 10px; border-left: 2px solid var(--accent); }
+.memory-clarifications blockquote { margin: 8px 0; padding-left: 10px; border-left: 2px solid var(--accent); overflow-wrap: anywhere; }
+.memory-clarifications .settings-input { display: block; width: 100%; box-sizing: border-box; margin: 8px 0; }
+.clarification-input { resize: vertical; min-height: 72px; }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createLocalUieExtractor, localUieScriptPath, parseUieOutput, uieGraphExtractionRun } from './local-uie'
 import { createGraphPredicateRegistry, normalizeGraphExtraction, type GraphEntityRecord } from './graph-identity-normalization'
-import { assessGraphClaim, createGraphL1Store, createGraphL1Writer, rejectGraphClaim } from './graph-l1-write'
+import { assessGraphClaim, confirmGraphClaim, createGraphL1Store, createGraphL1Writer, rejectGraphClaim } from './graph-l1-write'
 import { autoNormalizeUieGraphFact } from './graph-auto-identity'
 import { createMemoryV4Repository } from '../v4/repository/memory-v4-repository'
 import { createGraphSemanticRepository } from '../graph-core/repository/semantic-repository'
@@ -50,8 +50,9 @@ async function publishAfterReview(extraction: GraphExtractionRun) {
       { entities, aliases: [], scope })!
     entities = automatic.entities
     const fact = automatic.normalized.facts.find(item => item.sourceFactId === candidate.sourceFactId)!
-    const review = assessGraphClaim(extraction, fact, privacy)
-    expect(review.status).toBe('approved')
+    const assessed = assessGraphClaim(extraction, fact, privacy)
+    expect(assessed.status).toBe('pending')
+    const review = confirmGraphClaim(assessed, '人工核对原文对应关系')
     expect((await writer.submit(extraction, fact, review, entities))?.state).toBe('published')
     await writer.submit(extraction, fact, review, entities)
   }

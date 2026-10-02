@@ -3,6 +3,7 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
+import { runBackgroundTaskBatch } from './background-task-batch'
 
 import { createAgentRuntime, createSessionManager, createChatHooks } from '@continuum-memory/core'
 import { createOpenAILlm } from '@continuum-memory/llm-openai'
@@ -51,6 +52,7 @@ import {
   setGraphUseAssessment,
   createGraphL1Store,
   createGraphL1Writer,
+  parseGraphTimeInterval,
   createGraphSemanticRepository,
   projectOpenAssertions,
   recallOpenSources,
@@ -66,6 +68,13 @@ import {
   stageGraphRelationTasks,
   publishReviewedGraphRelation,
   createGraphPredicateRegistry,
+  createBasicGraphRelationRegistry,
+  type BasicGraphRelationRegistry,
+  createGraphSemanticWorkflow,
+  completeGraphSemanticJson,
+  GRAPH_SEMANTIC_WORKFLOW_VERSION,
+  renderSourceStatementComparison,
+  type GraphSemanticWorkflow,
   confirmGraphFactIdentities,
   autoNormalizeUieGraphFact,
   reassessRetainedUieGraphFacts,
@@ -491,6 +500,12 @@ let graphNormalizationStore: GraphNormalizationStore | undefined
 let graphL1Store: GraphL1Store | undefined
 let graphCaptureRepository: CaptureRepository | undefined
 let graphL1Writer: GraphL1Writer | undefined
+let graphBasicRelations: BasicGraphRelationRegistry | undefined
+let graphSemanticWorkflow: GraphSemanticWorkflow | undefined
+
+function currentGraphPredicateRegistry() {
+  return graphBasicRelations ?? createGraphPredicateRegistry()
+}
 let graphSourceUpgradePromise: Promise<void> = Promise.resolve()
 let graphSemanticRepository: GraphSemanticRepository | undefined
 let graphL1ProjectionRepository: GraphL1ProjectionRepository | undefined
@@ -539,9 +554,10 @@ function purgeGraphL2ForMessageIds(messageIds: readonly string[]): void {
     .catch(error => writeBootLog(`Graph L2 source purge failed: ${errorMessage(error)}`))
 }
 function syncGraphSemantic(): void {
+  reconcileGraphPublicationStatus()
   if (!graphSemanticRepository || !graphL1Store || !memoryV4Repository) return
   void graphSemanticRepository.syncFromClaims(graphL1Store, memoryV4Repository,
-    createGraphPredicateRegistry(), localMemoryScope).then(result => {
+    currentGraphPredicateRegistry(), localMemoryScope).then(result => {
     if (!result.ok) writeBootLog(`Graph semantic sync deferred: ${result.error.message}`)
     else {
       graphL1ProjectionRepository?.sync()
@@ -620,15 +636,17 @@ async function syncGraphL2Once(generation: number): Promise<void> {
     tasks: graphRelationTaskQueue.snapshot(), evidenceText: claim => graphClaimEvidenceText(claim, episodes) })
   if (!staged.ok) throw new Error(staged.error.message)
 }
-function graphClaimEvidenceText(claim: { provenance: { sources: readonly { episodeId: string;
-  locator: { kind: string; start?: number; end?: number } }[] } },
-  episodes = new Map(memoryV4Repository?.snapshot().episodes.map(episode => [episode.id, episode]))): string {
-  return claim.provenance.sources.map(source => {
-    const text = episodes.get(source.episodeId)?.content ?? ''
-    return source.locator.kind === 'text-span'
-      ? text.slice(source.locator.start, source.locator.end) : text
-  }).join('\n')
+function graphClaimEvidenceText(claim: Parameters<typeof renderSourceStatementComparison>[0] & {
+  provenance: NonNullable<Parameters<typeof renderSourceStatementComparison>[0]['provenance']> },
+  episodes = new Map(memoryV4Repository?.snapshot().episodes.map(episode => [episode.id, episode]))) {
+  const text = claim.provenance.sources.map((source, i) => {
+    const original = episodes.get(source.episodeId)?.content ?? '';
+    const value = source.locator.kind === 'text-span' ? original.slice(source.locator.start, source.locator.end) : original;
+    return claim.provenance.sources.length > 1 ? '来源 ' + (i + 1) + '：' + value : value;
+  }).join('\n');
+  return renderSourceStatementComparison(claim, graphSemanticRepository?.snapshot()?.entities ?? [], text);
 }
+
 function scheduleGraphNliDrain(): void {
   if (graphNliRetryTimer) clearTimeout(graphNliRetryTimer)
   graphNliRetryTimer = undefined
@@ -638,22 +656,29 @@ function scheduleGraphNliDrain(): void {
 async function drainGraphNli(): Promise<void> {
   if (graphNliDraining || !graphNliJudge || !graphRelationTaskQueue) return
   graphNliDraining = true
+  const queue = graphRelationTaskQueue, judge = graphNliJudge
+  const generation = graphL2Generation
+  const isCurrent = () => generation === graphL2Generation && queue === graphRelationTaskQueue
+    && judge === graphNliJudge
   try {
-    while (true) {
-      const task = graphRelationTaskQueue.ready()[0]
-      if (!task) break
+    await runBackgroundTaskBatch(queue.ready(), isCurrent, async task => {
       const claims = graphL1ProjectionRepository?.snapshot()?.semanticBundle.claims ?? []
       const premise = claims.find(claim => claim.ref.id === task.claims[0].id
         && claim.ref.version === task.claims[0].version)
       const hypothesis = claims.find(claim => claim.ref.id === task.claims[1].id
         && claim.ref.version === task.claims[1].version)
-      if (!premise || !hypothesis) { syncGraphRelationTasks(); continue }
+      if (!premise || !hypothesis) {
+        queue.fail(task.key, 'Current L1 Claim version is unavailable', Date.now() + 5_000)
+        syncGraphRelationTasks()
+        return false
+      }
       const premiseText = graphClaimEvidenceText(premise)
       const hypothesisText = graphClaimEvidenceText(hypothesis)
       try {
         if (!premiseText.trim() || !hypothesisText.trim()) throw new Error('Graph Claim evidence is unavailable')
-        const result = await graphNliJudge.judge({ premise: { kind: 'claim', ref: premise.ref, text: premiseText },
+        const result = await judge.judge({ premise: { kind: 'claim', ref: premise.ref, text: premiseText },
           hypothesisText })
+        if (!isCurrent()) return false
         if (!result.ok) throw new Error(result.error.message)
         if (result.value.modelId !== task.modelId || result.value.modelRevision !== task.modelRevision
           || result.value.preprocessingVersion !== task.preprocessingVersion)
@@ -661,18 +686,20 @@ async function drainGraphNli(): Promise<void> {
         const scores = result.value.scores
         const label = (Object.keys(scores) as Array<keyof typeof scores>)
           .reduce((best, next) => scores[next] > scores[best] ? next : best)
-        graphRelationTaskQueue.complete(task.key, { label, scores, truncated: result.value.truncated,
+        queue.complete(task.key, { label, scores, truncated: result.value.truncated,
           premiseHash: createHash('sha256').update(premiseText).digest('hex'),
           hypothesisHash: createHash('sha256').update(hypothesisText).digest('hex'), evaluatedAt: Date.now() })
         void queueGraphL2Sync().catch(error => writeBootLog(`Graph L2 staging deferred: ${errorMessage(error)}`))
       }
       catch (error) {
+        if (!isCurrent()) return false
         const delay = Math.min(300_000, 5_000 * 2 ** Math.min(task.attempts ?? 0, 6))
-        graphRelationTaskQueue.fail(task.key, errorMessage(error), Date.now() + delay)
+        queue.fail(task.key, errorMessage(error), Date.now() + delay)
         writeBootLog(`Graph NLI task deferred: ${errorMessage(error)}`)
-        break
+        return false
       }
-    }
+      return true
+    })
   }
   finally {
     graphNliDraining = false
@@ -851,18 +878,60 @@ function mergeMemoryCandidates(candidates: MemoryCandidate[]): MemoryCandidate[]
   return [...unique.values()].slice(0, 8)
 }
 
-async function saveGraphExtraction(run: GraphExtractionRun): Promise<void> {
+function retirePolicySourceClaims(sourceId: string, keepRunId: string) {
+  const tasks = graphL1Store?.tasks().filter(t => t.run.sourceId === sourceId && t.run.id !== keepRunId
+    && t.state === 'published' && t.review.reviewer === 'policy') ?? [];
+  for (const task of tasks) if (task.factRef && memoryV4Lifecycle) memoryV4Lifecycle.deleteFact(task.factRef.id, localMemoryScope, 'suppress',
+    { reason: '来源经新证据或新提取策略重新处理', idempotencyKey: 'source-reassessment:' + keepRunId + ':' + task.id });
+  graphL1Store?.retireClaims(tasks.map(t => t.id));
+  if (tasks.length) invalidateGraphL1Projection();
+}
+
+function reconcileGraphPublicationStatus(): void {
+  const snapshot = memoryV4Repository?.snapshot()
+  const active = new Set((graphL1Store?.claims() ?? []).filter(claim => snapshot?.facts.some(fact =>
+    fact.id === claim.fact.id && fact.status === 'active' && fact.invalidatedAt === undefined)
+    && snapshot.factVersions.some(version => version.factId === claim.fact.id && version.version === claim.fact.version
+      && version.transactionClosedAt === undefined)
+    && claim.provenance.sources.every(source => snapshot.episodes.some(episode => episode.id === source.episodeId
+      && episode.contentState === 'available' && episode.deletedAt === undefined && episode.contentHash === source.contentHash)))
+    .map(claim => claim.ref.id))
+  graphSemanticWorkflow?.reconcilePublication((graphL1Store?.tasks() ?? [])
+    .filter(task => task.state === 'published' && active.has(task.id))
+    .map(task => ({ runId: task.run.id, claimId: task.id })))
+}
+
+async function saveGraphExtraction(run: GraphExtractionRun, forceSemanticReview = false): Promise<void> {
   if (!graphExtractionStore) throw new Error('Graph extraction persistence is unavailable')
-  graphExtractionStore.append(run)
+  if (!graphExtractionStore.list().some(item => item.id === run.id)) graphExtractionStore.append(run)
+  if (graphSemanticWorkflow && (forceSemanticReview || !graphSemanticWorkflow.isReviewed(run))
+    && (forceSemanticReview || run.remoteExtraction || ((memorySettings.extractionMode === 'open' || memorySettings.extractionMode === 'smart')
+    && (run.modelId === apiConfig.model || run.modelId === 'uie-base'))) && run.status === 'complete') {
+    const assessed = await graphSemanticWorkflow.process(run)
+    if (!assessed) { syncGraphSemantic(); mainWindow?.webContents.send('memory:changed'); return }
+    run = assessed
+  }
+  if (run.semanticReview) graphExtractionStore.savePublicationView?.(run)
+  if ((forceSemanticReview && run.status === 'complete')
+    || (run.supplementalEvidence?.length && (run.factCandidates.length || run.assertionCandidates?.length))) retirePolicySourceClaims(run.sourceId, run.id)
+  const registry = currentGraphPredicateRegistry()
+  const sourcePrivacy = inferMemoryPrivacy(run.sourceText)
+  const rejectedOpen = new Set(graphCaptureRepository ? projectOpenAssertions(graphCaptureRepository.snapshot(),
+    graphExtractionStore, localMemoryScope).filter(item => item.review.status === 'rejected'
+      && item.extraction.runId === run.id).map(item => item.extraction.candidateId) : [])
+  if (sourcePrivacy.sensitivity !== 'secret' && graphBasicRelations) run = graphBasicRelations.prepare({ ...run,
+    factCandidates: run.factCandidates.filter(item => !rejectedOpen.has(item.id)),
+    assertionCandidates: run.assertionCandidates?.filter(item => !rejectedOpen.has(item.id)),
+  })
   if (graphNormalizationStore && run.status !== 'failed') {
     const normalized = normalizeGraphExtraction(run, {
       entities: graphNormalizationStore.entities(),
       aliasDecisions: graphNormalizationStore.aliasDecisions(),
       vectorCandidatesByMentionId: graphEntityVectorCandidates(run, graphNormalizationStore.entities(), localMemoryScope),
       scope: localMemoryScope,
+      registry,
     })
     graphNormalizationStore.appendResult(normalized)
-    const registry = createGraphPredicateRegistry()
     const openCandidateIds = new Set(run.factCandidates.filter(fact => needsOpenFactRepresentation(run, fact, registry)).map(fact => fact.id))
     for (const initialFact of normalized.facts) {
       let fact = initialFact
@@ -893,6 +962,8 @@ async function saveGraphExtraction(run: GraphExtractionRun): Promise<void> {
     }
   }
   syncGraphSemantic()
+  reconcileGraphPublicationStatus()
+  mainWindow?.webContents.send('memory:changed')
 }
 
 function createConfiguredMemoryExtractor(): MemoryExtractor {
@@ -1046,6 +1117,8 @@ function initializeMemory(): void {
   graphL1Store = undefined
   graphCaptureRepository = undefined
   graphL1Writer = undefined
+  graphBasicRelations = undefined
+  graphSemanticWorkflow = undefined
   graphSemanticRepository = undefined
   graphL1ProjectionRepository = undefined
   graphRelationTaskQueue = undefined
@@ -1096,6 +1169,12 @@ function initializeMemory(): void {
       unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
     })
     graphNormalizationStore = createGraphNormalizationStore(graphNormalizationPersistence)
+    graphBasicRelations = createBasicGraphRelationRegistry(createEncryptedFilePersistence({
+      encryptedPath: join(userDataDir, 'graph-basic-relations.enc'),
+      keyPath: join(userDataDir, 'graph-basic-relations-key.json'),
+      protectKey: key => safeStorage.encryptString(key.toString('base64')),
+      unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
+    }), localMemoryScope)
     const graphClaimPersistence = createEncryptedFilePersistence({
       encryptedPath: graphL1StoragePath,
       keyPath: graphL1KeyPath,
@@ -1182,7 +1261,7 @@ function initializeMemory(): void {
       onCaptureSourcesChanged: () => syncGraphSemantic(),
       captureProcessorVersion: `capture-v1:${createHmac('sha256', 'capture-profile-v1').update(JSON.stringify({
         mode: memorySettings.extractionMode,
-        extractionPipeline: 'open-first-v1',
+        extractionPipeline: 'open-first-v2:' + GRAPH_SEMANTIC_WORKFLOW_VERSION,
         uieSupplementEnabled: memorySettings.uieSupplementEnabled,
         graphExtractionEnabled: memorySettings.graphExtractionEnabled,
         remotePolicy: memorySettings.remotePolicy,
@@ -1198,9 +1277,12 @@ function initializeMemory(): void {
       onCaptureObserverError: error => writeBootLog(`Memory V4 capture enqueue failed: ${errorMessage(error)}`),
       onSourcesUnlinked: (commit) => {
         purgeGraphL2ForMessageIds(commit.messageIds)
-        graphExtractionStore?.removeSources(commit.messageIds)
-        graphNormalizationStore?.removeSources(commit.messageIds)
-        graphL1Store?.removeSources(commit.messageIds)
+        const affectedSources = [...new Set([...commit.messageIds, ...[...(graphExtractionStore?.list() ?? []), ...(graphL1Store?.tasks().map(t => t.run) ?? []), ...(graphSemanticWorkflow?.list().map(i => i.run) ?? [])].filter(r =>
+          r.supplementalEvidence?.some(e => commit.messageIds.includes(e.sourceId))).map(r => r.sourceId)])];
+        graphExtractionStore?.removeSources(affectedSources)
+        graphNormalizationStore?.removeSources(affectedSources)
+        graphL1Store?.removeSources(affectedSources)
+        graphSemanticWorkflow?.removeSources(affectedSources)
         invalidateGraphL1Projection()
         memoryV4Shadow?.enqueueSourceUnlink(commit)
         memoryV4Shadow?.flush()
@@ -1289,6 +1371,7 @@ function initializeMemory(): void {
         modelPath: config.nliModelPath,
         dependenciesPath: config.nliDependenciesPath,
         modelRevision: nliRevision,
+        preprocessingVersion: ERLANGSHEN_NLI_PREPROCESSING_VERSION + ':source-statement-v2',
         scriptPath: app.isPackaged
           ? join(process.resourcesPath, 'erlangshen_nli.py')
           : join(app.getAppPath(), 'resources', 'erlangshen_nli.py'),
@@ -1300,11 +1383,11 @@ function initializeMemory(): void {
         protectKey: key => safeStorage.encryptString(key.toString('base64')),
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
       }), { modelId: ERLANGSHEN_NLI_MODEL_ID, modelRevision: nliRevision,
-        preprocessingVersion: ERLANGSHEN_NLI_PREPROCESSING_VERSION })
+        preprocessingVersion: ERLANGSHEN_NLI_PREPROCESSING_VERSION + ':source-statement-v2' })
       syncGraphSemantic()
       graphL1ProjectionRepository.sync()
       syncGraphRelationTasks()
-      const predicateRegistry = createGraphPredicateRegistry()
+      const predicateRegistry = currentGraphPredicateRegistry()
       const writerStore = graphL1Store, writerSemantic = graphSemanticRepository, writerProjection = graphL1ProjectionRepository
       const writerIsCurrent = () => graphL1Store === writerStore && graphSemanticRepository === writerSemantic
         && graphL1ProjectionRepository === writerProjection
@@ -1320,7 +1403,91 @@ function initializeMemory(): void {
           syncGraphRelationTasks()
         },
       })
+      const workflowRegistry = graphBasicRelations!, workflowCaptures = graphCaptureRepository!, workflowExtractions = graphExtractionStore!;
+      graphSemanticWorkflow = createGraphSemanticWorkflow({
+        persistence: createEncryptedFilePersistence({ encryptedPath: join(userDataDir, 'graph-semantic-workflow.enc'),
+          keyPath: join(userDataDir, 'graph-semantic-workflow-key.json'),
+          protectKey: key => safeStorage.encryptString(key.toString('base64')),
+          unprotectKey: key => Buffer.from(safeStorage.decryptString(key), 'base64') }),
+        registry: workflowRegistry, getConfig: () => ({ ...apiConfig }),
+        canUse: run => {
+          if (workflowRegistry !== graphBasicRelations || workflowCaptures !== graphCaptureRepository
+            || workflowExtractions !== graphExtractionStore || memorySettings.remotePolicy === 'disabled') return false;
+          const snapshot = workflowCaptures.snapshot();
+          const matches = snapshot.sources.filter(source => source.status === 'active'
+            && source.scope.ownerId === localMemoryScope.ownerId && source.scope.agentId === localMemoryScope.agentId
+            && (source.id === run.sourceId || source.messageIds.includes(run.sourceId))
+            && (source.turn?.userMessage === run.sourceText || snapshot.tasks.some(task => task.sourceId === source.id
+              && source.turn?.userMessage.slice(task.start, task.end) === run.sourceText)));
+          return matches.length === 1 && (run.supplementalEvidence ?? []).every(extra => {
+            if (extra.sourceId.startsWith('clarification:')) return graphSemanticWorkflow?.list().some(i =>
+              i.reply?.sourceId === extra.sourceId && i.reply.text === extra.text && !['cancelled', 'dismissed'].includes(i.status));
+            if (snapshot.sources.some(s => (s.id === extra.sourceId || s.messageIds.includes(extra.sourceId)) && s.status !== 'active')) return false;
+            const captured = snapshot.sources.find(s => s.status === 'active' && (s.id === extra.sourceId || s.messageIds.includes(extra.sourceId))
+              && s.scope.ownerId === localMemoryScope.ownerId && s.scope.agentId === localMemoryScope.agentId);
+            const message = sessionStore.getSessionMessages(matches[0]!.scope.sessionId ?? 'default').find(m => m.id === extra.sourceId && m.role === 'user');
+            return (captured?.turn?.userMessage ?? message?.content) === extra.text
+              && !graphL1Store?.reviews().some(r => r.sourceId === extra.sourceId && isUserSourceWithdrawal(r));
+          }) && inferMemoryPrivacy(matches[0]!.turn!.userMessage).sensitivity === 'normal'
+            && !graphL1Store?.reviews().some(r => r.sourceId === run.sourceId && (isUserSourceWithdrawal(r) || (r.reviewer === 'user' && r.status === 'pending')));
+        },
+        lookupContext: run => {
+          const snapshot = workflowCaptures.snapshot();
+          const root = snapshot.sources.find(s => s.status === 'active' && (s.id === run.sourceId || s.messageIds.includes(run.sourceId)));
+          if (!root) return [];
+          const ids = root.turn?.context?.recentMessages.filter(m => m.role === 'user').map(m => m.id).filter((id): id is string => !!id) ?? [];
+          const history = sessionStore.getSessionMessages(root.scope.sessionId ?? 'default');
+          return ids.flatMap(id => {
+            if (snapshot.sources.some(s => s.messageIds.includes(id) && s.status !== 'active')) return [];
+            const captured = snapshot.sources.find(s => s.status === 'active' && s.messageIds.includes(id)
+              && s.scope.ownerId === localMemoryScope.ownerId && s.scope.agentId === localMemoryScope.agentId);
+            const text = captured?.turn?.userMessage ?? history.find(m => m.id === id && m.role === 'user')?.content;
+            if (!text || text.length > 4000 || inferMemoryPrivacy(text).sensitivity !== 'normal'
+              || graphL1Store?.reviews().some(r => r.sourceId === id && isUserSourceWithdrawal(r))) return [];
+            return [{ sourceId: id, text, sourceRevision: createHash('sha256').update(text).digest('hex') }];
+          }).slice(-3);
+        },
+        readContext: id => {
+          const source = workflowCaptures.snapshot().sources.find(s => (s.id === id || s.messageIds.includes(id))
+            && s.status === 'active' && s.scope.ownerId === localMemoryScope.ownerId && s.scope.agentId === localMemoryScope.agentId);
+          const text = source?.turn?.userMessage;
+          return text && text.length <= 4000 && inferMemoryPrivacy(text).sensitivity === 'normal'
+            ? { sourceId: source!.messageIds[0] ?? source!.id, text, sourceRevision: createHash('sha256').update(text).digest('hex') } : undefined;
+        },
+      });
       memoryV4Lifecycle = createMemoryV4LifecycleService(v4Repository)
+      // Remove legacy machine-only UIE publications that bypassed semantic fidelity review.
+      // Human decisions and the original extraction remain available for review.
+      const activeClaimIds = new Set(graphL1Store!.claims().map(claim => claim.ref.id))
+      const publicationTasks = graphL1Store!.tasks().filter(task => task.state === 'published')
+      const qualifierUpgradeRuns = new Set(publicationTasks.filter(task => {
+        const claim = graphL1Store!.claims().find(claim => claim.ref.id === task.id)
+        const raw = task.run.rawOutput as { graph?: { assertions?: { context?: Record<string, unknown> }[];
+          facts?: { context?: Record<string, unknown> }[] } }
+        const scalarContext = [...(raw?.graph?.assertions ?? []), ...(raw?.graph?.facts ?? [])].some(candidate =>
+          Object.values(candidate.context ?? {}).some(value => value === null || typeof value === 'boolean' || typeof value === 'string'))
+        const time = claim && parseGraphTimeInterval(claim.temporalSource.value)
+        return task.review.reviewer === 'policy'
+          && graphSemanticWorkflow?.list().some(item => item.run.id === task.run.id)
+          && ((scalarContext && task.run.semanticReview?.contextVersion !== 'scalar-qualifiers-v1')
+            || (time && claim?.validTime.kind === 'unknown'))
+      }).map(task => task.run.id))
+      for (const task of publicationTasks) {
+        const qualifierUpgrade = task.review.reviewer === 'policy' && qualifierUpgradeRuns.has(task.run.id)
+        const unreviewedUie = task.run.modelId === 'uie-base' && task.review.reviewer === 'policy'
+          && !(task.run.semanticReview?.runId === task.run.id
+            && task.run.semanticReview.candidateIds.includes(task.fact.sourceFactId))
+        if (!activeClaimIds.has(task.id) || unreviewedUie || qualifierUpgrade) {
+          if ((unreviewedUie || qualifierUpgrade) && task.factRef) memoryV4Lifecycle.deleteFact(task.factRef.id, localMemoryScope, 'suppress',
+            { reason: unreviewedUie ? 'UIE 自动事实缺少语义复核，退回候选' : '按原始证据重新解析计划和时间字段',
+              idempotencyKey: 'qualifier-fidelity-v1:' + task.id })
+          graphL1Store!.retireClaims([task.id])
+          if (unreviewedUie) graphL1Store!.recordReview({ ...task.review, status: 'pending',
+            reason: 'uie-requires-semantic-review', reviewedAt: Date.now(), retrieval: { retain: false, reason: 'unreviewed-uie' } })
+        }
+      }
+      reconcileGraphPublicationStatus()
+      syncGraphSemantic()
       memoryCandidateReview = createMemoryCandidateReviewService(v4Repository)
       memoryV4Persistence = v4Persistence
       const snapshot = v4Repository.snapshot()
@@ -1353,7 +1520,8 @@ function initializeMemory(): void {
       const current = () => upgradeWriter === graphL1Writer && upgradeL1 === graphL1Store
         && upgradeCaptures === graphCaptureRepository && upgradeExtractions === graphExtractionStore
         && upgradeNormalization === graphNormalizationStore
-      const upgradeIds = upgradeL1.reviews().filter(r => r.status === 'pending' && r.reviewer === 'policy').map(r => r.id)
+      const upgradeIds = memorySettings.extractionMode === 'open' || memorySettings.extractionMode === 'smart' ? []
+        : upgradeL1.reviews().filter(r => r.status === 'pending' && r.reviewer === 'policy').map(r => r.id)
       graphSourceUpgradePromise = upgradeWriter.retryPending().then(async () => {
         for (let offset = 0; current() && offset < upgradeIds.length; offset += 20) {
           const result = await reassessRetainedUieGraphFacts({ extractions: upgradeExtractions,
@@ -1361,6 +1529,15 @@ function initializeMemory(): void {
             captureSnapshot: () => upgradeCaptures.snapshot(), scope: localMemoryScope,
             reviewIds: upgradeIds.slice(offset, offset + 20), isCurrent: current })
           writeBootLog(`Graph source-record upgrade: ${JSON.stringify(result)}`)
+        }
+        if (current() && graphSemanticWorkflow) {
+          // Recover reviewed outbox entries locally. This mode cannot call the API
+          // or replay sources under a different model/configuration.
+          const ready = await graphSemanticWorkflow.retry(5, true, [...qualifierUpgradeRuns])
+          for (const run of ready) {
+            if (!current()) break
+            await saveGraphExtraction(run)
+          }
         }
       }).catch(error => writeBootLog(`Graph source-record upgrade failed: ${errorMessage(error)}`))
       if (memorySemanticActive && embeddingIndex) {
@@ -1680,7 +1857,7 @@ async function prepareDesktopGraphRecall(flushCaptures: () => Promise<void>): Pr
       && projection === graphL1ProjectionRepository && store === graphL1Store && shadow === memoryV4Shadow,
     syncL1: async () => {
       if (!repository || !semantic || !projection || !store) return
-      const result = await semantic.syncFromClaims(store, repository, createGraphPredicateRegistry(), localMemoryScope)
+      const result = await semantic.syncFromClaims(store, repository, currentGraphPredicateRegistry(), localMemoryScope)
       if (!result.ok || !projection.sync()) throw new Error('Current accepted L1 publication unavailable')
       // Use the same serialized publication queue as explicit relation admission. This does not approve NLI candidates.
       if (repository !== memoryV4Repository || semantic !== graphSemanticRepository || projection !== graphL1ProjectionRepository)
@@ -1788,6 +1965,27 @@ function memoryForRemoteRuntime() {
   return {
     ...localMemory,
     ...(graph ? { graph } : {}),
+    async beginRecallTurn(scope: Parameters<typeof localMemory.list>[0]) {
+      const v4 = memoryV4Repository?.snapshot();
+      const published = new Set(graphL1Store?.tasks().filter(t => t.state === 'published').map(t => t.id) ?? []);
+      const rows = await localMemory.list(scope, 20_000);
+      const visible = new Set(rows.map(m => JSON.stringify([m.id, m.content])));
+      for (const fact of v4?.facts ?? []) if (fact.scope.ownerId === scope.ownerId
+        && (scope.agentId === undefined || fact.scope.agentId === scope.agentId)
+        && (scope.sessionId === undefined || fact.scope.sessionId === scope.sessionId)
+        && (!fact.metadata?.graphTaskId || published.has(String(fact.metadata.graphTaskId)))) visible.add(JSON.stringify([fact.id, fact.canonicalText]));
+      return (fragment: Awaited<ReturnType<typeof localMemory.list>>[number]) => visible.has(JSON.stringify([fragment.id, fragment.content]));
+    },
+    async validateRecall(fragments: Awaited<ReturnType<typeof localMemory.list>>, scope: Parameters<typeof localMemory.list>[0]) {
+      if (memorySettings.remotePolicy === 'disabled') return [];
+      const rows = await localMemory.list(scope, 20_000), facts = memoryV4Repository?.snapshot().facts ?? [];
+      return fragments.filter(m => rows.some(row => row.id === m.id && row.content === m.content
+        && !['suppressed', 'deleted', 'orphaned', 'expired'].includes(row.status ?? '') && row.sharePolicy === 'allow-remote'
+        && (row.sensitivity === 'normal' || memorySettings.remotePolicy === 'allow-private'))
+        || facts.some(f => f.id === m.id && f.canonicalText === m.content && f.status === 'active'
+          && f.invalidatedAt === undefined && f.sharePolicy === 'allow-remote'
+          && (f.sensitivity === 'normal' || memorySettings.remotePolicy === 'allow-private')));
+    },
     async recall(query: string, scope: Parameters<typeof localMemory.recall>[1], topK = 5) {
       if (memorySettings.remotePolicy === 'disabled')
         return []
@@ -1859,7 +2057,18 @@ function rebuildRuntime() {
     resolveMemoryScope: () => localMemoryScope,
     ...(graphMemoryEnabled && remoteMemory?.graph && !memorySettings.openSourceRecallEnabled ? { graphRecall: {
       countTokens: countGraphTokens,
-      awaitCaptureWrites: () => prepareDesktopGraphRecall(() => remoteMemory.flushPendingCaptures()),
+      awaitCaptureWrites: () => prepareDesktopGraphRecall(async () => {}),
+      beginTurn: () => {
+        const snapshot = memoryV4Repository?.snapshot();
+        const published = new Set(graphL1Store?.tasks().filter(t => t.state === 'published').map(t => t.id) ?? []);
+        const visibleFacts = (snapshot?.facts ?? []).filter(f => !f.metadata?.graphTaskId || published.has(String(f.metadata.graphTaskId)))
+          .map(f => ({ kind: 'v4-fact' as const, id: f.id, version: Math.max(...snapshot!.factVersions.filter(v => v.factId === f.id).map(v => v.version)) }));
+        const knownAt = Date.now();
+        return (query, scope) => ({ protocolVersion: 'memory-graph/v1' as const, recallId: crypto.randomUUID(), query, scope: { ...localMemoryScope, ...(scope.sessionId ? { sessionId: scope.sessionId } : {}) },
+          temporal: { knownAt, valid: { kind: 'at' as const, at: knownAt } }, visibleFacts,
+          mode: 'direct-only' as const, budget: { ...V4_L2_BUDGET }, sharePolicies: ['allow-remote' as const],
+          sensitivities: memorySettings.remotePolicy === 'allow-private' ? ['normal' as const, 'private' as const] : ['normal' as const] });
+      },
       createRequest: (query: string) => {
         const timestamp = Date.now()
         return { protocolVersion: 'memory-graph/v1' as const, recallId: crypto.randomUUID(), query,
@@ -1873,28 +2082,33 @@ function rebuildRuntime() {
     ...(memorySettings.openSourceRecallEnabled && remoteMemory ? { sourceRecall: {
       countTokens: countGraphTokens,
       maxTokens: 4000,
-      recall: async (query: string) => {
-        const allowed = () => memorySettings.openSourceRecallEnabled && memorySettings.remotePolicy !== 'disabled'
-        await remoteMemory.flushPendingCaptures()
-        if (!allowed()
-          || !graphCaptureRepository || !graphExtractionStore) return []
-        // A broken extraction is not a rejection of its valid raw source. Only
-        // an explicit user rejection/use withdrawal blocks this separate route.
-        const blocked = new Set(graphL1Store?.reviews().filter(isUserSourceWithdrawal).map(r => r.sourceId) ?? [])
-        const stored = await memory?.list(localMemoryScope) ?? []
-        for (const item of stored) if (item.sharePolicy !== 'allow-remote'
-          || ['suppressed', 'deleted', 'orphaned'].includes(item.status ?? ''))
-          for (const id of item.sourceMessageIds ?? []) blocked.add(id)
-        if (!allowed()) return []
-        // This separate opt-in authorizes ordinary historical quotations, not secret/private sources.
-        return recallOpenSources({ captures: graphCaptureRepository.snapshot(), extractions: graphExtractionStore,
-          scope: localMemoryScope, query, canRead: source => !source.messageIds.some(id => blocked.has(id))
-            && inferMemoryPrivacy(source.turn!.userMessage).sensitivity === 'normal' })
-      },
+      beginTurn: beginDesktopSourceRecall,
+      recall: (query, scope) => beginDesktopSourceRecall()(query, scope),
     } } : {}),
     tools: tools.hasTools() ? tools : undefined,
     hooks,
   })
+}
+
+function beginDesktopSourceRecall() {
+  const captures = graphCaptureRepository, extractions = graphExtractionStore;
+  const versions = new Map(captures?.snapshot().sources.map(s => [s.id, s.revision]) ?? []);
+  const runIds = new Set(extractions?.list().map(r => r.id) ?? []);
+  const allowed = () => memorySettings.openSourceRecallEnabled && memorySettings.remotePolicy !== 'disabled'
+  return async (query: string, _scope: { ownerId: string; agentId?: string; sessionId?: string }) => {
+    if (!captures || !extractions || captures !== graphCaptureRepository || extractions !== graphExtractionStore
+      || !allowed() || _scope.ownerId !== localMemoryScope.ownerId
+      || (_scope.agentId !== undefined && _scope.agentId !== localMemoryScope.agentId)) return [];
+    const blocked = new Set(graphL1Store?.reviews().filter(isUserSourceWithdrawal).map(r => r.sourceId) ?? []);
+    const stored = await memory?.list(localMemoryScope) ?? [];
+    for (const item of stored) if (item.sharePolicy !== 'allow-remote' || ['suppressed', 'deleted', 'orphaned'].includes(item.status ?? ''))
+      for (const id of item.sourceMessageIds ?? []) blocked.add(id);
+    if (captures !== graphCaptureRepository || !allowed()) return [];
+    return recallOpenSources({ captures: captures.snapshot(),
+      extractions: { list: () => extractions.list().filter(r => runIds.has(r.id)), openReviews: () => extractions.openReviews() },
+      scope: { ...localMemoryScope, ...(_scope.sessionId ? { sessionId: _scope.sessionId } : {}) }, query, canRead: source => versions.get(source.id) === source.revision
+        && !source.messageIds.some(id => blocked.has(id)) && inferMemoryPrivacy(source.turn!.userMessage).sensitivity === 'normal' });
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -2035,6 +2249,27 @@ async function confirmMemoryPurge(input: { id?: unknown; token?: unknown; phrase
 }
 
 // ── IPC ─────────────────────────────────────────────────
+async function migrateOpenL1() {
+    if (!graphExtractionStore || !graphBasicRelations || !graphSemanticWorkflow || !apiConfig.apiKey.trim()) return { ok: false, error: '请先配置模型并开启记忆。' };
+    const sourceKey = (r: GraphExtractionRun) => r.sourceId + ':' + r.sourceRevision;
+    const completed = new Set(graphL1Store?.tasks().filter(t => t.state === 'published' && t.review.reviewer === 'user').map(t => sourceKey(t.run)) ?? []);
+    const handled = new Set(graphSemanticWorkflow.list().filter(i => ['waiting', 'ready', 'published', 'dismissed', 'cancelled'].includes(i.status) && i.configFingerprint === createHash('sha256').update(JSON.stringify([GRAPH_SEMANTIC_WORKFLOW_VERSION, apiConfig.model, apiConfig.baseURL])).digest('hex')).map(i => sourceKey(i.run)));
+    const candidates = [...new Map(graphExtractionStore.list().filter(r => r.status === 'complete' && !completed.has(sourceKey(r))
+      && !handled.has(sourceKey(r)) && (r.factCandidates.length || r.assertionCandidates?.length)).map(r => [sourceKey(r), r])).values()]
+      .filter(run => graphSemanticWorkflow!.canProcess(run));
+    let processed = 0, skipped = 0;
+    for (const original of candidates.slice(0, 5)) {
+      const workflow = graphSemanticWorkflow;
+      if (!workflow || !workflow.canProcess(original)) { skipped++; continue; }
+      const extractor = createOpenGraphExtractor({ getConfig: () => ({ ...apiConfig }), complete: completeGraphSemanticJson,
+        canSendSource: () => workflow === graphSemanticWorkflow && workflow.canProcess(original),
+        saveGraphExtraction: run => saveGraphExtraction(run, true) });
+      await extractor({ userMessage: original.sourceText, assistantMessage: '', metadata: { sourceMessageIds: [original.sourceId] } });
+      processed++;
+    }
+    return { ok: true, processed, skipped, remaining: Math.max(0, candidates.length - processed - skipped) };
+  }
+
 function setupIPC() {
   ipcMain.handle('app:version', () => app.getVersion())
 
@@ -2064,6 +2299,68 @@ function setupIPC() {
     }
   })
 
+  ipcMain.handle('memory:clarification-answer', async (_event, input: { id: string; candidateId: string; sourceRevision: string; text: string; contextSourceId?: string }) => {
+    try {
+      if (!graphSemanticWorkflow) return { ok: false, error: '澄清流程尚未就绪。' };
+      const run = await graphSemanticWorkflow.answer(input.id, input.candidateId, input.sourceRevision, input.text, input.contextSourceId);
+      if (run) {
+        const reply = run.supplementalEvidence?.at(-1);
+        if (reply) {
+          const tasks = graphCaptureRepository?.register({ userMessage: reply.text, assistantMessage: '',
+            metadata: { sessionId: 'default', sourceMessageIds: [reply.sourceId], clarificationFor: run.sourceId } }, localMemoryScope, 'clarification-evidence-v1') ?? [];
+          for (const task of tasks) if (graphCaptureRepository?.claim(task.id)) graphCaptureRepository.finish(task.id, { candidateCount: 0, writtenCount: 0 });
+          sessionStore.appendSessionMessage('default', { id: reply.sourceId, role: 'user', content: reply.text, createdAt: Date.now() });
+          saveSessions();
+        }
+        await saveGraphExtraction(run);
+      }
+      mainWindow?.webContents.send('memory:changed');
+      return { ok: true };
+    } catch (error) {
+      const code = error instanceof Error ? error.message : '';
+      return { ok: false, error: code === 'stale-clarification' ? '原文或待澄清项已变化，请刷新后重试。'
+        : code === 'invalid-clarification' ? '请选择可用的上下文，或填写不含敏感内容的补充说明。'
+        : '模型尚未完成补充信息处理，说明已保留，可稍后重新提交。' };
+    }
+  });
+  ipcMain.handle('memory:clarification-dismiss', (_event, input: { id: string; candidateId: string }) => {
+    try { graphSemanticWorkflow?.dismiss(input.id, input.candidateId); return { ok: true }; }
+    catch { return { ok: false, error: '待澄清项已失效。' }; }
+  });
+  ipcMain.handle('memory:relation-mapping-revoke', async (_event, id: string) => {
+    if (!graphBasicRelations || typeof id !== 'string') return { ok: false };
+    const affected = graphL1Store?.tasks().filter(t => t.run.factCandidates.some(f => f.mappingId === id)) ?? [];
+    graphBasicRelations.revokeMapping(id);
+    for (const task of affected) if (task.factRef && memoryV4Lifecycle) {
+      memoryV4Lifecycle.deleteFact(task.factRef.id, localMemoryScope, 'suppress',
+        { reason: '关系映射已撤销，等待独立关系重建', idempotencyKey: 'revoke-mapping:' + id + ':' + task.id });
+    }
+    graphL1Store?.retireClaims(affected.map(t => t.id));
+    invalidateGraphL1Projection(); syncGraphSemantic();
+    for (const task of affected) void saveGraphExtraction({ ...task.run, id: crypto.randomUUID() })
+      .catch(() => { graphExtractionError = '映射撤销后的独立关系重建尚未完成'; });
+    mainWindow?.webContents.send('memory:changed');
+    return { ok: true };
+  });
+  ipcMain.handle('memory:open-l1-migrate', migrateOpenL1);
+  ipcMain.handle('memory:semantic-retry', async () => {
+    const runs = await graphSemanticWorkflow?.retry(5) ?? [];
+    for (const run of runs) await saveGraphExtraction(run);
+    return { ok: true, processed: runs.length };
+  });
+  ipcMain.handle('memory:clarifications-list', () => ({
+    items: graphSemanticWorkflow?.list().filter(i => i.status === 'waiting').flatMap(i => i.decisions
+      .filter(d => d.verdict === 'needs-context').map(d => ({ id: i.id, candidateId: d.candidateId,
+        sourceId: i.run.sourceId, sourceRevision: i.run.sourceRevision, sourceText: i.run.sourceText,
+        question: d.question, options: d.options, reason: d.reason }))) ?? [],
+    contexts: graphCaptureRepository?.snapshot().sources.filter(s => s.status === 'active'
+      && s.scope.ownerId === localMemoryScope.ownerId && s.scope.agentId === localMemoryScope.agentId
+      && !!s.turn?.userMessage && s.turn.userMessage.length <= 4000
+      && inferMemoryPrivacy(s.turn.userMessage).sensitivity === 'normal').slice(-50)
+      .map(s => ({ id: s.messageIds[0] ?? s.id, text: s.turn!.userMessage.slice(0, 100) })) ?? [],
+    failed: graphSemanticWorkflow?.list().filter(i => i.status === 'failed'
+      || (i.status === 'ready' && i.decisions.some(d => d.verdict === 'supported'))).length ?? 0,
+  }));
   ipcMain.handle('screen:capture', async () => {
     const sources = await desktopCapturer.getSources({
       types: ['screen', 'window'],
@@ -2170,6 +2467,7 @@ function setupIPC() {
   })
 
   ipcMain.handle('memory:status', async () => ({
+    graphClaimCount: graphL1Store?.claims().length ?? 0,
     capture: memory?.captureStatus(),
     enabled: !!memory,
     count: memory ? await memory.count(localMemoryScope) : 0,
@@ -2232,11 +2530,10 @@ function setupIPC() {
   }))
 
   ipcMain.handle('memory:list', async (_event, limit = 200) => {
-    await graphSourceUpgradePromise
     const openAssertions = graphCaptureRepository && graphExtractionStore
       ? projectOpenAssertions(graphCaptureRepository.snapshot(), graphExtractionStore, localMemoryScope) : []
     const openCandidateKeys = new Set(openAssertions.map(item => `${item.extraction.runId}\0${item.extraction.candidateId}`))
-    const registry = createGraphPredicateRegistry()
+    const registry = currentGraphPredicateRegistry()
     for (const run of graphExtractionStore?.list() ?? [])
       for (const fact of run.factCandidates)
         if (needsOpenFactRepresentation(run, fact, registry)) openCandidateKeys.add(`${run.id}\0${fact.id}`)
@@ -2313,6 +2610,16 @@ function setupIPC() {
         sourceId: item.source.captureId })),
     graphOpenAssertionItems: openAssertions.filter(item => item.review.status !== 'rejected')
       .sort((a, b) => Number(a.review.status === 'accepted') - Number(b.review.status === 'accepted')).slice(0, Number(limit)),
+    graphClaimItems: (graphL1Store?.claims() ?? []).slice().reverse().slice(0, 100).map(claim => {
+      const task = graphL1Store?.tasks().find(task => task.id === claim.ref.id)
+      const registration = currentGraphPredicateRegistry().registrations.find(r => r.spec.name === claim.atom.predicate)
+      return { id: claim.ref.id, relation: claim.sourceStatement?.relationText
+          ?? registration?.labels.find(label => /[\p{Script=Han}]/u.test(label.text))?.text ?? claim.atom.predicate,
+        arguments: Object.entries(claim.atom.args).map(([role, term]) => ({ role,
+          text: term.kind === 'entity' ? task?.entities.find(entity => entity.ref.id === term.ref.id)?.canonicalName ?? term.ref.id : JSON.stringify(term) })),
+        polarity: claim.polarity, modality: claim.modality, time: claim.temporalSource.value ?? '未指定',
+        sourceText: task?.run.sourceText ?? '', supplementalEvidence: task?.run.supplementalEvidence ?? [] }
+    }),
     graphExtraction: {
       enabled: !!graphExtractionStore && (memorySettings.extractionMode === 'uie' || memorySettings.extractionMode === 'open'
         || memorySettings.graphExtractionEnabled),
@@ -2328,7 +2635,18 @@ function setupIPC() {
       automaticOpenNavigation: openAssertions.filter(item => item.review.status === 'candidate' && canNavigateOpenAssertion(item)).length,
       deferredOpenCandidates: openAssertions.filter(item => item.review.status === 'candidate' && !canNavigateOpenAssertion(item)).length,
       claims: graphL1Store?.claims().length ?? 0,
+      basicClaims: graphL1Store?.claims().filter(claim => !!claim.sourceStatement).length ?? 0,
+      basicRelations: graphBasicRelations?.definitions().length ?? 0,
     },
+    clarifications: graphSemanticWorkflow?.list().filter(item => item.status === 'waiting').flatMap(item => item.decisions.filter(d => d.verdict === 'needs-context').map(d => ({ id: item.id, candidateId: d.candidateId, sourceId: item.run.sourceId, sourceRevision: item.run.sourceRevision, sourceText: item.run.sourceText, question: d.question, options: d.options, reason: d.reason }))) ?? [],
+    semanticWorkflow: graphSemanticWorkflow?.list().reduce((stats, item) => { stats[item.status] = (stats[item.status] ?? 0) + 1; return stats }, {} as Record<string, number>) ?? {},
+    relationMappings: graphBasicRelations?.mappings().map(mapping => {
+      const definitions = graphBasicRelations!.definitions();
+      const target = currentGraphPredicateRegistry().registrations.find(r => r.spec.name === mapping.targetId);
+      return { ...mapping, sourceText: definitions.find(d => d.registration.spec.name === mapping.sourceId)?.relationText ?? mapping.sourceId,
+        targetText: definitions.find(d => d.registration.spec.name === mapping.targetId)?.relationText
+          ?? target?.labels.find(l => /[\p{Script=Han}]/u.test(l.text))?.text ?? mapping.targetId };
+    }) ?? [],
     graphReviewItems: graphL1Store?.reviews().filter(item => item.status === 'pending'
       && !openCandidateKeys.has(`${item.runId}\0${item.sourceFactId}`))
       .slice(0, Number(limit)).map((review) => {
@@ -2503,7 +2821,7 @@ function setupIPC() {
         sourceRevision: assertion.extraction.sourceRevision,
         status: input.outcome as 'accepted' | 'rejected', reason: input.reason.trim(), reviewedAt: Date.now() })
       invalidateGraphL1Projection()
-      const synced = await graphSemanticRepository.syncFromClaims(graphL1Store, memoryV4Repository, createGraphPredicateRegistry(), localMemoryScope)
+      const synced = await graphSemanticRepository.syncFromClaims(graphL1Store, memoryV4Repository, currentGraphPredicateRegistry(), localMemoryScope)
       if (!synced.ok || !graphL1ProjectionRepository?.sync()) throw new Error('图视图尚未就绪，请刷新后重试。')
       syncGraphRelationTasks()
       return { ok: true }
@@ -2896,6 +3214,8 @@ function setupIPC() {
     graphExtractionStore?.clear()
     graphNormalizationStore?.clear()
     graphL1Store?.clear()
+    graphBasicRelations?.clear()
+    graphSemanticWorkflow?.clear()
     invalidateGraphL1Projection()
     syncGraphSemantic()
     memoryV4ShadowEvaluationStore?.clear()
@@ -2918,6 +3238,8 @@ function setupIPC() {
     graphExtractionStore?.clear()
     graphNormalizationStore?.clear()
     graphL1Store?.clear()
+    graphBasicRelations?.clear()
+    graphSemanticWorkflow?.clear()
     invalidateGraphL1Projection()
     syncGraphSemantic()
     memoryV4ShadowEvaluationStore?.clear()

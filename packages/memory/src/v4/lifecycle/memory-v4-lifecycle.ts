@@ -88,6 +88,8 @@ export function createMemoryV4LifecycleService(
         fact.objectType = edit.objectType ?? inferObjectType(fact.object)
         fact.normalizedValue = edit.normalizedValue ?? normalizedJsonValue(fact.object)
         fact.canonicalText = canonicalText
+        // A manual rewrite is no longer the exact source-defined statement.
+        delete fact.sourceStatement
         fact.polarity = edit.polarity ?? fact.polarity
         fact.modality = edit.modality ?? fact.modality
         if (edit.condition === null)
@@ -152,6 +154,7 @@ export function createMemoryV4LifecycleService(
           fact.objectType = 'string'
           fact.normalizedValue = '[purged]'
           fact.canonicalText = '[purged]'
+          delete fact.sourceStatement
           const v3SourceId = typeof fact.metadata?.v3SourceId === 'string'
             ? fact.metadata.v3SourceId
             : draft.legacyImports.find(legacy => legacy.factId === fact.id)?.sourceItemId
@@ -166,6 +169,7 @@ export function createMemoryV4LifecycleService(
             version.objectType = 'string'
             version.normalizedValue = '[purged]'
             version.canonicalText = '[purged]'
+            delete version.sourceStatement
             delete version.condition
             version.reason = 'Historical content removed by an irreversible purge.'
           }
@@ -337,6 +341,7 @@ function appendVersion(
     subjectId: fact.subjectId, predicate: fact.predicate, object: fact.object,
     objectType: fact.objectType, normalizedValue: fact.normalizedValue,
     canonicalText: fact.canonicalText, polarity: fact.polarity, modality: fact.modality,
+    ...(fact.sourceStatement ? { sourceStatement: structuredClone(fact.sourceStatement) } : {}),
     ...(fact.condition ? { condition: fact.condition } : {}), status: fact.status,
     ...(fact.validFrom ? { validFrom: fact.validFrom } : {}), ...(fact.validTo ? { validTo: fact.validTo } : {}),
     evidenceLinkIds: [...fact.evidenceLinkIds], recordedAt: timestamp, reason,

@@ -11,6 +11,8 @@ function fixture(text = '我喜欢喝牛奶巧克力。', score = 0.58, sourceId
   const value = '牛奶巧克力', start = text.indexOf(value)
   const run = uieGraphExtractionRun(sourceId, text, parseUieOutput(text,
     { 喜好: [{ text: value, start, end: start + value.length, probability: score }] }))
+  // This fixture represents an already-reviewed source; score is not a fidelity decision.
+  run.semanticReview = { version: 'source-semantics-v3', runId: run.id, candidateIds: run.factCandidates.map(fact => fact.id) }
   const automatic = autoNormalizeUieGraphFact(run, run.factCandidates[0]!.id, { entities: [], aliases: [], scope })!
   const fact = automatic?.normalized.facts[0]!
   const v4 = createMemoryV4Repository(), l1 = createGraphL1Store({ load: () => undefined, save: () => {} })
@@ -18,7 +20,7 @@ function fixture(text = '我喜欢喝牛奶巧克力。', score = 0.58, sourceId
   return { run, automatic, fact, v4, l1, writer, review: fact ? assessGraphClaim(run, fact, privacy) : undefined }
 }
 
-describe('L1 source-record publication without confidence/context review gates', () => {
+describe('semantically reviewed L1 publication preserves confidence and context', () => {
   it.each([0, 0.1, 0.58])('publishes a clear self statement at score %s with its original evidence and confidence', async score => {
     const f = fixture(undefined, score)
     expect((await f.writer.submit(f.run, f.fact, f.review!, f.automatic.entities))?.state).toBe('published')

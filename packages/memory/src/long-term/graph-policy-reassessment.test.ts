@@ -45,14 +45,14 @@ function fixture(text = '我喜欢喝牛奶巧克力。', score = 0.82) {
 }
 
 describe('bounded graph policy re-assessment', () => {
-  it('publishes a retained explicit preference without modifying the raw extraction', async () => {
+  it('keeps unreviewed UIE facts pending without modifying the raw extraction', async () => {
     const f = fixture()
     const original = JSON.stringify(f.extractions.list()[0])
-    expect(await f.reassess()).toEqual({ reviewed: 1, published: 1, deferred: 0, failed: 0 })
-    expect(f.l1.claims()[0]?.atom.predicate).toBe('likes')
-    expect(f.v4.snapshot().facts).toHaveLength(1)
+    expect(await f.reassess()).toEqual({ reviewed: 1, published: 0, deferred: 1, failed: 0 })
+    expect(f.l1.claims()).toEqual([])
+    expect(f.v4.snapshot().facts).toHaveLength(0)
     expect(JSON.stringify(f.extractions.list()[0])).toBe(original)
-    expect(await f.reassess()).toEqual({ reviewed: 0, published: 0, deferred: 0, failed: 0 })
+    expect(f.l1.reviews()[0]?.status).toBe('pending')
   })
 
   it('does not override user decisions or publish a deleted source', async () => {
@@ -69,12 +69,12 @@ describe('bounded graph policy re-assessment', () => {
     expect(deleted.v4.snapshot().facts).toHaveLength(0)
   })
 
-  it('publishes low-score and uncertain sources with original scores and uncertainty', async () => {
+  it('does not turn either a low-score UIE candidate or a question into an automatic fact', async () => {
     const low = fixture('我喜欢喝牛奶巧克力。', 0.58)
-    expect((await low.reassess()).published).toBe(1)
-    expect(low.v4.snapshot().facts[0]?.extractionScore).toBe(0.58)
+    expect((await low.reassess()).published).toBe(0)
+    expect(low.run.factCandidates[0]?.modelScore).toBe(0.58)
     const question = fixture('我喜欢喝牛奶巧克力吗？')
-    expect((await question.reassess()).published).toBe(1)
-    expect(question.l1.claims()[0]).toMatchObject({ polarity: 'unknown', modality: 'unknown' })
+    expect((await question.reassess()).published).toBe(0)
+    expect(question.l1.claims()).toEqual([])
   })
 })

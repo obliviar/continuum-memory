@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { autoNormalizeUieGraphFact } from './graph-auto-identity'
-import { assessGraphClaim, createGraphL1Store, createGraphL1Writer } from './graph-l1-write'
+import { assessGraphClaim, confirmGraphClaim, createGraphL1Store, createGraphL1Writer } from './graph-l1-write'
 import { createLocalUieExtractor, localUieScriptPath, parseUieOutput, refreshUieGraphReviewContext,
   uieGraphExtractionRun, uieReviewCandidates } from './local-uie'
 import { createLocalMemoryCandidateVerifier } from './memory-write-policy'
@@ -19,7 +19,7 @@ function extracted(text: string, subject: string, predicate: string, object: str
 }
 
 describe('grounded UIE auto review', () => {
-  it('automatically admits a clear ordinary memory and a source-local graph fact', async () => {
+  it('keeps ordinary memory behavior and requires confirmation for an unreviewed UIE graph fact', async () => {
     const text = '阿澈住在成都。'
     const extraction = extracted(text, '阿澈', '居住地', '成都')
     const candidate = uieReviewCandidates(text, extraction)[0]!
@@ -40,12 +40,12 @@ describe('grounded UIE auto review', () => {
     expect(automatic.entities.every(entity => entity.ref.id.startsWith('source-entity:'))).toBe(true)
     const review = assessGraphClaim(run, automatic.normalized.facts[0]!,
       { sensitivity: 'private', sharePolicy: 'local-only' })
-    expect(review.status).toBe('approved')
+    expect(review.status).toBe('pending')
     let payload: string | undefined
     const l1 = createGraphL1Store({ load: () => payload, save: value => { payload = value } })
     const v4 = createMemoryV4Repository()
     const writer = createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
-    expect((await writer.submit(run, automatic.normalized.facts[0]!, review, automatic.entities))?.state)
+    expect((await writer.submit(run, automatic.normalized.facts[0]!, confirmGraphClaim(review, '核对原文居住关系'), automatic.entities))?.state)
       .toBe('published')
     expect(l1.claims()[0]).toMatchObject({ sensitivity: 'private', sharePolicy: 'local-only' })
     expect(v4.snapshot().facts).toHaveLength(1)
@@ -67,7 +67,7 @@ describe('grounded UIE auto review', () => {
     expect(automatic.normalized.facts[0]).toMatchObject({ status: 'ready', predicate: expected })
   })
 
-  it('publishes a directly stated first-person preference at 0.82 without relaxing ordinary memory review', async () => {
+  it('publishes a first-person UIE preference only after explicit review', async () => {
     const text = '我喜欢喝牛奶巧克力。'
     const value = '牛奶巧克力'
     const start = Array.from(text.slice(0, text.indexOf(value))).length
@@ -82,18 +82,18 @@ describe('grounded UIE auto review', () => {
     const fact = automatic.normalized.facts[0]!
     expect(fact).toMatchObject({ status: 'ready', predicate: 'likes' })
     const review = assessGraphClaim(run, fact, { sensitivity: 'private', sharePolicy: 'local-only' })
-    expect(review.status).toBe('approved')
+    expect(review.status).toBe('pending')
     let payload: string | undefined
     const l1 = createGraphL1Store({ load: () => payload, save: value => { payload = value } })
     const v4 = createMemoryV4Repository()
     expect((await createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
-      .submit(run, fact, review, automatic.entities))?.state).toBe('published')
+      .submit(run, fact, confirmGraphClaim(review, '核对原文喜好陈述'), automatic.entities))?.state).toBe('published')
     expect(l1.claims()[0]?.atom.predicate).toBe('likes')
     expect(v4.snapshot().facts).toHaveLength(1)
   })
 
   it.each(['我不太喜欢喝牛奶巧克力。', '我不再喜欢喝牛奶巧克力。',
-    '我可能喜欢喝牛奶巧克力。', '我喜欢喝牛奶巧克力吗？'])('automatically records uncertain preference context without asserting it as true: %s', async text => {
+    '我可能喜欢喝牛奶巧克力。', '我喜欢喝牛奶巧克力吗？'])('retains uncertain UIE preferences without automatically publishing: %s', async text => {
     const value = '牛奶巧克力'
     const start = Array.from(text.slice(0, text.indexOf(value))).length
     const extraction = parseUieOutput(text, { 喜好: [{ text: value, start,
@@ -107,8 +107,9 @@ describe('grounded UIE auto review', () => {
     const review = assessGraphClaim(run, fact, { sensitivity: 'private', sharePolicy: 'local-only' })
     const l1 = createGraphL1Store({ load: () => undefined, save: () => {} }), v4 = createMemoryV4Repository()
     expect((await createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
-      .submit(run, fact, review, automatic.entities))?.state).toBe('published')
-    expect(l1.claims()[0]).toMatchObject({ polarity: 'unknown', modality: 'unknown' })
+      .submit(run, fact, review, automatic.entities))).toBeUndefined()
+    expect(review.status).toBe('pending')
+    expect(l1.claims()).toEqual([])
     expect(automatic.entities.find(e => e.canonicalName === '我')!.ref.id).toMatch(/^source-entity:/)
   })
 
@@ -147,12 +148,12 @@ describe('grounded UIE auto review', () => {
         expect(automatic).toBeDefined()
         const fact = automatic.normalized.facts.find(item => item.sourceFactId === candidate!.id)!
         const review = assessGraphClaim(run, fact, { sensitivity: 'private', sharePolicy: 'local-only' })
-        expect(review.status).toBe('approved')
+        expect(review.status).toBe('pending')
         let payload: string | undefined
         const l1 = createGraphL1Store({ load: () => payload, save: value => { payload = value } })
         const v4 = createMemoryV4Repository()
         expect((await createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
-          .submit(run, fact, review, automatic.entities))?.state).toBe('published')
+          .submit(run, fact, confirmGraphClaim(review, '核对本地模型的原文证据'), automatic.entities))?.state).toBe('published')
         expect(l1.claims()).toHaveLength(1)
         expect(v4.snapshot().facts).toHaveLength(1)
       }
@@ -160,14 +161,14 @@ describe('grounded UIE auto review', () => {
     }, 180_000)
 
   it.each(['如果阿澈住在成都，就通知我。', '听说阿澈住在成都。', '阿澈不住在成都。',
-    '阿澈明天住在成都。', '阿澈住在成都吗？'])('keeps ordinary-memory quarantine but automatically admits a graph source record: %s', text => {
+    '阿澈明天住在成都。', '阿澈住在成都吗？'])('keeps both ordinary memory and unreviewed UIE graph facts pending: %s', text => {
     const extraction = extracted(text, '阿澈', '居住地', '成都')
     expect(uieReviewCandidates(text, extraction)[0]?.metadata.requiresReview).toBe(true)
     const run = uieGraphExtractionRun('source', text, extraction)
     const automatic = autoNormalizeUieGraphFact(run, run.factCandidates[0]!.id,
       { entities: [], aliases: [], scope })!
     expect(assessGraphClaim(run, automatic.normalized.facts[0]!,
-      { sensitivity: 'private', sharePolicy: 'local-only' }).status).toBe('approved')
+      { sensitivity: 'private', sharePolicy: 'local-only' }).status).toBe('pending')
     expect(run.factCandidates[0]!.context.speaker.resolution).toBe('unresolved')
   })
 

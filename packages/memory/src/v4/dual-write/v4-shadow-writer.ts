@@ -1054,6 +1054,7 @@ function appendFactVersion(
     objectType: fact.objectType,
     normalizedValue: fact.normalizedValue,
     canonicalText: fact.canonicalText,
+    ...(fact.sourceStatement ? { sourceStatement: structuredClone(fact.sourceStatement) } : {}),
     polarity: fact.polarity,
     modality: fact.modality,
     ...(fact.condition ? { condition: fact.condition } : {}),
@@ -1143,6 +1144,7 @@ function deleteMirroredFact(
     fact.objectType = 'string'
     fact.normalizedValue = '[purged]'
     fact.canonicalText = '[purged]'
+    delete fact.sourceStatement
     fact.metadata = { v3SourceId: sourceId, purgeCompletedAt: deletedAt }
     for (const version of draft.factVersions) {
       if (version.factId !== fact.id)
@@ -1151,6 +1153,7 @@ function deleteMirroredFact(
       version.objectType = 'string'
       version.normalizedValue = '[purged]'
       version.canonicalText = '[purged]'
+      delete version.sourceStatement
       version.reason = 'Historical content removed by an irreversible purge.'
       delete version.condition
     }

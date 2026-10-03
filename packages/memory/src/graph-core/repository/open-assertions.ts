@@ -25,6 +25,9 @@ export function needsOpenFactRepresentation(run: GraphExtractionRun, fact: FactC
   const mapped = registry.lookup(fact.predicate)
   if (!mapped) return true
   const { registration, direction } = mapped
+  // Basic relations retain all typed roles on the Claim. Observed type labels and
+  // binary compatibility anchors must not send an approved n-ary fact back to open-only storage.
+  if (registration.spec.registrationKind === 'basic') return false
   const sourceType = registration.spec.roles[direction === 'forward' ? registration.sourceRole : registration.targetRole]?.type
   const targetType = registration.spec.roles[direction === 'forward' ? registration.targetRole : registration.sourceRole]?.type
   if (typeof sourceType === 'object' && sourceType.entityType !== run.entityMentions.find(mention => mention.id === fact.subjectMentionId)?.type)
@@ -37,8 +40,8 @@ export function needsOpenFactRepresentation(run: GraphExtractionRun, fact: FactC
 }
 
 /** Match the immutable extraction to a current capture, including exact planned segments. */
-export function projectOpenAssertions(captures: CaptureSnapshot, store: Pick<GraphExtractionResultStore, 'list' | 'openReviews'>,
-  scope: GraphScope): GraphOpenAssertionRecord[] {
+export function projectOpenAssertions(captures: CaptureSnapshot, store: Pick<GraphExtractionResultStore, 'list' | 'openReviews' | 'publicationView'>,
+  scope: GraphScope, options: { includeKnownFacts?: boolean } = {}): GraphOpenAssertionRecord[] {
   const result = new Map<string, GraphOpenAssertionRecord>()
   const reviews = new Map(store.openReviews().map(review => [review.assertionId, review]))
   const registry = createGraphPredicateRegistry()
@@ -58,7 +61,12 @@ export function projectOpenAssertions(captures: CaptureSnapshot, store: Pick<Gra
     const records = tasksBySource.get(task.sourceId) ?? []
     records.push(task); tasksBySource.set(task.sourceId, records)
   }
-  for (const run of store.list()) {
+  for (const rawRun of store.list()) {
+    const view = store.publicationView?.(rawRun.id)
+    const evidenceLive = view?.supplementalEvidence?.length && view.supplementalEvidence.every(extra =>
+      textHash(extra.text) === extra.sourceRevision && (sourcesById.get(extra.sourceId) ?? []).some(source =>
+        source.turn?.userMessage === extra.text && inferMemoryPrivacy(extra.text).sensitivity === 'normal'))
+    const run = evidenceLive ? view! : rawRun
     if (run.status !== 'complete' || textHash(run.sourceText) !== run.sourceRevision) continue
     const matched = (sourcesById.get(run.sourceId) ?? []).flatMap(source => {
       const text = source.turn!.userMessage
@@ -71,7 +79,7 @@ export function projectOpenAssertions(captures: CaptureSnapshot, store: Pick<Gra
     const { source, offset, text } = matched[0]!
     const mentions = new Map(run.entityMentions.map(mention => [mention.id, mention]))
     const candidates = [...(run.assertionCandidates ?? []).map(candidate => ({ ...candidate, attributes: [] as GraphOpenAssertionRecord['attributes'] })),
-      ...run.factCandidates.filter(fact => needsOpenFactRepresentation(run, fact, registry))
+      ...run.factCandidates.filter(fact => options.includeKnownFacts || needsOpenFactRepresentation(run, fact, registry))
       .map(fact => ({ id: fact.id, relationText: fact.predicate, evidenceSpan: fact.evidenceSpan,
         modelScore: fact.modelScore, context: fact.context,
         participants: [{ mentionId: fact.subjectMentionId, role: 'subject' },
@@ -87,7 +95,9 @@ export function projectOpenAssertions(captures: CaptureSnapshot, store: Pick<Gra
           || mention.span.start < span.start || mention.span.end > span.end) return undefined
         const translated = { start: mention.span.start + offset, end: mention.span.end + offset }
         return { ref: { kind: 'mention' as const, id: `open-mention:${hash([source.id, source.revision, translated])}`, version: 1 as const },
-          text: mention.text, role: participant.role, typeCandidate: mention.type, span: translated }
+          text: mention.text, ...(evidenceLive && mention.resolvedText
+            && run.supplementalEvidence?.some(extra => extra.text.includes(mention.resolvedText!))
+            ? { resolvedText: mention.resolvedText } : {}), role: participant.role, typeCandidate: mention.type, span: translated }
       })
       if (!participants.length || participants.some(participant => !participant)) continue
       const evidenceSpan = { start: span.start + offset, end: span.end + offset }
@@ -152,7 +162,8 @@ export function searchOpenAssertions(bundle: Pick<GraphSemanticBundle, 'openAsse
   const queue = records.filter(record => options.seedAssertionIds ? options.seedAssertionIds.includes(record.ref.id)
     : name(record.text).includes(needle) || needle.includes(name(record.text))
     || name(record.relationText).includes(needle)
-    || record.participants.some(participant => usefulMention(name(participant.text)) && needle.includes(name(participant.text))))
+    || record.participants.some(participant => [participant.text, participant.resolvedText].some(text => text
+      && usefulMention(name(text)) && (needle.includes(name(text)) || name(text).includes(needle)))))
     .slice(0, limit).map(assertion => ({ assertion, depth: 0, route: 'text-match' as const, verification: verification(assertion) }))
   for (const hit of queue) hits.set(hit.assertion.ref.id, hit)
   const frontier: OpenAssertionSearchHit[] = [...queue]

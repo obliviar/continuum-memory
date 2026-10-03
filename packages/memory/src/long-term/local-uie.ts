@@ -9,6 +9,7 @@ import { extractMemoryCandidates, inferMemoryPrivacy, isSafeMemoryContent } from
 import type { MemoryCandidate, MemoryExtractor } from './memory-extractor'
 import { personalUieRelations } from './uie-personal-relations'
 import { extractLocalOpenAssertions } from './open-assertion-extractor'
+import { planUieSchema } from './uie-schema-planner'
 
 const ENTITY_LABELS = new Set([
   '人物', '地点', '组织机构', '项目', '企业', '影视作品', '图书作品',
@@ -17,6 +18,62 @@ const ENTITY_LABELS = new Set([
 const FIELD_LABELS = new Set(['姓名', '职业', '所在地', '喜好', '当前项目', '爱好', '喜欢', '课程', '上课地点'])
 const MAX_OUTPUT_BYTES = 2_000_000
 const EXTRACTOR_VERSION = 'local-uie-base-v1'
+const AUTO_REVIEW_VERSION = 'uie-grounded-assertion-v2'
+const AUTO_REVIEW_SCORE = 0.85
+
+const RELATION_CUES: Record<string, RegExp> = {
+  居住地: /(?:居住地|住在|居住于|定居于)/u,
+  所属组织: /(?:所属组织|属于|任职于|在.{0,24}(?:工作|任职))/u,
+  董事长: /董事长/u,
+  创始人: /创始人/u,
+  总部地点: /(?:总部地点|总部位于)/u,
+  毕业院校: /(?:毕业院校|毕业于)/u,
+  国籍: /国籍/u,
+  喜欢: /(?:喜欢|偏好|爱吃|爱喝|爱玩|爱打|爱看|爱听)/u,
+  修读课程: /(?:选修|修读|学习|上(?=[^，。]{1,30}(?:课|学|课程)))/u,
+  上课地点: /(?:上课|学习)/u,
+  参与项目: /(?:正在(?:做|开发|研究|推进)|参与.{0,20}项目)/u,
+}
+
+function assertionClause(source: string, start: number, end: number): string | undefined {
+  const chars = Array.from(source)
+  if (start < 0 || end > chars.length || start >= end) return undefined
+  let from = start
+  while (from > 0 && !/[，,。！？!?；;\n]/u.test(chars[from - 1]!)) from--
+  const tail = chars.slice(end).findIndex(char => /[，,。！？!?；;\n]/u.test(char))
+  const to = tail < 0 ? chars.length : end + tail
+  if (chars[to] && /[？?]/u.test(chars[to]!)) return undefined
+  const clause = chars.slice(from, to).join('').trim()
+  if (/[?？]|(?:如果|假如|假设|要是|可能|也许|或许|计划|打算|希望|将来|听说|据说|有人说|声称|传闻|据报道|不知道|不确定|猜测|怀疑|请问|询问|并非|没有|未曾|尚未|已不|不太|不再|不怎么|再也不|从不|并不|不(?:是|在|属于|住|居住|工作|担任|喜欢)|不要|别|例如|比如|假想|扮演|引用)/u.test(clause)
+    || /(?:吗|么|是否|能否)$/u.test(clause)
+    || /[“”"「」『』]/u.test(clause)) return undefined
+  return clause
+}
+
+function groundedRelation(source: string, relation: UieRelation, minimumScore = AUTO_REVIEW_SCORE): boolean {
+  if (relation.score < minimumScore) return false
+  const start = Math.min(relation.subject.start, relation.object.start)
+  const end = Math.max(relation.subject.end, relation.object.end)
+  const clause = assertionClause(source, start, end)
+  const cue = RELATION_CUES[relation.predicate]
+  return !!clause && !!cue && cue.test(clause)
+    && clause.includes(relation.subject.text) && clause.includes(relation.object.text)
+    && !/(?:昨天|明天|今晚|上周|下周|每周|曾经|以前|目前|现在|未来|去年|今年|明年)/u.test(clause)
+}
+
+function relationEvidenceSpan(source: string, relation: UieRelation, minimumScore: number): { start: number; end: number } {
+  const chars = Array.from(source)
+  let start = Math.min(relation.subject.start, relation.object.start)
+  let end = Math.max(relation.subject.end, relation.object.end)
+  if (groundedRelation(source, relation, minimumScore)) {
+    while (start > 0 && !/[，,。！？!?；;\n]/u.test(chars[start - 1]!)) start--
+    while (end < chars.length && !/[，,。！？!?；;\n]/u.test(chars[end]!)) end++
+  } else if (relation.evidenceSpan) {
+    start = relation.evidenceSpan.start
+    end = relation.evidenceSpan.end
+  }
+  return { start, end }
+}
 
 export type UieSchema = (string | { [entityLabel: string]: string[] })[]
 
@@ -107,6 +164,7 @@ export interface UieRuleFallbackOptions {
   rules?: MemoryExtractor
   onGraphExtraction?: (turn: MemoryCapture, run: GraphExtractionRun) => void | Promise<void>
   onError?: (error: unknown) => void
+  adaptiveSchema?: boolean
 }
 
 /** Keep rules authoritative; UIE contributes review-only candidates and never blocks capture. */
@@ -116,7 +174,8 @@ export function createUieRuleFallbackExtractor(options: UieRuleFallbackOptions):
     const local = await rules(turn)
     let extracted = false
     try {
-      const extraction = await options.uie.extract(turn.userMessage)
+      const extraction = await options.uie.extract(turn.userMessage,
+        options.adaptiveSchema ? planUieSchema(turn.userMessage).schema : undefined)
       extracted = true
       if (options.onGraphExtraction) {
         const sourceIds = turn.metadata?.sourceMessageIds
@@ -346,23 +405,55 @@ export function uieGraphExtractionRun(sourceId: string, sourceText: string, extr
         text: mention.text, span: { start: utf16(mention.start), end: utf16(mention.end) }, modelScore: mention.score })
     }
   }
-  const facts = relations.map((relation, index) => ({
+  const facts = relations.map((relation, index) => {
+    // Graph source records are not confidence-certified facts. Confidence remains
+    // attached, but must not prevent independent reading of explicit source context.
+    const minimumScore = 0
+    const evidence = relationEvidenceSpan(sourceText, relation, minimumScore)
+    return {
     id: `uie-fact:${index}`, subjectMentionId: index < extraction.relations.length
       ? mentionId(relation.subject) : personalMentionId(relation.subject), predicate: relation.predicate,
     object: literalType(relation.predicate)
       ? { literal: relation.object.text, valueType: literalType(relation.predicate) }
       : { mentionId: index < extraction.relations.length ? mentionId(relation.object) : personalMentionId(relation.object) },
-    evidenceSpan: { start: utf16(relation.evidenceSpan?.start ?? Math.min(relation.subject.start, relation.object.start)),
-      end: utf16(relation.evidenceSpan?.end ?? Math.max(relation.subject.end, relation.object.end)) },
+    evidenceSpan: { start: utf16(evidence.start), end: utf16(evidence.end) },
     modelScore: relation.score,
-    context: { negation: { value: null, resolution: 'unresolved' },
-      condition: { value: null, resolution: 'unresolved' },
-      time: { value: null, resolution: 'unresolved' },
-      speaker: { value: null, resolution: 'unresolved' } },
-  }))
+    context: groundedRelation(sourceText, relation, minimumScore)
+      ? { negation: { value: false, resolution: 'resolved' }, condition: { value: null, resolution: 'absent' },
+          time: { value: null, resolution: 'absent' }, speaker: { value: 'user', resolution: 'resolved' } }
+      : { negation: { value: null, resolution: 'unresolved' }, condition: { value: null, resolution: 'unresolved' },
+          time: { value: null, resolution: 'unresolved' }, speaker: { value: null, resolution: 'unresolved' } },
+  } })
   return createGraphExtractionRun({ sourceId, sourceText, modelId: extraction.model,
     rawOutput: { graph: { entities: [...entities, ...discovery.entities], facts, assertions: discovery.assertions }, uieRawOutput: extraction.rawOutput,
       extractionSchema: extraction.schema ?? null, adapterVersion: 'uie-open-assertions-v1' } })
+}
+
+/** Re-assess derived context from retained raw UIE without changing the immutable extraction record. */
+export function refreshUieGraphReviewContext(run: GraphExtractionRun): GraphExtractionRun | undefined {
+  if (run.modelId !== 'uie-base' || run.status !== 'complete') return undefined
+  const envelope = asRecord(run.rawOutput)
+  const raw = envelope?.uieRawOutput
+  if (!raw) return undefined
+  let rebuilt: GraphExtractionRun
+  try { rebuilt = uieGraphExtractionRun(run.sourceId, run.sourceText, parseUieOutput(run.sourceText, raw)) }
+  catch { return undefined }
+  const sameObject = (a: typeof run.factCandidates[number]['object'], b: typeof a) => JSON.stringify(a) === JSON.stringify(b)
+  if (rebuilt.status !== 'complete' || rebuilt.sourceRevision !== run.sourceRevision
+    || rebuilt.factCandidates.length !== run.factCandidates.length
+    || rebuilt.entityMentions.length !== run.entityMentions.length
+    || !rebuilt.factCandidates.every((fact, index) => {
+      const prior = run.factCandidates[index]
+      return prior && fact.id === prior.id && fact.subjectMentionId === prior.subjectMentionId
+        && fact.predicate === prior.predicate && fact.modelScore === prior.modelScore
+        && sameObject(fact.object, prior.object)
+    })
+    || !rebuilt.entityMentions.every((mention, index) => {
+      const prior = run.entityMentions[index]
+      return prior && mention.id === prior.id && mention.type === prior.type && mention.text === prior.text
+        && mention.span.start === prior.span.start && mention.span.end === prior.span.end
+    })) return undefined
+  return { ...run, factCandidates: rebuilt.factCandidates }
 }
 
 function entityType(label: string): string {
@@ -408,7 +499,7 @@ function putBest<T extends { score: number }>(items: Map<string, T>, key: string
     items.set(key, item)
 }
 
-/** UIE-only information enters review, never the authoritative store automatically. */
+/** Only high-confidence, explicitly grounded, low-risk UIE assertions may bypass manual review. */
 export function uieReviewCandidates(source: string, extraction: UieExtraction): MemoryCandidate[] {
   const candidates: MemoryCandidate[] = []
   for (const field of extraction.fields) {
@@ -420,6 +511,9 @@ export function uieReviewCandidates(source: string, extraction: UieExtraction): 
     const content = `${mapped.title}：${field.text}`
     if (!isSafeMemoryContent(content))
       continue
+    const fieldClause = assertionClause(source, field.start, field.end)
+    const autoEligible = field.score >= AUTO_REVIEW_SCORE && !!fieldClause && isSelfField(fieldClause, field.label)
+      && !/(?:昨天|明天|今晚|上周|下周|每周|曾经|以前|未来|去年|明年)/u.test(fieldClause)
     candidates.push({
       content,
       metadata: {
@@ -427,7 +521,8 @@ export function uieReviewCandidates(source: string, extraction: UieExtraction): 
         subjectId: 'owner:self', normalizedValue: field.text,
         confidence: field.score, importance: 0.6,
         extractionChannel: 'uie-base-local', extractorVersion: EXTRACTOR_VERSION,
-        requiresReview: true, ...inferMemoryPrivacy(content),
+        requiresReview: !autoEligible, autoReviewPolicy: autoEligible ? AUTO_REVIEW_VERSION : undefined,
+        ...inferMemoryPrivacy(content),
       },
     })
   }
@@ -444,7 +539,9 @@ export function uieReviewCandidates(source: string, extraction: UieExtraction): 
         normalizedValue: relation.object.text, cardinality: 'multiple',
         confidence: relation.score, importance: 0.55,
         extractionChannel: 'uie-base-local', extractorVersion: EXTRACTOR_VERSION,
-        requiresReview: true, sensitivity: 'private', sharePolicy: 'local-only',
+        requiresReview: !groundedRelation(source, relation),
+        autoReviewPolicy: groundedRelation(source, relation) ? AUTO_REVIEW_VERSION : undefined,
+        sensitivity: 'private', sharePolicy: 'local-only',
       },
     })
   }

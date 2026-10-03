@@ -13,7 +13,12 @@ describe('smart extractor graph capture', () => {
         participants: [{ mentionId: 'a', role: 'subject' }, { mentionId: 'b', role: 'substrate' }],
         evidenceSpan: { start: 0, end: 11 }, modelScore: 0.9 }] } }
     const extractor = createSmartMemoryExtractor({ getConfig: () => ({ apiKey: 'test', model: 'fixture' }),
-      complete: async prompt => { expect(prompt).toContain('assertions:'); return JSON.stringify(raw) },
+      complete: async prompt => {
+        expect(prompt).toContain('assertions:')
+        expect(prompt).toContain('memories 的长期事实筛选标准不限制 graph.assertions')
+        expect(prompt).toContain('不用于推导新的事实')
+        return JSON.stringify(raw)
+      },
       saveGraphExtraction: run => { saved.push(run) } })
     await extractor({ userMessage: source, assistantMessage: '', metadata: { sourceMessageIds: ['m1'] } })
     expect(saved[0]).toMatchObject({ status: 'complete', assertionCandidates: [{ relationText: '外延生长于' }] })

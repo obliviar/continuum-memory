@@ -1,6 +1,7 @@
 import type {
   GraphRecallRequest,
   GraphRecallResult,
+  SourceRecallEvidence,
   AdaptiveMemoryRecallResult,
   AgentContextPort,
   AgentForegroundStreamPort,
@@ -21,6 +22,7 @@ import type {
 } from '@continuum-memory/contracts'
 
 import { buildGraphEvidencePrompt } from '../prompt/graph-evidence-prompt'
+import { buildSourceEvidencePrompt } from '../prompt/source-evidence-prompt'
 import { createChatHooks } from './hooks'
 import { buildSystemPrompt } from '../prompt/system-prompt'
 
@@ -41,16 +43,25 @@ export interface AgentRuntimeDeps {
   session: AgentSessionPort
   context?: AgentContextPort
   memory?: AgentMemoryPort
+  sourceRecall?: {
+    recall: (query: string, scope: MemoryScope) => Promise<SourceRecallEvidence[]>
+    countTokens: (text: string) => number
+    maxTokens: number
+    beginTurn?: () => (query: string, scope: MemoryScope) => Promise<SourceRecallEvidence[]>
+  }
   /** Explicit graph route. Never falls back to legacy recall on graph errors. */
   graphRecall?: {
     createRequest: (query: string, scope: MemoryScope) => GraphRecallRequest
     countTokens: (text: string) => number
-    /** Host barrier for all capture segments before selecting exact graph evidence. */
+    /** Prepare an already-published view; hosts must not flush background extraction here. */
     awaitCaptureWrites: () => Promise<void>
+    beginTurn?: () => (query: string, scope: MemoryScope) => GraphRecallRequest
   }
   /** Resolve a stable, isolated memory owner for a session. */
   resolveMemoryScope?: (sessionId: string) => MemoryScope
   tools?: AgentToolPort
+  /** Host-controlled bound for workflows needing several tool steps. Defaults to five. */
+  maxToolRounds?: number
   stream?: AgentForegroundStreamPort
   hooks?: ChatHookRegistry
 }
@@ -65,6 +76,8 @@ export interface AgentSendOptions {
   input?: { type: 'text' | 'voice' | 'image' }
   /** Fixed legacy recall size. Omit it to use adaptive batched recall. */
   memoryTopK?: number
+  /** Host-loaded workflow guidance for this turn only; never captured as user evidence. */
+  skill?: { id: string; payload: string }
 }
 
 /** Result of a completed chat turn. */
@@ -88,7 +101,8 @@ export interface AgentTurnResult {
  */
 export function createAgentRuntime(deps: AgentRuntimeDeps) {
   const hooks = deps.hooks ?? createChatHooks()
-  const maxToolRounds = 5
+  const maxToolRounds = deps.maxToolRounds ?? 5
+  if (!Number.isSafeInteger(maxToolRounds) || maxToolRounds < 1 || maxToolRounds > 16) throw new Error('Invalid tool round budget')
 
   async function runLLMRound(
     messages: ChatMessage[],
@@ -198,6 +212,9 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
 
     const model = options?.model ?? deps.persona.model
     const memoryScope = deps.resolveMemoryScope?.(sessionId) ?? { ownerId: sessionId, agentId: 'default' }
+    const recallSources = deps.sourceRecall?.beginTurn?.() ?? deps.sourceRecall?.recall
+    const graphRequest = deps.graphRecall?.beginTurn?.() ?? deps.graphRecall?.createRequest
+    const isLegacyVisible = !deps.graphRecall ? await deps.memory?.beginRecallTurn?.(memoryScope) : undefined
     await hooks.emitBeforeMessageComposedHooks(userMessage, ctx)
 
     const memoryContext = buildMemoryCaptureContext(deps.session.getSessionMessages(sessionId))
@@ -216,6 +233,13 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
     }
     appendSessionMessage(sessionId, userItem)
 
+    const captureInput = { userMessage, assistantMessage: '', context: memoryContext,
+      attachments: options?.attachments, metadata: { sessionId, sourceMessageIds: [userItem.id], inputType: ctx.input?.type ?? 'text' } }
+    if (deps.memory?.enqueueCapture) await deps.memory.enqueueCapture(captureInput, memoryScope)
+      .catch(error => { console.error('[continuum-memory] source persistence failed:', error) })
+    else if (deps.memory) void deps.memory.capture(captureInput, memoryScope)
+      .catch(error => { console.error('[continuum-memory] background capture failed:', error) })
+
     // Recall long-term memories relevant to this message.
     let memories
     let adaptiveResult: AdaptiveMemoryRecallResult | undefined
@@ -232,27 +256,16 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
       catch (err) {
         console.error('[continuum-memory] memory recall failed:', err)
       }
+      if (isLegacyVisible) {
+        memories = memories?.filter(isLegacyVisible)
+        if (adaptiveResult) {
+          adaptiveResult.memories = memories ?? []
+          const visibleIds = new Set(memories?.map(m => m.id))
+          adaptiveResult.injectedMemoryIds = adaptiveResult.injectedMemoryIds.filter(id => visibleIds.has(id))
+          adaptiveResult.evidencePack = adaptiveResult.evidencePack?.filter(entry => visibleIds.has(entry.memoryId))
+        }
+      }
     }
-
-    // Start durable fact extraction before the model call so an API failure
-    // cannot discard facts from the user's message. Provider failures are
-    // handled inside the configured extractor and this promise never rejects.
-    const capturePromise = deps.memory
-      ? deps.memory.capture({
-          userMessage,
-          assistantMessage: '',
-          context: memoryContext,
-          attachments: options?.attachments,
-          metadata: {
-            sessionId,
-            sourceMessageIds: [userItem.id],
-            inputType: ctx.input?.type ?? 'text',
-          },
-        }, memoryScope).catch((err) => {
-          console.error('[continuum-memory] memory write failed:', err)
-          return 0
-        })
-      : Promise.resolve(0)
 
     // Assemble the system prompt.
     const systemPrompt = buildSystemPrompt({
@@ -265,6 +278,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
 
     // Assemble the full message list from history.
     const history = deps.session.getSessionMessages(sessionId)
+    const skillCallId = options?.skill ? crypto.randomUUID() : undefined
     const messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       ...history.map(h => ({
@@ -274,6 +288,9 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
         toolCalls: h.toolCalls,
         name: h.name,
       })),
+      ...(options?.skill ? [{ role: 'assistant' as const, content: '', toolCalls: [{ id: skillCallId!, type: 'function' as const,
+        function: { name: 'use_skill', arguments: JSON.stringify({ skill_id: options.skill.id }) } }] },
+      { role: 'tool' as const, name: 'use_skill', toolCallId: skillCallId!, content: options.skill.payload }] : []),
     ]
 
     try {
@@ -287,14 +304,29 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
 
       while (round <= maxToolRounds) {
         // Recollect immediately before every model round, including after tool-driven deletions.
-        // Await capture so its V4 changes cannot silently invalidate the selected source version.
+        // Fixed visibility is combined with fresh liveness checks; extraction never blocks this loop.
         let graphResult: GraphRecallResult | undefined
+        let memoryPrompt = systemPrompt
+        if (!deps.graphRecall && memories && deps.memory?.validateRecall) {
+          memories = await deps.memory.validateRecall(memories, memoryScope)
+          const liveIds = new Set(memories.map(m => m.id))
+          memoryPrompt = buildSystemPrompt({ persona: deps.persona.systemPrompt, memories,
+            evidencePack: adaptiveResult?.evidencePack?.filter(e => liveIds.has(e.memoryId)),
+            contexts: deps.context?.snapshot(), extra: deps.persona.extraInstructions })
+        }
         if (deps.graphRecall) {
-          await capturePromise
           await deps.graphRecall.awaitCaptureWrites()
           if (!deps.memory?.graph) throw new Error('Graph memory mode is enabled but no graph adapter is available')
-          const request = deps.graphRecall.createRequest(userMessage, memoryScope)
-          const recalled = await deps.memory.graph.recall(request)
+          let request = graphRequest!(userMessage, memoryScope)
+          let recalled = await deps.memory.graph.recall(request)
+          if (!recalled.ok && ['not-ready', 'stale-projection'].includes(recalled.error.code)) {
+            await deps.graphRecall.awaitCaptureWrites()
+            request = graphRequest!(userMessage, memoryScope)
+            recalled = await deps.memory.graph.recall(request)
+          }
+          if (!recalled.ok && ['not-ready', 'stale-projection'].includes(recalled.error.code)) {
+            memoryPrompt += '\nHistorical graph evidence is temporarily unavailable. Do not invent remembered facts.'
+          } else {
           if (!recalled.ok) throw new Error(`Graph memory recall failed: ${recalled.error.code}`)
           graphResult = recalled.value
           if (graphResult.recallId !== request.recallId || graphResult.scope.ownerId !== request.scope.ownerId
@@ -304,8 +336,29 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
           const promptCost = deps.graphRecall.countTokens(graphPrompt)
           if (!Number.isSafeInteger(promptCost) || promptCost < 0 || promptCost > request.budget.maxEvidenceTokens)
             throw new Error('Graph memory prompt exceeds the evidence budget')
-          currentMessages = [{ role: 'system', content: `${systemPrompt}\n${graphPrompt}` }, ...currentMessages.slice(1)]
+          memoryPrompt += `\n${graphPrompt}`
+          }
         }
+        if (deps.sourceRecall) {
+          if (!Number.isSafeInteger(deps.sourceRecall.maxTokens) || deps.sourceRecall.maxTokens < 0)
+            throw new Error('Invalid source evidence budget')
+          const entries = await recallSources!(userMessage, memoryScope)
+          if (entries.some(e => e.scope.ownerId !== memoryScope.ownerId || e.scope.agentId !== memoryScope.agentId
+            || (memoryScope.sessionId !== undefined && e.scope.sessionId !== memoryScope.sessionId)))
+            throw new Error('Source memory returned a mismatched scope')
+          let sourcePrompt = buildSourceEvidencePrompt(entries)
+          const cost = () => {
+            const value = deps.sourceRecall!.countTokens(sourcePrompt)
+            if (!Number.isSafeInteger(value) || value < 0) throw new Error('Invalid source evidence token cost')
+            return value
+          }
+          while (entries.length && cost() > deps.sourceRecall.maxTokens) {
+            entries.pop()
+            sourcePrompt = buildSourceEvidencePrompt(entries)
+          }
+          memoryPrompt += `\n${sourcePrompt}`
+        }
+        currentMessages = [{ role: 'system', content: memoryPrompt }, ...currentMessages.slice(1)]
         result = await runLLMRound(currentMessages, model, ctx)
         if (graphResult && deps.memory?.graph) {
           try {
@@ -338,9 +391,6 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
         round++
       }
 
-      // Commit the user fact before persisting the completed assistant turn.
-      await capturePromise
-
       // Persist the final assistant message.
       const assistantItem: ChatHistoryItem = {
         id: crypto.randomUUID(),
@@ -359,7 +409,6 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
       return result
     }
     finally {
-      await capturePromise
     }
   }
 

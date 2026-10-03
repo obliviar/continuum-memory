@@ -11,6 +11,7 @@ export interface LocalErlangshenOptions {
   modelPath: string
   dependenciesPath?: string
   modelRevision: string
+  preprocessingVersion?: string
   startupTimeoutMs?: number
   requestTimeoutMs?: number
 }
@@ -128,7 +129,8 @@ export function createLocalErlangshenNli(options: LocalErlangshenOptions): Graph
         if (result.modelId !== ERLANGSHEN_NLI_MODEL_ID || result.modelRevision !== options.modelRevision)
           throw new Error('Local Erlangshen NLI response revision mismatch')
         return { ok: true as const, value: { scores, modelId: ERLANGSHEN_NLI_MODEL_ID,
-          modelRevision: options.modelRevision, preprocessingVersion: ERLANGSHEN_NLI_PREPROCESSING_VERSION,
+          modelRevision: options.modelRevision,
+          preprocessingVersion: options.preprocessingVersion ?? ERLANGSHEN_NLI_PREPROCESSING_VERSION,
           truncated: result.truncated === true } }
       }
       catch (error) {

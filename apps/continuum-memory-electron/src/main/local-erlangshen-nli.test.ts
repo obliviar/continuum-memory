@@ -15,7 +15,9 @@ const directories: string[] = []
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }) })
 
 describe('local Erlangshen process adapter', () => {
-  it('keeps one local process and validates the pinned model revision and probabilities', async () => {
+  it.each([ERLANGSHEN_NLI_PREPROCESSING_VERSION,
+    ERLANGSHEN_NLI_PREPROCESSING_VERSION + ':source-statement-v2'])(
+    'keeps one local process and reports the task preprocessing version %s', async preprocessingVersion => {
     const directory = mkdtempSync(join(tmpdir(), 'graph-nli-test-'))
     directories.push(directory)
     const scriptPath = join(directory, 'fake-nli.cjs')
@@ -32,7 +34,8 @@ describe('local Erlangshen process adapter', () => {
       });
     `)
     const judge = createLocalErlangshenNli({ pythonPath: process.execPath, scriptPath,
-      modelPath: directory, modelRevision: 'revision-1', startupTimeoutMs: 5000, requestTimeoutMs: 5000 })
+      modelPath: directory, modelRevision: 'revision-1', preprocessingVersion,
+      startupTimeoutMs: 5000, requestTimeoutMs: 5000 })
     try {
       const request = { premise: { kind: 'claim' as const,
         ref: { kind: 'claim' as const, id: 'a', version: 1 }, text: '张三在星河公司工作。' },
@@ -40,7 +43,7 @@ describe('local Erlangshen process adapter', () => {
       expect(await judge.judge(request)).toEqual({ ok: true, value: {
         scores: { CONTRADICTION: 0.1, NEUTRAL: 0.2, ENTAILMENT: 0.7 },
         modelId: ERLANGSHEN_NLI_MODEL_ID, modelRevision: 'revision-1',
-        preprocessingVersion: ERLANGSHEN_NLI_PREPROCESSING_VERSION, truncated: false,
+        preprocessingVersion, truncated: false,
       } })
       expect((await judge.judge(request)).ok).toBe(true)
     }

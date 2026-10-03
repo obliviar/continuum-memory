@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { createHash } from 'node:crypto'
 import { createCaptureRepository } from '../../long-term/capture-repository'
 import { createGraphExtractionResultStore, createGraphExtractionRun } from '../../long-term/graph-extraction-result'
 import { createGraphL1Store } from '../../long-term/graph-l1-write'
@@ -42,6 +43,30 @@ function fixture() {
 }
 
 describe('schema-independent assertion publication and navigation', () => {
+  it('searches clarification labels only while their independent source is current, retaining original spans', () => {
+    const f = fixture(), text = '他接手项目。', extraText = '他指孟川。'
+    f.captures.register({ userMessage: text, assistantMessage: '', metadata: { sourceMessageIds: ['original'] } }, scope, 'test')
+    f.captures.register({ userMessage: extraText, assistantMessage: '', metadata: { sourceMessageIds: ['clarification'] } }, scope, 'test')
+    const run = createGraphExtractionRun({ sourceId: 'original', sourceText: text, modelId: 'test', rawOutput: { graph: {
+      entities: [{ id: 'p', type: 'person', text: '他', span: { start: 0, end: 1 }, modelScore: 0.9 },
+        { id: 'o', type: 'project', text: '项目', span: { start: 3, end: 5 }, modelScore: 0.9 }], facts: [],
+      assertions: [{ id: 'a', relationText: '接手', relationSpan: { start: 1, end: 3 },
+        participants: [{ mentionId: 'p', role: 'agent' }, { mentionId: 'o', role: 'object' }],
+        evidenceSpan: { start: 0, end: 6 }, modelScore: 0.9 }] } } })
+    f.extractions.append(run)
+    const untouched = JSON.stringify(f.extractions.list())
+    f.extractions.savePublicationView!({ ...run, semanticReview: { version: 'v3', runId: run.id, candidateIds: ['a'] },
+      entityMentions: run.entityMentions.map(m => m.id === 'p' ? { ...m, resolvedText: '孟川' } : m),
+      supplementalEvidence: [{ sourceId: 'clarification', text: extraText,
+        sourceRevision: createHash('sha256').update(extraText).digest('hex') }] })
+    const records = projectOpenAssertions(f.captures.snapshot(), f.extractions, scope)
+    const hit = searchOpenAssertions({ openAssertions: records }, '孟川', { scope })[0]!
+    expect(hit.assertion.participants[0]).toMatchObject({ text: '他', resolvedText: '孟川', span: { start: 0, end: 1 } })
+    expect(JSON.stringify(f.extractions.list())).toBe(untouched)
+    f.captures.register({ userMessage: '他指其他人。', assistantMessage: '', metadata: { sourceMessageIds: ['clarification'] } }, scope, 'test')
+    expect(searchOpenAssertions({ openAssertions: projectOpenAssertions(f.captures.snapshot(), f.extractions, scope) },
+      '孟川', { scope, includeCandidates: true })).toEqual([])
+  })
   it('projects automatically navigable source records and revokes them without creating accepted reviews', async () => {
     const f = fixture()
     f.append('样品S7存放在恒温箱B2。', 'auto')

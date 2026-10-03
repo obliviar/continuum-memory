@@ -98,7 +98,7 @@ export type {
   MemoryCandidateVerificationContext,
   MemoryWriteMatches,
 } from './long-term/memory-write-policy'
-export { createSmartMemoryExtractor } from './long-term/smart-memory-extractor'
+export { createSmartMemoryExtractor, createOpenGraphExtractor, buildOpenGraphPrompt } from './long-term/smart-memory-extractor'
 export type { SmartExtractorConfig, SmartMemoryExtractorOptions } from './long-term/smart-memory-extractor'
 export {
   createLocalUieExtractor,
@@ -108,6 +108,7 @@ export {
   parseUieOutput,
   uieGraphExtractionRun,
   uieReviewCandidates,
+  refreshUieGraphReviewContext,
 } from './long-term/local-uie'
 export type {
   LocalUieOptions,
@@ -145,6 +146,13 @@ export { createGraphNormalizationStore } from './long-term/graph-normalization-s
 export { recoverGraphClaimReviews, graphSourcesWithoutFactCandidates } from './long-term/graph-review-recovery'
 export { graphEntityVectorCandidates } from './long-term/graph-entity-vector-candidates'
 export { confirmGraphFactIdentities } from './long-term/graph-confirmed-identity'
+export { autoNormalizeUieGraphFact } from './long-term/graph-auto-identity'
+export { createBasicGraphRelationRegistry } from './long-term/graph-basic-relations'
+export type { BasicGraphRelation, BasicGraphRelationRegistry } from './long-term/graph-basic-relations'
+export { createGraphSemanticWorkflow, completeGraphSemanticJson, GRAPH_SEMANTIC_WORKFLOW_VERSION } from './long-term/graph-semantic-workflow'
+export type { GraphSemanticWorkflow, SemanticWorkItem, SemanticCandidateDecision } from './long-term/graph-semantic-workflow'
+export { renderSourceStatementComparison } from './graph-core/domain/source-statement-comparison'
+export { reassessRetainedUieGraphFacts } from './long-term/graph-policy-reassessment'
 export { reviewGraphAdmission } from './long-term/graph-admission-review'
 export type { GraphAdmissionChoices, GraphAdmissionDecision } from './long-term/graph-admission-review'
 export type { GraphNormalizationStore } from './long-term/graph-normalization-store'
@@ -157,6 +165,7 @@ export {
   setGraphUseAssessment,
   createGraphL1Store,
   createGraphL1Writer,
+  parseGraphTimeInterval,
 } from './long-term/graph-l1-write'
 export type {
   GraphClaimRecord, GraphClaimReview, GraphContextRecord, GraphEntityRelationEdge,
@@ -294,3 +303,4 @@ export type { OpenAssertionCandidate, OpenAssertionReview } from './long-term/gr
 export { extractLocalOpenAssertions } from './long-term/open-assertion-extractor'
 export { parseUieExtractionTargets } from './long-term/local-uie'
 export type { UieSchema } from './long-term/local-uie'
+export { planUieSchema } from './long-term/uie-schema-planner'

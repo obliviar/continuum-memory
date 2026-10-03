@@ -9,7 +9,7 @@ export interface OpenSourceContext {
 }
 
 export interface OpenNavigationAdmission {
-  policyVersion: 'source-context-navigation-v1'
+  policyVersion: 'source-context-navigation-v1' | 'source-context-navigation-v2'
   localNavigation: 'automatic' | 'candidate-only' | 'blocked'
   reasons: string[]
   identityMerge: false
@@ -37,6 +37,8 @@ export interface GraphOpenAssertionRecord {
   readonly participants: readonly {
     readonly ref: { readonly kind: 'mention'; readonly id: string; readonly version: 1 }
     readonly text: string
+    /** Source-local clarification label; original text/span remain unchanged. */
+    readonly resolvedText?: string
     readonly role: string
     /** Extractor proposal, not a registered entity type or identity merge. */
     readonly typeCandidate: string

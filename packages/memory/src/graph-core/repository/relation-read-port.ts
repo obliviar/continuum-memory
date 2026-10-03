@@ -24,6 +24,7 @@ export interface GraphRelationReadPortOptions {
   readonly isCoreViewLive: (viewId: string) => Promise<boolean>
   /** Recheck live source tombstones, exact versions, scope, and policy on every read. */
   readonly verifySources: (refs: readonly GraphSourceRef[], access: GraphAccessContext) => Promise<GraphResult<void>>
+  readonly allowRelation?: (relation: GraphRelationRecord) => boolean
 }
 
 /** Pin L2 to the caller's L1 view; never expose candidate/model output as answer evidence. */
@@ -63,6 +64,7 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
       }
 
       async function authorize(relation: GraphRelationRecord): Promise<GraphResult<void>> {
+        if (options.allowRelation && !options.allowRelation(relation)) return error('source-unavailable', 'Relation is outside the turn visibility fence')
         const access = coreView.context.access
         if (!sameScope(relation.scope, access.scope)
           || !access.sharePolicies.includes(relation.sharePolicy)
@@ -123,6 +125,7 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
           }
           const eligible = pages.get(fingerprint) ?? adjacency.candidates(query.claim)
             .filter(edge => matchesNeighbor(edge, query)
+              && (!options.allowRelation || options.allowRelation(byRef.get(refKey(edge.relation))!))
               && matchesValidTime(edge.validTime, coreView.context.temporal)
               && authorizedByPolicy(byRef.get(refKey(edge.relation))!, coreView.context.access))
             .sort((a, b) => a.id.localeCompare(b.id))

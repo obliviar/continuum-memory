@@ -623,6 +623,30 @@ export function createVectorStore(options: VectorStoreOptions = {}) {
         activeByMemoryKey: cloneCommittedRecords(activeByMemoryKey),
       }
     },
+    async beginRecallTurn(scope: MemoryScope): Promise<(fragment: MemoryFragment) => boolean> {
+      const normalizedScope = normalizeScope(scope)
+      // A recall snapshot must include the full scope, not the capped UI list.
+      const visible = new Map(index.filter(item => matchesScope(item.scope, normalizedScope))
+        .map(item => [item.id, item.content]))
+      return fragment => visible.get(fragment.id) === fragment.content
+    },
+    blockedSourceMessageIds(scope: MemoryScope): Set<string> {
+      const normalizedScope = normalizeScope(scope)
+      return new Set(index.filter(item => matchesScope(item.scope, normalizedScope)
+        && (item.sharePolicy !== 'allow-remote' || item.sensitivity !== 'normal'
+          || ['suppressed', 'deleted', 'orphaned'].includes(item.status)))
+        .flatMap(item => item.sourceMessageIds ?? []))
+    },
+    async validateRecall(fragments: MemoryFragment[], scope: MemoryScope): Promise<MemoryFragment[]> {
+      const normalizedScope = normalizeScope(scope), now = Date.now()
+      return fragments.flatMap(fragment => {
+        const current = secondary.byId.get(fragment.id)
+        const available = current && matchesScope(current.scope, normalizedScope)
+          && current.content === fragment.content && !['suppressed', 'deleted', 'orphaned', 'expired'].includes(current.status)
+          && (current.expiresAt === undefined || current.expiresAt > now)
+        return available ? [{ ...fragment, ...toMemoryFragment(current, fragment.score) }] : []
+      })
+    },
     get(id: string, scope: MemoryScope): MemoryFragment | undefined {
       const record = secondary.byId.get(id)
       return record && matchesScope(record.scope, normalizeScope(scope))

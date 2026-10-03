@@ -1,7 +1,7 @@
 import type { SourceSpan } from '../../long-term/graph-extraction-result'
 import type { GraphOpenAssertionRecord, OpenNavigationAdmission, OpenSourceContext } from '../domain/open-assertion-types'
 
-export const OPEN_NAVIGATION_POLICY = 'source-context-navigation-v1'
+export const OPEN_NAVIGATION_POLICY = 'source-context-navigation-v2'
 
 /** Exact source window, including nearby qualifiers outside the extraction evidence. */
 export function backtraceOpenContext(source: string, evidence: SourceSpan): OpenSourceContext {
@@ -27,17 +27,18 @@ export function assessOpenNavigation(record: GraphOpenAssertionRecord): OpenNavi
     reasons.push('ambiguous-reference')
   if (/(忽略.*指令|系统提示|密码|密钥|口令|token|api[_ -]?key)/iu.test(contextText)) reasons.push('sensitive-or-instruction-content')
   if (record.sensitivity !== 'normal') reasons.push('sensitive-source')
-  if (!Number.isFinite(record.modelScore) || record.modelScore < 0.85) reasons.push('low-extraction-score')
+  if (!Number.isFinite(record.modelScore) || record.modelScore < 0 || record.modelScore > 1) reasons.push('invalid-extraction-score')
   const relation = record.relationSpan
   if (!relation || !source || relation.start < record.evidenceSpan.start || relation.end > record.evidenceSpan.end
     || source.text.slice(relation.start - source.span.start, relation.end - source.span.start) !== record.relationText)
     reasons.push('relation-not-literal')
-  // A model's arbitrary label is not a semantic approval, even if the label occurs nearby.
-  if (record.extraction.modelId !== 'local-open-patterns-v1'
-    && !record.extraction.modelId.includes('uie')) reasons.push('unverified-extractor')
+  // Qualifiers, ambiguity and truncated context are navigation annotations, not truth gates.
+  // Mentions remain source-local; navigating a quoted/negative source does not assert its content.
+  const blockedByIntegrity = reasons.some(reason => ['missing-exact-context', 'relation-not-literal',
+    'sensitive-or-instruction-content', 'sensitive-source', 'invalid-extraction-score'].includes(reason))
   return { policyVersion: OPEN_NAVIGATION_POLICY,
     localNavigation: record.review.status === 'rejected' ? 'blocked'
-      : record.review.status === 'accepted' || reasons.length === 0 ? 'automatic' : 'candidate-only',
+      : record.review.status === 'accepted' || !blockedByIntegrity ? 'automatic' : 'candidate-only',
     reasons: record.review.status === 'accepted' ? ['user-confirmed-source-fidelity', ...reasons] : reasons,
     identityMerge: false, claimPublication: false, proactiveUse: false, remoteSharing: false }
 }

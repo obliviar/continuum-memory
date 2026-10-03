@@ -155,6 +155,8 @@ export interface MemoryFactV4 {
   sharePolicy: MemoryV4SharePolicy
   origin: 'automatic' | 'manual' | 'image'
   metadata?: JsonObject
+  /** Complete basic relation; subject/object above are compatibility storage anchors. */
+  sourceStatement?: MemorySourceStatementV4
   extractorVersion: string
   verifierVersion: string
 }
@@ -196,6 +198,18 @@ export interface MemoryFactVersionV4 {
   /** Transaction time at which this version stopped being the latest version. */
   transactionClosedAt?: number
   reason: string
+  sourceStatement?: MemorySourceStatementV4
+}
+
+export interface MemorySourceStatementV4 {
+  predicateId: string
+  predicateVersion: number
+  relationText: string
+  relationSpan: { start: number; end: number }
+  arguments: JsonObject
+  mappingId?: string
+  roleMapping?: Record<string, string>
+  qualifiers?: JsonObject
 }
 
 export type MemoryDerivedArtifactKindV4 = 'summary' | 'graph-edge' | 'embedding' | 'retrieval-cache' | 'tier-index'

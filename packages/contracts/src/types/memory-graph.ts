@@ -87,6 +87,8 @@ export interface GraphRecallRequest {
   readonly sharePolicies: readonly MemorySharePolicy[]
   readonly sensitivities: readonly MemorySensitivity[]
   readonly expectedManifestId?: string
+  /** Per-turn visibility fence; current liveness/authorization must still be checked. */
+  readonly visibleFacts?: readonly GraphFactRef[]
   /** Opt in to an exact L3/L4 view; absence keeps hierarchy outside this recall. */
   readonly expectedHierarchyManifestId?: string
 }
@@ -165,6 +167,8 @@ export type GraphEvidenceClaim = GraphEvidenceSemantics & {
   readonly citation: string
   readonly content: string
   readonly sources: NonEmptyReadonlyArray<GraphSourceRef>
+  readonly supplementalQuotations?: readonly { readonly source: GraphSourceRef; readonly content: string }[]
+  readonly qualifiers?: Readonly<Record<string, unknown>>
 } & (
   | { readonly kind: 'direct'; readonly ref: GraphClaimRef; readonly fact: GraphFactRef }
   | { readonly kind: 'derived'; readonly ref: GraphDerivedClaimRef; readonly proof: GraphProofRef }

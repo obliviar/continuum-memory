@@ -13,6 +13,23 @@ afterEach(() => {
 })
 
 describe('long-term memory integration', () => {
+  it('pins history before new writes and rechecks deletions and edits before model use', async () => {
+    const store = createVectorStore(), writer = createMemoryWriter({ store })
+    const scope = { ownerId: 'turn-user', agentId: 'agent' }
+    await writer.remember('用户手动记录：旧信息', scope, { kind: 'manual' })
+    const old = (await writer.list(scope))[0]!
+    const visible = await writer.beginRecallTurn!(scope)
+    await writer.remember('用户手动记录：本轮新信息', scope, { kind: 'manual' })
+    const fresh = (await writer.list(scope)).find(item => item.id !== old.id)!
+    expect(visible(old)).toBe(true)
+    expect(visible(fresh)).toBe(false)
+    expect((await writer.beginRecallTurn!(scope))(fresh)).toBe(true)
+    await writer.update(old.id, scope, { status: 'suppressed' })
+    expect(await writer.validateRecall!([old], scope)).toEqual([])
+    await writer.update(fresh.id, scope, { content: '用户手动记录：修订信息' })
+    expect(await writer.validateRecall!([fresh], scope)).toEqual([])
+  })
+
   it('extracts facts and recalls them after a restart without a remote embedding API', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'deskpet-memory-integration-'))
     temporaryDirectories.push(directory)

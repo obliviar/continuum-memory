@@ -3,6 +3,7 @@ import type { GraphRelationRef, GraphResult } from '@continuum-memory/contracts'
 import type { GraphClaimRecord, GraphProjectionSnapshot } from '../domain/types'
 import type { GraphRelationRecord } from '../domain/relation-types'
 import type { GraphRelationRepository } from './relation-repository'
+import { basicStatementIdentitiesCompatible } from '../domain/source-statement-comparison'
 
 export const GRAPH_L2_ADMISSION_VERSION = 'l2-user-confirmed-v1'
 
@@ -49,7 +50,8 @@ export async function publishReviewedGraphRelation(input: {
   if (!from || !to || from.transactionTime.closedAt !== null || to.transactionTime.closedAt !== null
     || from.review.status !== 'accepted' || to.review.status !== 'accepted'
     || refKey(from.context) !== refKey(candidate.context) || refKey(to.context) !== refKey(candidate.context)
-    || from.modality !== to.modality || candidate.sourceHints.length === 0 || observations.length === 0)
+    || from.modality !== to.modality || candidate.sourceHints.length === 0 || observations.length === 0
+    || !basicStatementIdentitiesCompatible(from, to, input.core.semanticBundle.entities))
     return failure('invalid-request', 'Candidate lacks exact live endpoints, sources, or untruncated observation')
   const at = input.now?.() ?? Date.now()
   if (!Number.isSafeInteger(at) || at <= Math.max(from.review.reviewedAt, to.review.reviewedAt))

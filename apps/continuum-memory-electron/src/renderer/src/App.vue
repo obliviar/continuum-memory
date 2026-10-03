@@ -3,8 +3,10 @@ import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
 import { graphReviewIpcFields, graphReviewTimeError } from '../../shared/graph-review-ipc'
 import type { GraphOpenAssertionRecord } from '@continuum-memory/memory'
 import GraphOpenAssertions from './components/GraphOpenAssertions.vue'
+import MemoryRecallNotice from './components/MemoryRecallNotice.vue'
 
-const { ipcRenderer } = (window as any).require('electron')
+import { activeConversationId, ipcRenderer } from './conversation-ipc'
+import { dialogFocus as vDialogFocus } from './dialog-focus'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -93,8 +95,10 @@ interface MemoryItem {
 }
 
 interface MemorySettings {
-  extractionMode: 'rules' | 'smart' | 'uie'
+  extractionMode: 'rules' | 'smart' | 'uie' | 'open'
+  uieSupplementEnabled: boolean
   graphExtractionEnabled: boolean
+  openSourceRecallEnabled: boolean
   semanticEnabled: boolean
   imageMemoryEnabled: boolean
   remotePolicy: 'normal-only' | 'allow-private' | 'disabled'
@@ -136,6 +140,7 @@ interface GraphReviewItem {
   subject: string
   object: string
   sourceText: string
+  privacyOrigin?: 'uie-default-local' | 'content-policy'
   context?: { negation: { value: boolean | null; resolution: string }; condition: { value: string | null; resolution: string };
     time: { value: string | null; resolution: string }; speaker: { value: string | null; resolution: string } }
   mentions: Array<{ id: string; text: string; type: string; resolvedEntityId?: string;
@@ -247,6 +252,19 @@ const isFirstRun = ref(true)
 const loaded = ref(false)
 const nameInput = ref('')
 const messages = ref<Message[]>([])
+const conversations = ref<{ id: string; title: string; memorySpaceId: string }[]>([])
+const selectedConversationId = ref('default')
+const conversationSwitching = ref(false)
+const conversationError = ref('')
+const renamingConversation = ref(false)
+const conversationRenameInput = ref('')
+const conversationMessages = new Map<string, Message[]>()
+const pendingConversations = new Set<string>()
+const conversationDrafts = new Map<string, string>()
+const conversationImages = new Map<string, { data: string; mimeType: string } | null>()
+const memoryDrafts = new Map<string, { manual: string; preview: string; editingId: string | null; editingContent: string; replies: Record<string, string> }>()
+const currentConversationTitle = computed(() => conversations.value.find(c => c.id === activeConversationId.value)?.title ?? '当前对话')
+const canSwitchConversation = computed(() => !conversationSwitching.value && !memoryMutating.value && !memoryLoading.value && !apiSaving.value && !isListening.value && !clarificationBusy.value && !semanticInstalling.value && !documentsBusy.value)
 const input = ref('')
 const isLoading = ref(false)
 const chatEl = ref<HTMLElement | null>(null)
@@ -264,11 +282,115 @@ const apiModel = ref('gpt-4o-mini')
 const apiSaving = ref(false)
 const apiStatusMessage = ref('')
 const apiStatusError = ref(false)
+const apiDraftLoaded = ref(false)
+interface DesktopSkill { id: string; name: string; description: string; source: 'builtin' | 'local'; path?: string;
+  available: boolean; enabled: boolean; requirements: string[]; reason: string; version: string; replacementId?: string }
+const showSkillManager = ref(false)
+const showDocumentManager = ref(false)
+const documentsBusy = ref(false)
+const documentItems = ref<{ id: string; name: string; format: string; kind: string; validated?: boolean }[]>([])
+const documentRuntime = ref<{ pdf: boolean; word: boolean; pdfPreview?: boolean; error?: string } | null>(null)
+const documentMessage = ref('')
+const documentPreview = ref<{ id?: string; name?: string; format: string; images?: string[]; notice?: string;
+  blocks?: { type: string; text?: string; rows?: string[][] }[] } | null>(null)
+function applyDocuments(result: { items: typeof documentItems.value; runtime: typeof documentRuntime.value }) {
+  documentItems.value = result.items
+  documentRuntime.value = result.runtime
+}
+async function refreshDocuments() {
+  const id = activeConversationId.value
+  const result = await ipcRenderer.invoke('documents:list')
+  if (id === activeConversationId.value) applyDocuments(result)
+}
+async function openDocumentManager() {
+  showDocumentManager.value = true
+  try { await refreshDocuments() } catch (error) { documentMessage.value = error instanceof Error ? error.message : String(error) }
+}
+function closeDocumentManager() { if (!documentsBusy.value) showDocumentManager.value = false }
+async function pickDocuments() {
+  documentsBusy.value = true
+  documentMessage.value = ''
+  try { applyDocuments(await ipcRenderer.invoke('documents:pick')); showDocumentManager.value = true }
+  catch (error) { documentMessage.value = error instanceof Error ? error.message : String(error); showDocumentManager.value = true }
+  finally { documentsBusy.value = false }
+}
+async function inspectDocument(id: string) {
+  documentsBusy.value = true
+  try { documentPreview.value = await ipcRenderer.invoke('documents:preview', id); documentMessage.value = '' }
+  catch (error) { documentMessage.value = error instanceof Error ? error.message : String(error) }
+  finally { documentsBusy.value = false }
+}
+async function openDocument(id: string, location = false) {
+  try { const result = await ipcRenderer.invoke(location ? 'documents:location' : 'documents:open', id); if (!result.ok) documentMessage.value = result.error }
+  catch (error) { documentMessage.value = error instanceof Error ? error.message : String(error) }
+}
+function onDocumentsChanged(_event: unknown, result: { items: typeof documentItems.value; runtime: typeof documentRuntime.value }, origin?: { conversationId: string }) {
+  if (!origin || origin.conversationId === activeConversationId.value) applyDocuments(result)
+}
+const skillsBusy = ref(false)
+const skillItems = ref<DesktopSkill[]>([])
+const skillWarnings = ref<string[]>([])
+const skillQuery = ref('')
+const skillStatusMessage = ref('')
+const skillPreview = ref<{ id: string; instructions: string; truncated: boolean } | null>(null)
+const selectedSkillId = ref('')
+const conversationSkills = new Map<string, string>()
+const skillUseHistory = ref<{ id: string; name: string; at: number; mode: string }[]>([])
+const enabledSkills = computed(() => skillItems.value.filter(item => item.available && item.enabled))
+const filteredSkills = computed(() => skillItems.value.filter(item => !skillQuery.value.trim()
+  || `${item.name} ${item.description} ${item.reason}`.toLocaleLowerCase().includes(skillQuery.value.toLocaleLowerCase().trim())))
+function applySkills(result: { items: DesktopSkill[]; warnings: string[] }) {
+  skillItems.value = result.items
+  skillWarnings.value = result.warnings
+  if (selectedSkillId.value && !enabledSkills.value.some(skill => skill.id === selectedSkillId.value)) selectedSkillId.value = ''
+}
+async function refreshSkills() {
+  applySkills(await ipcRenderer.invoke('skills:list'))
+  const id = activeConversationId.value
+  const events = await ipcRenderer.invoke('skills:history', id)
+  if (id === activeConversationId.value) skillUseHistory.value = events
+}
+async function openSkillManager() {
+  showSkillManager.value = true
+  skillStatusMessage.value = ''
+  try { await refreshSkills() } catch (error) { skillStatusMessage.value = error instanceof Error ? error.message : String(error) }
+}
+function closeSkillManager() { if (!skillsBusy.value) showSkillManager.value = false }
+async function changeSkill(id: string, enabled: boolean) {
+  if (skillsBusy.value) return
+  skillsBusy.value = true
+  try { applySkills(await ipcRenderer.invoke('skills:set-enabled', id, enabled)); skillStatusMessage.value = 'Skill 状态已保存。' }
+  catch (error) { skillStatusMessage.value = error instanceof Error ? error.message : String(error) }
+  finally { skillsBusy.value = false }
+}
+async function scanSkills(addDirectory = false) {
+  skillsBusy.value = true
+  try { applySkills(await ipcRenderer.invoke(addDirectory ? 'skills:add-directory' : 'skills:refresh')); skillStatusMessage.value = `已发现 ${skillItems.value.length} 个 Skill。`; skillPreview.value = null }
+  catch (error) { skillStatusMessage.value = error instanceof Error ? error.message : String(error) }
+  finally { skillsBusy.value = false }
+}
+async function previewSkill(id: string) {
+  try { skillPreview.value = await ipcRenderer.invoke('skills:preview', id) }
+  catch (error) { skillStatusMessage.value = error instanceof Error ? error.message : String(error) }
+}
+function onSkillUsed(_event: unknown, history: typeof skillUseHistory.value, origin?: { conversationId: string }) {
+  if (!origin || origin.conversationId === activeConversationId.value) skillUseHistory.value = history
+}
 
 // Long-term memory manager state
 const showMemoryManager = ref(false)
+const showAllFormalClaims = ref(false)
+const memoryRoleLabels: Record<string, string> = {
+  agent: '执行者', patient: '承受者', theme: '涉及对象', possessor: '所属者',
+  subject: '主体', object: '对象', recipient: '接收方', source: '来源',
+  destination: '目的地', location: '地点', time: '时间', instrument: '工具',
+}
 const memoryEnabled = ref(false)
 const memoryCount = ref(0)
+const memoryL1Count = ref<number | null>(null)
+const graphClaimItems = ref<{ id: string; relation: string; arguments: { role: string; text: string }[];
+  polarity: string; modality: string; time: string; sourceText: string;
+  supplementalEvidence: { sourceId: string; text: string }[] }[]>([])
 const memoryStoragePath = ref('')
 const memoryItems = ref<MemoryItem[]>([])
 const memoryReviewItems = ref<MemoryReviewItem[]>([])
@@ -278,7 +400,52 @@ const graphOpenAssertionItems = ref<GraphOpenAssertionRecord[]>([])
 const graphInformationItems = ref<Array<{ id: string; text: string; recordedAt: number; sourceId: string }>>([])
 const graphExtractionStatus = ref<{ enabled: boolean; modelReady: boolean; error: string | null; runs: number;
   factCandidates: number; sourcesWithoutFacts: number; pendingReviews: number; claims: number;
-  automaticOpenNavigation?: number; deferredOpenCandidates?: number } | null>(null)
+  automaticOpenNavigation?: number; deferredOpenCandidates?: number; basicClaims?: number; basicRelations?: number } | null>(null)
+const clarificationItems = ref<Array<{ id: string; candidateId: string; sourceRevision: string; sourceText: string; question: string; options?: string[] }>>([])
+const clarificationContexts = ref<Array<{ id: string; text: string }>>([])
+const clarificationReplies = ref<Record<string, string>>({})
+const clarificationContextIds = ref<Record<string, string>>({})
+const clarificationBusy = ref(false)
+const clarificationError = ref('')
+const semanticFailures = ref(0)
+const semanticMigrationMessage = ref('')
+const graphRelationMappings = ref<Array<{ id: string; active: boolean; sourceText: string; targetText: string }>>([])
+async function revokeRelationMapping(id: string) {
+  clarificationBusy.value = true
+  try {
+    const result = await ipcRenderer.invoke('memory:relation-mapping-revoke', id)
+    semanticMigrationMessage.value = result?.ok ? '已撤销归并，相关记录将按独立关系重新整理。' : '撤销失败。'
+    await refreshMemoryList()
+  } finally { clarificationBusy.value = false }
+}
+async function migrateOpenL1() {
+  clarificationBusy.value = true
+  try {
+    const result = await ipcRenderer.invoke('memory:open-l1-migrate')
+    semanticMigrationMessage.value = result?.ok ? '已处理 ' + result.processed + ' 条，剩余 ' + result.remaining + ' 条。' : result?.error || '处理失败。'
+    await refreshMemoryList()
+  } finally { clarificationBusy.value = false }
+}
+
+async function answerClarification(item: typeof clarificationItems.value[number]) {
+  clarificationBusy.value = true; clarificationError.value = ''
+  try {
+    const result = await ipcRenderer.invoke('memory:clarification-answer', { id: item.id, candidateId: item.candidateId,
+      sourceRevision: item.sourceRevision, text: clarificationReplies.value[item.id + item.candidateId] ?? '',
+      contextSourceId: clarificationContextIds.value[item.id + item.candidateId] || undefined })
+    if (!result?.ok) clarificationError.value = result?.error || '补充信息处理失败。'
+    await refreshMemoryStatus()
+  } finally { clarificationBusy.value = false }
+}
+async function dismissClarification(item: typeof clarificationItems.value[number]) {
+  await ipcRenderer.invoke('memory:clarification-dismiss', { id: item.id, candidateId: item.candidateId })
+  await refreshMemoryStatus()
+}
+async function retrySemanticFailures() {
+  clarificationBusy.value = true
+  try { await ipcRenderer.invoke('memory:semantic-retry'); await refreshMemoryStatus() }
+  finally { clarificationBusy.value = false }
+}
 const graphRelationReviewItems = ref<GraphRelationReviewItem[]>([])
 const graphRelationReviewReasons = ref<Record<string, string>>({})
 const graphL2Candidates = ref<GraphL2CandidateItem[]>([])
@@ -334,7 +501,9 @@ const editingMemoryContent = ref('')
 const confirmClearMemories = ref(false)
 const memorySettings = ref<MemorySettings>({
   extractionMode: 'rules',
+  uieSupplementEnabled: true,
   graphExtractionEnabled: true,
+  openSourceRecallEnabled: false,
   semanticEnabled: false,
   imageMemoryEnabled: true,
   remotePolicy: 'normal-only',
@@ -395,15 +564,18 @@ const themeVars = computed(() => ({
 }))
 
 // ── IPC token handler ───────────────────────────────────
-function onToken(_event: unknown, token: string) {
-  const last = messages.value[messages.value.length - 1]
+function onToken(_event: unknown, token: string, origin?: { conversationId: string }) {
+  const id = origin?.conversationId ?? activeConversationId.value
+  const target = id === activeConversationId.value ? messages.value : conversationMessages.get(id)
+  const last = target?.[target.length - 1]
   if (last && last.role === 'assistant') {
     last.content += token
-    scrollToBottom()
+    if (id === activeConversationId.value) scrollToBottom()
   }
 }
 
-function onMemoryModelProgress(_event: unknown, progress: typeof semanticModelProgress.value) {
+function onMemoryModelProgress(_event: unknown, progress: typeof semanticModelProgress.value, origin?: { conversationId: string }) {
+  if (origin && origin.conversationId !== activeConversationId.value) return
   semanticModelProgress.value = progress
 }
 
@@ -430,7 +602,13 @@ onMounted(async () => {
   }
 
   await refreshApiStatus()
+  const conversationState = await ipcRenderer.invoke('conversations:list')
+  conversations.value = conversationState.conversations
+  activeConversationId.value = conversationState.activeId
+  selectedConversationId.value = conversationState.activeId
   await refreshMemoryStatus()
+  await refreshSkills()
+  await refreshDocuments()
 
   const history = await ipcRenderer.invoke('sessions:history')
   if (history && history.length > 0) {
@@ -444,16 +622,23 @@ onMounted(async () => {
   }
 
   loaded.value = true
+  conversationMessages.set(activeConversationId.value, messages.value)
   if (!isFirstRun.value)
     scrollToBottom()
 
   ipcRenderer.on('chat:token', onToken)
   ipcRenderer.on('memory:model-progress', onMemoryModelProgress)
+  ipcRenderer.on('memory:changed', onMemoryChanged)
+  ipcRenderer.on('skills:used', onSkillUsed)
+  ipcRenderer.on('documents:changed', onDocumentsChanged)
 })
 
 onUnmounted(() => {
   ipcRenderer.removeListener('chat:token', onToken)
   ipcRenderer.removeListener('memory:model-progress', onMemoryModelProgress)
+  ipcRenderer.removeListener('memory:changed', onMemoryChanged)
+  ipcRenderer.removeListener('skills:used', onSkillUsed)
+  ipcRenderer.removeListener('documents:changed', onDocumentsChanged)
   if (resetTimer) clearTimeout(resetTimer)
   if (mediaRecorder) {
     mediaRecorder.stop()
@@ -465,7 +650,8 @@ onUnmounted(() => {
 })
 
 // ── Naming ──────────────────────────────────────────────
-async function confirmName() {
+async function confirmName(event?: KeyboardEvent | MouseEvent) {
+  if (event instanceof KeyboardEvent && (event.isComposing || event.keyCode === 229)) return
   const name = nameInput.value.trim()
   if (!name) return
   await ipcRenderer.invoke('settings:set-name', name)
@@ -480,16 +666,20 @@ async function refreshApiStatus() {
     apiConfigured.value = !!status.configured
     apiBaseURL.value = status.baseURL || 'https://api.openai.com/v1'
     apiModel.value = status.model || 'gpt-4o-mini'
+    return true
   }
   catch {
     apiConfigured.value = false
+    return false
   }
 }
 
 async function openApiSettings() {
   closeThemeMenu(true)
-  await refreshApiStatus()
-  apiKeyInput.value = ''
+  if (!apiDraftLoaded.value) {
+    await refreshApiStatus()
+    apiDraftLoaded.value = true
+  }
   apiStatusMessage.value = ''
   apiStatusError.value = false
   showMemoryManager.value = false
@@ -500,8 +690,20 @@ function closeApiSettings() {
   if (!apiSaving.value)
     showApiSettings.value = false
 }
+async function restoreApiDraft() {
+  if (apiSaving.value) return
+  if (!await refreshApiStatus()) {
+    apiStatusError.value = true
+    apiStatusMessage.value = '读取已保存配置失败，当前输入已保留。'
+    return
+  }
+  apiKeyInput.value = ''
+  apiStatusError.value = false
+  apiStatusMessage.value = '已恢复保存的地址与模型，未保存的新密钥已清空。'
+}
 
-async function saveApiSettings() {
+async function saveApiSettings(event?: KeyboardEvent | MouseEvent) {
+  if (apiSaving.value || (event instanceof KeyboardEvent && (event.isComposing || event.keyCode === 229))) return
   apiSaving.value = true
   apiStatusMessage.value = ''
   apiStatusError.value = false
@@ -530,11 +732,99 @@ async function saveApiSettings() {
 }
 
 // ── Long-term memory manager ────────────────────────────
+function onMemoryChanged(_event?: unknown, _payload?: unknown, origin?: { conversationId: string }) {
+  if (origin && origin.conversationId !== activeConversationId.value) return
+  if (!isLoading.value && !conversationSwitching.value) void refreshMemoryStatus()
+}
+function displayHistory(history: { id?: string; role: string; content: string }[]): Message[] {
+  return history.filter(h => h.role === 'user' || h.role === 'assistant').map(h => ({
+    id: h.id || crypto.randomUUID(), role: h.role as 'user' | 'assistant', content: h.content,
+  }))
+}
+async function selectConversation(id?: string) {
+  if (!canSwitchConversation.value || id === activeConversationId.value) return
+  conversationSwitching.value = true
+  conversationError.value = ''
+  const previousId = activeConversationId.value
+  conversationMessages.set(previousId, messages.value)
+  conversationDrafts.set(previousId, input.value)
+  conversationImages.set(previousId, pendingImage.value)
+  conversationSkills.set(previousId, selectedSkillId.value)
+  memoryDrafts.set(previousId, { manual: manualMemoryInput.value, preview: uiePreviewText.value,
+    editingId: editingMemoryId.value, editingContent: editingMemoryContent.value, replies: { ...clarificationReplies.value } })
+  try {
+    const result = id ? await ipcRenderer.invoke('conversations:select', id)
+      : await ipcRenderer.invoke('conversations:create', `新对话 ${conversations.value.length}`)
+    if (!result.ok) throw new Error(result.error)
+    conversations.value = result.conversations
+    activeConversationId.value = result.activeId
+    selectedConversationId.value = result.activeId
+    selectedSkillId.value = conversationSkills.get(result.activeId) ?? ''
+    skillUseHistory.value = []
+    documentItems.value = []
+    documentPreview.value = null
+    documentMessage.value = ''
+    showDocumentManager.value = false
+    messages.value = pendingConversations.has(result.activeId)
+      ? conversationMessages.get(result.activeId) ?? displayHistory(result.history)
+      : displayHistory(result.history)
+    conversationMessages.set(result.activeId, messages.value)
+    input.value = conversationDrafts.get(result.activeId) ?? ''
+    pendingImage.value = conversationImages.get(result.activeId) ?? null
+    isLoading.value = pendingConversations.has(result.activeId)
+    showMemoryManager.value = false
+    showAllFormalClaims.value = false
+    clarificationItems.value = []
+    clarificationContexts.value = []
+    const memoryDraft = memoryDrafts.get(result.activeId)
+    manualMemoryInput.value = memoryDraft?.manual ?? ''
+    uiePreviewText.value = memoryDraft?.preview ?? ''
+    uiePreviewResult.value = ''
+    editingMemoryId.value = memoryDraft?.editingId ?? null
+    editingMemoryContent.value = memoryDraft?.editingContent ?? ''
+    clarificationReplies.value = memoryDraft?.replies ?? {}
+    cancelPurgeMemory()
+    pendingDeleteMemoryId.value = null
+    confirmClearMemories.value = false
+    renamingConversation.value = false
+    memoryItems.value = []
+    graphClaimItems.value = []
+    graphInformationItems.value = []
+    graphOpenAssertionItems.value = []
+    memoryStatusMessage.value = ''
+    memoryCount.value = 0
+    memoryL1Count.value = null
+    await refreshMemoryStatus()
+    await refreshSkills()
+    await refreshDocuments()
+    scrollToBottom()
+  } catch (error) {
+    conversationError.value = error instanceof Error ? error.message : String(error)
+  } finally { conversationSwitching.value = false }
+}
+async function renameConversation(event?: KeyboardEvent | MouseEvent) {
+  if (event instanceof KeyboardEvent && (event.isComposing || event.keyCode === 229)) return
+  const title = conversationRenameInput.value.trim()
+  if (!title) return
+  try {
+    const result = await ipcRenderer.invoke('conversations:rename', activeConversationId.value, title)
+    conversations.value = result.conversations
+    renamingConversation.value = false
+  } catch (error) { conversationError.value = error instanceof Error ? error.message : String(error) }
+}
 async function refreshMemoryStatus() {
   try {
+    const requestedConversation = activeConversationId.value
     const status = await ipcRenderer.invoke('memory:status')
+    if (requestedConversation !== activeConversationId.value) return
+    const clarifications = await ipcRenderer.invoke('memory:clarifications-list')
+    if (requestedConversation !== activeConversationId.value) return
+    clarificationItems.value = clarifications?.items ?? []
+    clarificationContexts.value = clarifications?.contexts ?? []
+    semanticFailures.value = clarifications?.failed ?? 0
     memoryEnabled.value = !!status?.enabled
     memoryCount.value = Number(status?.count) || 0
+    memoryL1Count.value = Number(status?.graphClaimCount) || 0
     memoryStoragePath.value = status?.storagePath || ''
     applyMemoryRuntimeStatus(status)
     if (status?.error) {
@@ -600,9 +890,12 @@ async function refreshMemoryList() {
     memoryReviewItems.value = Array.isArray(result.reviewItems) ? result.reviewItems : []
     graphReviewItems.value = Array.isArray(result.graphReviewItems) ? result.graphReviewItems : []
     graphL1View.value = result.graphL1View ?? null
+    graphRelationMappings.value = result.relationMappings ?? []
     graphInformationItems.value = Array.isArray(result.graphInformationItems) ? result.graphInformationItems : []
     graphOpenAssertionItems.value = Array.isArray(result.graphOpenAssertionItems) ? result.graphOpenAssertionItems : []
     graphExtractionStatus.value = result.graphExtraction ?? null
+    memoryL1Count.value = Number(result.graphExtraction?.claims) || 0
+    graphClaimItems.value = result.graphClaimItems ?? []
     graphRelationReviewItems.value = Array.isArray(result.graphRelationReviewItems) ? result.graphRelationReviewItems : []
     graphL2Candidates.value = Array.isArray(result.graphL2Candidates) ? result.graphL2Candidates : []
     graphL2View.value = result.graphL2View ?? null
@@ -677,6 +970,26 @@ async function reextractEmptyGraphSources() {
   finally { memoryMutating.value = false }
 }
 
+async function reassessPendingGraphFacts() {
+  if (memoryMutating.value) return
+  memoryMutating.value = true
+  memoryStatusError.value = false
+  memoryStatusMessage.value = '正在根据保留的原文与 UIE 结果重新审核图事实…'
+  try {
+    const result = await ipcRenderer.invoke('memory:graph-auto-reassess')
+    memoryStatusError.value = !result?.ok || result.failed > 0
+    memoryStatusMessage.value = result?.ok
+      ? `已尝试自动审核 ${result.reviewed} 条，发布 ${result.published} 条；另有 ${result.deferred} 条保持待审，${result.failed} 条发布未完成。`
+      : result?.error || '图事实自动重审失败。'
+    await refreshMemoryList()
+  }
+  catch (error) {
+    memoryStatusError.value = true
+    memoryStatusMessage.value = error instanceof Error ? error.message : '图事实自动重审失败。'
+  }
+  finally { memoryMutating.value = false }
+}
+
 async function reviewGraphCandidate(id: string, outcome: 'approved' | 'rejected' | 'pending') {
   if (memoryMutating.value) return
   const reason = graphReviewReasons.value[id]?.trim()
@@ -701,7 +1014,7 @@ async function reviewGraphCandidate(id: string, outcome: 'approved' | 'rejected'
     }
     memoryStatusMessage.value = outcome === 'approved'
       ? result.published ? '图事实已确认并写入。' : '审核已保存，发布任务等待重试。'
-      : outcome === 'rejected' ? '图事实已拒绝。' : '图事实保持待确认。'
+      : outcome === 'rejected' ? '已拒绝规范事实，并限制对应来源使用。' : '已保留未发布状态，不因此撤销原文召回权限。'
     delete graphReviewReasons.value[id]
     await refreshMemoryList()
   }
@@ -976,7 +1289,9 @@ async function restoreMemory(item: MemoryItem) {
   }
 }
 
-async function addManualMemory() {
+async function addManualMemory(event?: KeyboardEvent | MouseEvent) {
+  if (event instanceof KeyboardEvent && (event.isComposing || event.keyCode === 229)) return
+  event?.preventDefault()
   const content = manualMemoryInput.value.trim()
   if (!content || memoryMutating.value) return
   memoryMutating.value = true
@@ -1180,6 +1495,9 @@ async function send() {
   const text = input.value.trim()
   const image = pendingImage.value
   if ((!text && !image) || isLoading.value) return
+  if (conversationSwitching.value) return
+  const sendingConversation = activeConversationId.value
+  pendingConversations.add(sendingConversation)
 
   isLoading.value = true
   input.value = ''
@@ -1190,12 +1508,14 @@ async function send() {
   messages.value.push(userMsg)
   const assistantMsg: Message = { role: 'assistant', content: '', id: crypto.randomUUID() }
   messages.value.push(assistantMsg)
+  conversationMessages.set(sendingConversation, messages.value)
   scrollToBottom()
 
   try {
     const attachments = image ? [{ type: 'image' as const, data: image.data, mimeType: image.mimeType }] : undefined
     const prompt = image ? (text || '请描述这个屏幕截图中的内容。') : text
-    const result = await ipcRenderer.invoke('chat:send', prompt, attachments)
+    const result = await ipcRenderer.invoke('chat:send', prompt, attachments,
+      selectedSkillId.value ? { skillId: selectedSkillId.value } : undefined)
     if (!result?.ok) {
       const detail = result?.error || '未知错误'
       assistantMsg.content = assistantMsg.content
@@ -1207,7 +1527,13 @@ async function send() {
     }
     if (result?.memoryReview)
       assistantMsg.memoryReview = result.memoryReview
-    if (autoSpeak.value) {
+    if (result?.history) {
+      const persisted = result.history.filter((h: { role: string }) => h.role === 'user' || h.role === 'assistant')
+      const pair = persisted.slice(-2)
+      if (pair[0]?.role === 'user') userMsg.id = pair[0].id
+      if (pair[1]?.role === 'assistant') assistantMsg.id = pair[1].id
+    }
+    if (autoSpeak.value && sendingConversation === activeConversationId.value) {
       nextTick(() => speak(assistantMsg.content))
     }
   }
@@ -1215,9 +1541,12 @@ async function send() {
     assistantMsg.content = '[Error: ' + (err instanceof Error ? err.message : 'unknown') + ']'
   }
   finally {
-    await refreshMemoryStatus()
-    isLoading.value = false
-    scrollToBottom()
+    pendingConversations.delete(sendingConversation)
+    if (sendingConversation === activeConversationId.value) {
+      isLoading.value = false
+      await refreshMemoryStatus()
+      scrollToBottom()
+    }
   }
 }
 
@@ -1496,6 +1825,7 @@ function scrollToBottom() {
 }
 
 function onKeydown(e: KeyboardEvent) {
+  if (e.isComposing || e.keyCode === 229) return
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     send()
@@ -1538,11 +1868,12 @@ async function doReset() {
       <span class="badge">在线</span>
       <span class="spacer" />
       <button class="icon-btn memory-btn" :class="{ active: memoryEnabled }" title="长期记忆管理" @click="openMemoryManager">
-        🧠 记忆<span v-if="memoryEnabled" class="memory-count">{{ memoryCount }}</span>
+        🧠 记忆<span v-if="memoryEnabled" class="memory-count">传统 {{ memoryCount }} · L1 {{ memoryL1Count ?? '…' }}</span>
       </button>
       <button class="icon-btn api-btn" :class="{ active: apiConfigured }" title="API 设置" @click="openApiSettings">
         <span class="api-dot" /> API
       </button>
+      <button class="icon-btn" title="Skill 管理" @click="openSkillManager">🧩 Skill</button>
       <button class="icon-btn" :class="{ active: autoSpeak }" title="语音播报" @click="toggleAutoSpeak">🔊</button>
       <div class="theme-picker">
         <button class="icon-btn" title="切换主题" @click="toggleThemeMenu">🎨</button>
@@ -1566,13 +1897,93 @@ async function doReset() {
       <button class="icon-btn reset-btn" @click="doReset">{{ confirmReset ? '确认?' : '重新开始' }}</button>
     </div>
 
+    <div class="conversation-bar">
+      <label for="conversation-select">对话与记忆分区</label>
+      <select id="conversation-select" v-model="selectedConversationId" :disabled="!canSwitchConversation">
+        <option v-for="conversation in conversations" :key="conversation.id" :value="conversation.id">{{ conversation.title }}</option>
+      </select>
+      <button class="secondary-btn" :disabled="!canSwitchConversation || selectedConversationId === activeConversationId" @click="selectConversation(selectedConversationId)">切换对话</button>
+      <button class="secondary-btn" :disabled="!canSwitchConversation" @click="selectConversation()">＋ 新建对话</button>
+      <button v-if="!renamingConversation" class="secondary-btn" :disabled="!canSwitchConversation" @click="conversationRenameInput = currentConversationTitle; renamingConversation = true">重命名</button>
+      <template v-else>
+        <input v-model="conversationRenameInput" aria-label="对话名称" maxlength="100" @keydown.enter="renameConversation" />
+        <button class="secondary-btn" :disabled="!conversationRenameInput.trim()" @click="renameConversation">保存名称</button>
+        <button class="secondary-btn" @click="renamingConversation = false">取消</button>
+      </template>
+      <span>{{ conversationSwitching ? '正在切换…' : `当前：${currentConversationTitle} · 独立记忆` }}</span>
+    </div>
+    <div v-if="conversationError" class="conversation-error">{{ conversationError }}</div>
+
+    <div v-if="showSkillManager" class="modal-backdrop" @pointerdown.self.prevent>
+      <div v-dialog-focus="closeSkillManager" class="skill-dialog" role="dialog" aria-modal="true" aria-label="Skill 管理">
+        <div class="dialog-header">
+          <div><h2>Skill 管理</h2><p>内置工作流与本机 SKILL.md · {{ enabledSkills.length }} 个已启用</p></div>
+          <button class="dialog-close" title="关闭" :disabled="skillsBusy" @click="closeSkillManager">✕</button>
+        </div>
+        <p class="field-hint">模型可以按任务查找并加载已启用 Skill，也可以在输入框上方手动选择。加载的是工作流指导；本机 Skill 默认关闭，需要专用工具的项目会显示缺少依赖。</p>
+        <p class="field-hint">调用时，选中的工作流及所需文本引用会发送给当前聊天 API；不会一次发送全部 Skill 文件。</p>
+        <div class="skill-toolbar">
+          <input v-model="skillQuery" class="settings-input" aria-label="搜索 Skill" placeholder="搜索名称、用途或依赖…" />
+          <button class="secondary-btn" :disabled="skillsBusy" @click="scanSkills()">重新扫描</button>
+          <button class="secondary-btn" :disabled="skillsBusy" @click="scanSkills(true)">添加本地目录</button>
+        </div>
+        <div v-if="skillStatusMessage" class="api-status-message">{{ skillStatusMessage }}</div>
+        <details v-if="skillWarnings.length" class="field-hint"><summary>扫描提示（{{ skillWarnings.length }}）</summary><p v-for="warning in skillWarnings" :key="warning">{{ warning }}</p></details>
+        <div v-if="!filteredSkills.length" class="memory-empty">没有匹配的 Skill。</div>
+        <article v-for="skill in filteredSkills" :key="skill.id" class="skill-card">
+          <div class="skill-card-title"><strong>{{ skill.name }}</strong><span>{{ skill.source === 'builtin' ? '内置' : '本机' }}</span>
+            <label><input type="checkbox" :checked="skill.enabled" :disabled="skillsBusy || !skill.available" :aria-label="`启用 ${skill.name}`" @change="changeSkill(skill.id, ($event.target as HTMLInputElement).checked)" /> 启用</label>
+          </div>
+          <p>{{ skill.description }}</p>
+          <div class="field-hint">{{ skill.reason }}</div>
+          <div v-if="skill.path" class="skill-path" :title="skill.path">{{ skill.path }}</div>
+          <button class="secondary-btn" @click="previewSkill(skill.id)">查看工作流</button>
+          <button v-if="skill.available && skill.enabled" class="secondary-btn" @click="selectedSkillId = skill.id; closeSkillManager()">用于当前对话</button>
+          <button v-if="skill.replacementId && enabledSkills.some(item => item.id === skill.replacementId)" class="secondary-btn" @click="selectedSkillId = skill.replacementId; closeSkillManager()">使用桌面适配版</button>
+          <pre v-if="skillPreview?.id === skill.id" class="skill-preview">{{ skillPreview.instructions }}{{ skillPreview.truncated ? '\n（预览已截断）' : '' }}</pre>
+        </article>
+        <details v-if="skillUseHistory.length" class="memory-section"><summary>当前对话最近加载记录</summary>
+          <p v-for="(event, index) in skillUseHistory.slice().reverse().slice(0, 10)" :key="index" class="field-hint">{{ event.name }} · {{ event.mode === 'model' ? '模型调用' : '手动选择' }} · {{ new Date(event.at).toLocaleTimeString() }}</p>
+        </details>
+      </div>
+    </div>
+
+    <div v-if="showDocumentManager" class="modal-backdrop" @pointerdown.self.prevent>
+      <div v-dialog-focus="closeDocumentManager" class="skill-dialog" role="dialog" aria-modal="true" aria-label="文档管理">
+        <div class="dialog-header"><div><h2>PDF 与 Word 文档</h2><p>当前分区：{{ currentConversationTitle }}</p></div>
+          <button class="dialog-close" title="关闭" :disabled="documentsBusy" @click="closeDocumentManager">✕</button>
+        </div>
+        <p class="field-hint">选择 PDF / DOCX 后，可以在聊天中要求读取、总结或生成新文档。文件只登记到当前对话；提出任务后，所需文本才会由工具发送给当前 API。文件按原格式保存，不属于加密记忆正文。</p>
+        <div class="skill-toolbar"><button class="secondary-btn" :disabled="documentsBusy" @click="pickDocuments">选择 PDF / Word 文件</button>
+          <span class="field-hint">PDF {{ documentRuntime?.pdf ? '可用' : '不可用' }} · Word {{ documentRuntime?.word ? '可用' : '不可用' }}</span>
+        </div>
+        <div v-if="documentRuntime?.error" class="api-status-message error">{{ documentRuntime.error }}</div>
+        <div v-if="documentMessage" class="api-status-message">{{ documentMessage }}</div>
+        <p v-if="!documentItems.length" class="memory-empty">暂无文档。可以选择文件，或选择 PDF / Word Skill 后在聊天中要求生成。</p>
+        <article v-for="file in documentItems" :key="file.id" class="skill-card">
+          <div class="skill-card-title"><strong>{{ file.name }}</strong><span>{{ file.kind === 'input' ? '已选文件' : '生成结果' }} · {{ file.format.toUpperCase() }}</span></div>
+          <button class="secondary-btn" :disabled="documentsBusy" @click="inspectDocument(file.id)">{{ file.format === 'pdf' ? '页面预览' : '结构预览' }}</button>
+          <button class="secondary-btn" @click="openDocument(file.id)">打开文件</button>
+          <button class="secondary-btn" @click="openDocument(file.id, true)">查看文件位置</button>
+        </article>
+        <section v-if="documentPreview" class="document-preview">
+          <h3>{{ documentPreview.name || '文档预览' }}</h3><p class="field-hint">{{ documentPreview.notice }}</p>
+          <img v-for="url in documentPreview.images" :key="url" :src="url" alt="PDF 页面预览" />
+          <div v-for="(block, index) in documentPreview.blocks" :key="index">
+            <h4 v-if="block.type === 'heading'">{{ block.text }}</h4>
+            <table v-else-if="block.type === 'table'"><tbody><tr v-for="(row, rowIndex) in block.rows" :key="rowIndex"><td v-for="(cell, cellIndex) in row" :key="cellIndex">{{ cell }}</td></tr></tbody></table>
+            <p v-else>{{ block.text }}</p>
+          </div>
+        </section>
+      </div>
+    </div>
     <!-- API settings dialog -->
-    <div v-if="showApiSettings" class="modal-backdrop" @click.self="closeApiSettings">
-      <div class="api-dialog" role="dialog" aria-modal="true" aria-label="API 设置">
+    <div v-if="showApiSettings" class="modal-backdrop" @pointerdown.self.prevent>
+      <div v-dialog-focus="closeApiSettings" class="api-dialog" role="dialog" aria-modal="true" aria-label="API 设置">
         <div class="dialog-header">
           <div>
             <h2>API 设置</h2>
-            <p>配置 OpenAI 兼容接口，保存后立即生效</p>
+            <p>保存后立即生效；关闭面板会保留本次未保存输入</p>
           </div>
           <button class="dialog-close" :disabled="apiSaving" title="关闭" @click="closeApiSettings">✕</button>
         </div>
@@ -1580,6 +1991,7 @@ async function doReset() {
         <label class="field-label" for="api-key">API Key</label>
         <input
           id="api-key"
+          data-dialog-autofocus
           v-model="apiKeyInput"
           class="settings-input"
           type="password"
@@ -1593,77 +2005,107 @@ async function doReset() {
         <input id="api-base-url" v-model="apiBaseURL" class="settings-input" type="url" spellcheck="false" placeholder="https://api.openai.com/v1" />
 
         <label class="field-label" for="api-model">模型名称</label>
-        <input id="api-model" v-model="apiModel" class="settings-input" type="text" spellcheck="false" placeholder="gpt-4o-mini" @keydown.enter="saveApiSettings" />
+        <input id="api-model" v-model="apiModel" class="settings-input" type="text" spellcheck="false" placeholder="gpt-4o-mini" />
+        <div class="field-hint">点击背景不会关闭面板。请点击“保存配置”提交；Esc 或关闭按钮只收起面板。未保存输入仅在本次运行期间保留。</div>
 
         <div v-if="apiStatusMessage" :class="['api-status-message', { error: apiStatusError }]">{{ apiStatusMessage }}</div>
 
         <div class="dialog-actions">
           <span :class="['configured-state', { ready: apiConfigured }]">{{ apiConfigured ? '● 已配置' : '○ 未配置' }}</span>
           <span class="dialog-spacer" />
-          <button class="secondary-btn" :disabled="apiSaving" @click="closeApiSettings">取消</button>
+          <button class="secondary-btn" :disabled="apiSaving" @click="restoreApiDraft">恢复已保存配置</button>
+          <button class="secondary-btn" :disabled="apiSaving" @click="closeApiSettings">关闭（保留输入）</button>
           <button class="primary-btn" :disabled="apiSaving" @click="saveApiSettings">{{ apiSaving ? '保存中...' : '保存配置' }}</button>
         </div>
       </div>
     </div>
 
     <!-- Long-term memory manager dialog -->
-    <div v-if="showMemoryManager" class="modal-backdrop" @click.self="closeMemoryManager">
-      <div class="memory-dialog" role="dialog" aria-modal="true" aria-label="长期记忆管理">
+    <div v-if="showMemoryManager" class="modal-backdrop" @pointerdown.self.prevent>
+      <div v-dialog-focus="closeMemoryManager" class="memory-dialog" role="dialog" aria-modal="true" aria-label="长期记忆管理">
         <div class="dialog-header">
           <div>
             <h2>长期记忆管理</h2>
-            <p>查看、手动添加或删除 Continuum Memory 跨会话保存的事实</p>
+            <p>当前分区：{{ currentConversationTitle }} · 本页操作仅作用于此对话的记忆</p>
           </div>
           <button class="dialog-close" :disabled="memoryMutating" title="关闭" @click="closeMemoryManager">✕</button>
         </div>
 
         <div class="memory-summary">
           <span :class="['configured-state', { ready: memoryEnabled }]">
-            {{ memoryEnabled ? `● 已启用 · ${memoryCount} 条` : '○ 已关闭' }}
+            {{ memoryEnabled ? '● 长期记忆已启用' : '○ 长期记忆已关闭' }}
           </span>
           <span class="dialog-spacer" />
           <button class="secondary-btn" :disabled="memoryLoading" @click="refreshMemoryList">{{ memoryLoading ? '读取中...' : '刷新' }}</button>
           <button class="secondary-btn" @click="openMemoryLocation">打开文件位置</button>
         </div>
 
-        <div v-if="memoryStoragePath" class="memory-path" :title="memoryStoragePath">{{ memoryStoragePath }}</div>
-        <div v-if="graphL1View" class="field-hint" :title="graphL1View.manifestId">图视图已就绪：{{ graphL1View.information }} 条原文信息节点（未断言）、{{ graphL1View.openAssertions ?? 0 }} 条可本地关联查询的开放记录（含自动准入，不等于事实确认）、{{ graphL1View.claims }} 条已审核 L1 Claim、{{ graphL1View.argumentEdges }} 条图连接</div>
-        <details v-if="graphInformationItems.length" class="field-hint">
-          <summary>查看最近入图的原文信息（{{ graphInformationItems.length }} 条；仅来源记录，不代表事实已审核）</summary>
-          <div v-for="item in graphInformationItems" :key="item.id" :title="item.sourceId">{{ item.text }}</div>
+        <div class="memory-overview" aria-label="记忆分类统计">
+          <div><span>正式事实 · L1</span><strong>{{ memoryL1Count ?? '…' }}</strong><small>已发布的结构化事实</small></div>
+          <div><span>传统记忆</span><strong>{{ memoryCount }}</strong><small>偏好等可编辑记忆条目</small></div>
+          <div><span>原文来源</span><strong>{{ captureStatus?.activeSources ?? '…' }}</strong><small>独立保存的原始信息</small></div>
+        </div>
+        <p class="field-hint">三类数量分别统计，不可相加。原文保存、事实发布和聊天使用权限各自独立。</p>
+        <MemoryRecallNotice :enabled="memorySettings.openSourceRecallEnabled" :memory-enabled="memoryEnabled"
+          :remote-policy="memorySettings.remotePolicy" :busy="memoryMutating"
+          @enable="saveMemorySettings({ openSourceRecallEnabled: true })" />
+        <section class="memory-section">
+          <h3>正式事实与证据</h3>
+          <p class="field-hint">L1 保留原文中的关系、参与对象与语境。发布表示通过准入审核，仍需结合来源理解。</p>
+          <div v-if="!graphClaimItems.length" class="field-hint">{{ memoryLoading ? '正在读取正式事实…' : '当前没有可展示的正式事实。已保存的原文和传统记忆可在下方查看。' }}</div>
+        <details v-if="graphClaimItems.length" class="formal-claims" open>
+          <summary>最近的正式事实 · {{ graphClaimItems.length }} 条</summary>
+          <article v-for="claim in (showAllFormalClaims ? graphClaimItems : graphClaimItems.slice(0, 5))" :key="claim.id" class="memory-item">
+            <div class="memory-item-main">
+              <div class="memory-item-meta"><span class="memory-kind">{{ claim.relation }}</span><span>正式事实 · L1</span></div>
+              <dl class="memory-fact-fields">
+                <div v-for="(arg, index) in claim.arguments" :key="index"><dt :title="arg.role">{{ memoryRoleLabels[arg.role] ?? arg.role }}</dt><dd>{{ arg.text }}</dd></div>
+              </dl>
+              <div class="memory-context-tags">
+                <span>{{ claim.polarity === 'negative' ? '否定' : claim.polarity === 'positive' ? '肯定' : '肯定 / 否定未明确' }}</span>
+                <span>{{ { asserted: '陈述', planned: '计划', reported: '转述', hypothetical: '假设', unknown: '陈述方式未明确' }[claim.modality] ?? claim.modality }}</span>
+                <span>时间：{{ claim.time === 'unknown' || !claim.time ? '未明确' : claim.time === 'none' ? '无时间限定' : claim.time }}</span>
+              </div>
+              <details class="memory-review-evidence">
+                <summary>查看原文证据{{ claim.supplementalEvidence.length ? '与补充信息' : '' }}</summary>
+                <blockquote>{{ claim.sourceText || '原文暂不可用' }}</blockquote>
+                <div v-for="extra in claim.supplementalEvidence" :key="extra.sourceId">补充证据：{{ extra.text }}</div>
+              </details>
+            </div>
+          </article>
+          <button v-if="graphClaimItems.length > 5" class="secondary-btn memory-more-btn" :aria-expanded="showAllFormalClaims" @click="showAllFormalClaims = !showAllFormalClaims">
+            {{ showAllFormalClaims ? '收起，仅显示最近 5 条' : `查看其余 ${graphClaimItems.length - 5} 条` }}
+          </button>
         </details>
-        <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条关系/事件候选、{{ graphExtractionStatus.pendingReviews }} 条待审、{{ graphExtractionStatus.claims }} 条规范 L1 Claim</div>
-        <div v-if="graphExtractionStatus" class="field-hint">开放关系：{{ graphExtractionStatus.automaticOpenNavigation ?? 0 }} 条自动准入本地查询，{{ graphExtractionStatus.deferredOpenCandidates ?? 0 }} 条按需核实候选；无需逐条审核，也不会自动发布 Claim。</div>
-        <div v-if="graphExtractionStatus?.sourcesWithoutFacts" class="field-hint">
-          {{ graphExtractionStatus.sourcesWithoutFacts }} 条来源尚未提取出可审核的关系；实体或字段提取成功不代表已形成图事实。
-          <button class="secondary-btn" :disabled="memoryMutating || !graphExtractionStatus.enabled || !graphExtractionStatus.modelReady" @click="reextractEmptyGraphSources">重新提取无事实记录（每次最多 5 条）</button>
-        </div>
-        <div v-if="graphExtractionStatus?.error" class="api-status-message error">图提取最近一次失败：{{ graphExtractionStatus.error }}</div>
-        <div v-if="graphL2View" class="field-hint" :title="graphL2View.manifestId">L2 关系快照已就绪：{{ graphL2View.candidates }} 条候选、{{ graphL2View.relations }} 条已发布关系（图模式下可参与聊天召回）</div>
-
+        </section>
         <div v-if="memoryStatusMessage" :class="['api-status-message', { error: memoryStatusError }]">{{ memoryStatusMessage }}</div>
-        <div class="api-status-message">
-          <button class="secondary-btn" :disabled="graphDiagnosticLoading" @click="inspectGraphInputs">{{ graphDiagnosticLoading ? '检查中…' : '检查图记忆接入' }}</button>
-          <p v-if="graphDiagnosticMessage">{{ graphDiagnosticMessage }}</p>
-        </div>
-
-        <GraphOpenAssertions :ready="!!graphL1View" :busy="memoryMutating" :items="graphOpenAssertionItems"
+        <div v-if="graphExtractionStatus?.error" class="api-status-message error">最近一次提取失败：{{ graphExtractionStatus.error }}</div>
+        <details v-if="graphInformationItems.length" class="memory-section memory-source-list">
+          <summary>原文来源 · 最近 {{ graphInformationItems.length }} 条</summary>
+          <p class="field-hint">保存的是原始信息；是否发布为正式事实、是否允许用于聊天，由各自的规则决定。</p>
+          <article v-for="item in graphInformationItems" :key="item.id" class="memory-item">
+            <div class="memory-content">{{ item.text }}</div>
+          </article>
+        </details>
+        <GraphOpenAssertions :conversation-id="activeConversationId" :ready="!!graphL1View" :busy="memoryMutating" :items="graphOpenAssertionItems"
           :sources="graphInformationItems" @refresh="refreshMemoryList" @busy="memoryMutating = $event" />
 
-        <div class="field-hint">原文信息与已确认开放断言支持本地查看和关联搜索。规范 L1 Claim 和已发布 L2 关系仍按原有图模式参与聊天召回；开放断言不会自动变成推理结论或发送给聊天模型。</div>
+        <div class="field-hint">本地开放记录搜索与聊天原文召回是不同路径。开启原文召回并允许远程记忆发送后，获准来源可沿开放关系参与聊天；发送的是原文而不是图推导结论。关闭时使用正式事实的图检索。</div>
 
-        <section class="memory-settings-panel">
-          <div class="memory-settings-title">
-            <strong>方案 A 设置</strong>
-            <span :class="['memory-encryption-state', { ready: memoryEncrypted }]">{{ memoryEncrypted ? '🔒 AES-256-GCM 加密' : '⚠ 加密存储不可用' }}</span>
-          </div>
+        <details class="memory-settings-panel">
+          <summary class="memory-settings-title">
+            <strong>提取与使用设置</strong>
+            <span :class="['memory-encryption-state', { ready: memoryEncrypted }]">{{ memoryEncrypted ? '🔒 已加密存储' : '⚠ 加密存储不可用' }}</span>
+          </summary>
+          <h4 class="memory-subheading">提取方式与发送权限</h4>
           <div class="memory-settings-grid">
             <label>
-              <span>事实提取</span>
+              <span>提取方式</span>
               <select v-model="memorySettings.extractionMode" :disabled="memoryMutating" @change="saveMemorySettings({ extractionMode: memorySettings.extractionMode })">
-                <option value="rules">规则记忆 + 本地 UIE 待审候选</option>
-                <option value="smart">规则 + 本地 UIE + 聊天模型</option>
-                <option value="uie">本地 UIE-base（强制保存图候选）</option>
+                <option value="rules">本地规则 + UIE 候选</option>
+                <option value="open">开放关系优先 · 当前 API</option>
+                <option value="smart">开放关系 + 智能记忆 · 当前 API</option>
+                <option value="uie">本地 UIE · 保存图候选</option>
               </select>
             </label>
             <label>
@@ -1675,9 +2117,20 @@ async function doReset() {
               </select>
             </label>
           </div>
+          <h4 class="memory-subheading">补充提取</h4>
+          <label class="memory-check-row">
+            <input v-model="memorySettings.uieSupplementEnabled" type="checkbox" :disabled="memoryMutating || memorySettings.extractionMode === 'uie'" @change="saveMemorySettings({ uieSupplementEnabled: memorySettings.uieSupplementEnabled })" />
+            <span>使用本地 UIE 补充领域信息（开放关系保存不依赖此项）</span>
+          </label>
           <label class="memory-check-row">
             <input v-model="memorySettings.graphExtractionEnabled" type="checkbox" :disabled="memoryMutating || memorySettings.extractionMode === 'uie'" @change="saveMemorySettings({ graphExtractionEnabled: memorySettings.graphExtractionEnabled })" />
-            <span>保存 UIE 图提取结果供审核（所有模式均尝试 UIE；失败保留规则记忆；此开关不改变召回策略）</span>
+            <span>保存本地 UIE 补充图结果（开放关系优先、智能记忆模式始终保存 API 提取的开放关系）</span>
+          </label>
+          <div class="field-hint">开放模式使用当前聊天 API 提取实体与原文关系，不依赖 UIE schema；API 不可用时保留本地规则结果，但不能保证发现任意陌生关系。旧的规则模式不会自动向 API 发送原文。</div>
+          <h4 class="memory-subheading">原文召回</h4>
+          <label class="memory-check-row">
+            <input v-model="memorySettings.openSourceRecallEnabled" type="checkbox" :disabled="memoryMutating" @change="saveMemorySettings({ openSourceRecallEnabled: memorySettings.openSourceRecallEnabled })" />
+            <span>允许普通历史原文参与聊天：自动沿开放关系寻找关联记忆并发送给当前 API（包含已保存原文；隐私与密钥内容除外）</span>
           </label>
           <details class="uie-preview">
             <summary>试提取实体与信息（仅本地预览，不写入记忆）</summary>
@@ -1691,6 +2144,7 @@ async function doReset() {
             <input v-model="memorySettings.imageMemoryEnabled" type="checkbox" :disabled="memoryMutating" @change="saveMemorySettings({ imageMemoryEnabled: memorySettings.imageMemoryEnabled })" />
             <span>仅在我明确说“记住图片/截图”时，本地 OCR 提取图片文字</span>
           </label>
+          <h4 class="memory-subheading">本地能力与实验功能</h4>
           <div class="semantic-model-card">
             <div>
               <strong>中文本地语义检索</strong>
@@ -1723,14 +2177,17 @@ async function doReset() {
             </button>
           </div>
           <div class="field-hint">新安装的模型与 OCR 数据保存在可执行文件旁的 ContinuumMemoryData；旧安装会继续使用 DeskPetData，确保已有记忆可见。</div>
-        </section>
+        </details>
 
         <div v-if="!memoryEnabled" class="memory-disabled">
           长期记忆当前不可用。请查看上方错误；若是主动关闭，请检查 <code>config.json</code> 中的 <code>memoryEnabled</code> 或 <code>CONTINUUM_MEMORY_ENABLED</code> 环境变量。
         </div>
 
         <template v-else>
-          <label class="field-label" for="manual-memory">手动添加记忆</label>
+          <section class="memory-section">
+          <h3>手动添加传统记忆</h3>
+          <p class="field-hint">管理偏好等记忆条目。这里的列表与上方正式事实（L1）分别保存。</p>
+          <label class="field-label" for="manual-memory">添加记忆条目</label>
           <div class="memory-add-row">
             <textarea
               id="manual-memory"
@@ -1744,14 +2201,18 @@ async function doReset() {
               {{ memoryMutating ? '处理中...' : '添加' }}
             </button>
           </div>
-          <div class="field-hint">按 Ctrl + Enter 可添加。疑似密钥、密码或指令注入内容会被拒绝。</div>
+          <div class="field-hint">Ctrl + Enter 添加，普通 Enter 换行。关闭面板后保留输入草稿。疑似密钥、密码或指令注入内容会被拒绝。</div>
+          </section>
+          <section class="memory-section">
+          <h3>处理进度与待确认事项</h3>
+          <p class="field-hint">后台提取进度与人工审核分别显示；任务完成不等于事实已发布。</p>
 
           <section v-if="captureStatus?.activeSources" class="memory-review-panel">
             <div class="memory-list-header">
-              <strong>原文捕获与抽取任务</strong>
+              <strong>原文保存与后台提取</strong>
               <span>{{ captureStatus.activeSources }} 条加密原文</span>
             </div>
-            <div class="field-hint">原文独立保存，不参与记忆召回。任务完成 {{ captureStatus.tasks.succeeded }} 个，失败 {{ captureStatus.tasks.failed }} 个；完成不代表已生成或审核通过记忆。</div>
+            <div class="field-hint">原文独立保存。{{ memorySettings.openSourceRecallEnabled && memorySettings.remotePolicy !== 'disabled' ? '获准来源可直接参与原文关联召回，无需先发布规范事实。' : '当前未启用聊天原文召回；请查看上方授权及发送策略。' }}任务完成 {{ captureStatus.tasks.succeeded }} 个，失败 {{ captureStatus.tasks.failed }} 个；完成不代表已发布 L1 事实。</div>
             <div v-if="captureStatus.awaitingProcessor" class="field-hint">{{ captureStatus.awaitingProcessor }} 个任务等待原抽取配置，不会使用当前配置自动重放。</div>
             <div v-if="captureStatus.retryable" class="memory-queue-status">
               <span>{{ captureStatus.retryable }} 个任务可处理或重试（每项最多尝试 3 次）</span>
@@ -1760,8 +2221,8 @@ async function doReset() {
           </section>
           <section v-if="memoryReviewItems.length > 0 || pendingCaptureSegments > 0" class="memory-review-panel">
             <div class="memory-list-header">
-              <strong>待确认候选</strong>
-              <span>隔离内容不会参与回答</span>
+              <strong>传统记忆候选 · 待确认</strong>
+              <span>隔离的规范候选不直接参与回答；原始来源另按原文召回权限筛选</span>
             </div>
             <div v-if="pendingCaptureSegments > 0" class="memory-queue-status">
               <span>后台仍有 {{ pendingCaptureSegments }} 个长消息分段待处理</span>
@@ -1771,7 +2232,7 @@ async function doReset() {
               <div class="memory-item-main">
                 <div class="memory-item-meta">
                   <span class="memory-kind">{{ review.candidate.predicate }}</span>
-                  <span class="memory-state conflicted">待确认</span>
+                  <span class="memory-state conflicted">规范条目待确认</span>
                   <span v-if="review.candidate.calibrationStatus === 'calibrated'">
                     校准概率 {{ Math.round((review.candidate.calibratedActiveProbability || 0) * 100) }}%
                     （保守下界 {{ Math.round((review.candidate.calibrationLowerBound || 0) * 100) }}%）
@@ -1797,22 +2258,25 @@ async function doReset() {
             </div>
           </section>
 
-          <section v-if="graphReviewItems.length > 0" class="memory-review-panel">
+          <details v-if="graphReviewItems.length > 0" class="memory-review-panel">
+            <summary>L1 事实候选与实体身份 · {{ graphReviewItems.length }} 条待处理</summary>
             <div class="memory-list-header">
-              <strong>待确认图事实</strong>
-              <span>可检索资料与主动偏好分开审核</span>
+              <strong>正式事实审核</strong>
+              <span>仅在需要发布规范事实、绑定实体或主动使用偏好时操作</span>
             </div>
+            <div class="field-hint">以下状态仅表示尚未发布正式事实（L1），不是原文不可召回。确认会改变正式事实及身份绑定；拒绝或撤销检索会限制对应原文使用，请谨慎操作。</div>
             <div v-for="item in graphReviewItems" :key="item.review.id" class="memory-review-item">
               <div class="memory-item-main">
                 <div class="memory-item-meta">
                   <span class="memory-kind">{{ item.predicate || '未识别关系' }}</span>
-                  <span class="memory-state conflicted">待确认</span>
+                  <span class="memory-state">尚未发布 L1</span>
                   <span>模型分数 {{ Math.round(item.review.modelScore * 100) }}%</span>
                 </div>
                 <div class="memory-content">候选：{{ item.subject }} — {{ item.predicate }} → {{ item.object }}</div>
                 <div class="memory-content">证据：{{ item.evidence || '[来源证据不可用]' }}</div>
                 <details v-if="item.sourceText && item.sourceText !== item.evidence" class="field-hint"><summary>查看完整原文及语境</summary>{{ item.sourceText }}</details>
-                <div class="field-hint">原因：{{ item.review.reason }} · 来源：{{ item.review.sourceId }} · 隐私：{{ item.review.sensitivity }}</div>
+                <div class="field-hint">未发布原因：{{ item.review.reason }} · 来源：{{ item.review.sourceId }} · 发送级别：{{ item.review.sensitivity }}</div>
+                <div v-if="item.privacyOrigin === 'uie-default-local'" class="field-hint">此 private 是 UIE 正式事实（L1）的默认本地隔离策略，不代表原文被识别为敏感隐私；原文召回使用独立权限检查。</div>
                 <div v-for="mention in item.mentions" :key="mention.id" class="field-hint">
                   实体「{{ mention.text }}」（{{ mention.type }}）
                   <select v-model="graphIdentityChoice(item.review.id)[mention.id]" class="settings-input">
@@ -1822,7 +2286,7 @@ async function doReset() {
                   </select>
                 </div>
                 <div class="field-hint">抽取语境：否定 {{ item.context?.negation?.value ?? '未判定' }}；条件 {{ item.context?.condition?.value ?? '未判定' }}；时间 {{ item.context?.time?.value ?? '未判定' }}；说话者 {{ item.context?.speaker?.value ?? '未判定' }}</div>
-                <div class="field-hint">请逐项确认语境；“未知”会保留不确定性，不会自动当作肯定事实。</div>
+                <div class="field-hint">仅在需要发布正式事实（L1） 时填写以下语境；原文召回无需填写。“未知”会保留不确定性，不会自动当作肯定事实。</div>
                 <select v-model="graphContextChoice(item.review.id).negation" class="settings-input">
                   <option value="">选择肯定或否定</option><option value="positive">肯定</option><option value="negative">否定</option><option value="unknown">未知</option>
                 </select>
@@ -1839,7 +2303,7 @@ async function doReset() {
                 <input v-model="graphReviewReasons[item.review.id]" class="settings-input" maxlength="500" placeholder="填写审核原因" />
                 <label class="memory-check-row">
                   <input v-model="graphRetrievalRetain[item.review.id]" type="checkbox" />
-                  <span>保留为可检索资料</span>
+                  <span>保留正式事实（L1） 的检索资格（撤销会同时限制对应来源）</span>
                 </label>
                 <label class="memory-check-row">
                   <input v-model="graphProactivePreferences[item.review.id]" type="checkbox" />
@@ -1848,20 +2312,21 @@ async function doReset() {
               </div>
               <div class="memory-item-actions">
                 <div v-if="graphReviewErrors[item.review.id]" class="api-status-message error">{{ graphReviewErrors[item.review.id] }}</div>
-                <button class="memory-restore-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim() || !graphApprovalReady(item)" @click="reviewGraphCandidate(item.review.id, 'approved')">确认</button>
-                <button class="memory-delete-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'rejected')">拒绝</button>
-                <button class="secondary-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'pending')">继续待确认</button>
+                <button class="memory-restore-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim() || !graphApprovalReady(item)" @click="reviewGraphCandidate(item.review.id, 'approved')">确认并发布规范事实</button>
+                <button class="memory-delete-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'rejected')">拒绝并限制来源使用</button>
+                <button class="secondary-btn" :disabled="memoryMutating || !graphReviewReasons[item.review.id]?.trim()" @click="reviewGraphCandidate(item.review.id, 'pending')">保留未发布状态</button>
               </div>
             </div>
-          </section>
+          </details>
 
-          <section v-if="graphRelationReviewItems.length > 0" class="memory-review-panel">
-            <div class="memory-list-header"><strong>待审信息关系</strong><span>NLI 分数是判断线索；审核记录不会自动成为正式 L2 关系</span></div>
+          <details v-if="graphRelationReviewItems.length > 0" class="memory-review-panel">
+            <summary>事实间语义关系 · 待确认（{{ graphRelationReviewItems.length }} 条）</summary>
+            <div class="memory-list-header"><strong>规范信息关系</strong><span>仅用于正式关系确认，不是原文关联召回的前置步骤</span></div>
             <div v-for="item in graphRelationReviewItems" :key="item.key" class="memory-review-item">
               <div class="memory-item-main">
                 <div class="memory-item-meta">
                   <span class="memory-kind">{{ item.result.label }}</span>
-                  <span class="memory-state conflicted">待确认</span>
+                  <span class="memory-state">未确认规范关系</span>
                   <span>模型分数 {{ Math.round((item.result.scores?.[item.result.label] || 0) * 100) }}%</span>
                 </div>
                 <div class="memory-content">{{ item.evidence[0] || '[第一条证据不可用]' }}</div>
@@ -1875,9 +2340,10 @@ async function doReset() {
                 <button class="secondary-btn" :disabled="memoryMutating || !graphRelationReviewReasons[item.key]?.trim()" @click="reviewGraphRelation(item.key, 'pending')">继续待确认</button>
               </div>
             </div>
-          </section>
+          </details>
 
-          <section v-if="graphL2Candidates.length > 0" class="memory-review-panel">
+          <details v-if="graphL2Candidates.length > 0" class="memory-review-panel">
+            <summary>L2 关系候选 · 待发布（{{ graphL2Candidates.length }} 条）</summary>
             <div class="memory-list-header"><strong>L2 关系候选</strong><span>必须核实两条原文之间的语义；图中连接和 NLI 分数都不足以自动发布关系</span></div>
             <div v-for="item in graphL2Candidates" :key="item.id" class="memory-review-item">
               <div class="memory-item-main">
@@ -1895,15 +2361,17 @@ async function doReset() {
                 <button class="memory-restore-btn" :disabled="memoryMutating || !graphL2PublishReasons[item.id]?.trim() || !item.observations.some(obs => !obs.truncated)" @click="publishGraphL2Relation(item.id)">核实并发布 L2</button>
               </div>
             </div>
-          </section>
+          </details>
 
+          </section>
+          <section class="memory-section">
           <div class="memory-list-header">
-            <strong>已保存的记忆</strong>
+            <strong>已保存的传统记忆</strong>
             <span>按最近更新时间排序</span>
           </div>
 
           <div v-if="memoryLoading" class="memory-empty">正在读取长期记忆...</div>
-          <div v-else-if="memoryItems.length === 0" class="memory-empty">还没有长期记忆。你可以手动添加，或在聊天中说“请记住……”。</div>
+          <div v-else-if="memoryItems.length === 0" class="memory-empty">还没有传统记忆条目。正式事实和原文来源请查看上方；你也可以手动添加偏好。</div>
           <div v-else class="memory-list">
             <div v-for="item in memoryItems" :key="item.id" class="memory-item">
               <div class="memory-item-main">
@@ -1963,7 +2431,7 @@ async function doReset() {
                 <strong>不可恢复操作</strong>
                 <span>{{ purgeWarning }}</span>
                 <label>输入“彻底清除”确认
-                  <input v-model="purgePhrase" class="settings-input" type="text" autocomplete="off" @keydown.enter="confirmPurgeMemory(item.id)" />
+                  <input v-model="purgePhrase" class="settings-input" type="text" autocomplete="off" @keydown.enter="!$event.isComposing && $event.keyCode !== 229 && confirmPurgeMemory(item.id)" />
                 </label>
                 <div>
                   <button class="danger-btn" :disabled="memoryMutating || purgePhrase.trim() !== '彻底清除'" @click="confirmPurgeMemory(item.id)">清除正文、版本、证据和受管备份</button>
@@ -1976,10 +2444,47 @@ async function doReset() {
           <div class="memory-footer">
             <span>记忆加密写入 <code>memories.enc</code>；普通删除保留 V4 审计墓碑，“彻底清除”才会移除可恢复正文、版本、独占证据和受管备份。</span>
             <button class="danger-btn" :disabled="memoryMutating || memoryItems.length === 0" @click="clearAllMemories">
-              {{ confirmClearMemories ? '再次确认普通清空' : '普通清空全部（保留审计）' }}
+              {{ confirmClearMemories ? '再次确认清空传统记忆' : '清空传统记忆（保留审计）' }}
             </button>
           </div>
+          </section>
         </template>
+        <details class="memory-section memory-advanced">
+          <summary>高级管理与运行诊断</summary>
+          <p class="field-hint">查看存储位置、提取状态、关系归并和 L2 状态，或手动处理历史记录。</p>
+        <div v-if="memoryStoragePath" class="memory-path" :title="memoryStoragePath">{{ memoryStoragePath }}</div>
+        <div v-if="graphL1View" class="field-hint" :title="graphL1View.manifestId">图视图已就绪：{{ graphL1View.information }} 条原文信息节点（未断言）、{{ graphL1View.openAssertions ?? 0 }} 条可本地关联查询的开放记录（含自动准入，不等于事实确认）、{{ graphL1View.claims }} 条正式事实（L1）、{{ graphL1View.argumentEdges }} 条图连接</div>
+        <div v-if="graphExtractionStatus" class="field-hint">图提取：{{ graphExtractionStatus.enabled ? (graphExtractionStatus.modelReady ? '已开启' : '模型不可用，可使用本地回退') : '未开启' }} · {{ graphExtractionStatus.runs }} 次提取、{{ graphExtractionStatus.factCandidates }} 条关系/事件记录、{{ graphExtractionStatus.claims }} 条正式事实（其中 {{ graphExtractionStatus.basicClaims ?? 0 }} 条使用基础注册关系）；未发布的记录仍可按权限参与原文召回。</div>
+        <details v-if="graphExtractionStatus?.pendingReviews" class="field-hint">
+          <summary>可选：规范事实自动评估（{{ graphExtractionStatus.pendingReviews }} 条尚未发布）</summary>
+          此处仅处理旧记录的自动发布重试，不是原文召回的审核待办。启动时会分批处理旧的机器待审项，用户拒绝与明确暂缓不会被覆盖。
+          <button class="secondary-btn" :disabled="memoryMutating || !graphExtractionStatus.enabled" @click="reassessPendingGraphFacts">按新策略自动重审图事实（每次最多 20 条）</button>
+        </details>
+        <div v-if="graphExtractionStatus" class="field-hint">开放关系：{{ graphExtractionStatus.automaticOpenNavigation ?? 0 }} 条自动准入本地查询，{{ graphExtractionStatus.deferredOpenCandidates ?? 0 }} 条按需核实候选；已基础注册 {{ graphExtractionStatus.basicRelations ?? 0 }} 种关系。证据完整、角色明确的新关系可自动发布为 L1；含义不明的结果继续保留为候选。</div>
+        <div class="field-hint">
+          <button class="secondary-btn" :disabled="clarificationBusy || !apiConfigured" @click="migrateOpenL1">使用当前 API 处理历史开放记录（每批 5 条）</button>
+          <span>{{ semanticMigrationMessage }}</span>
+        </div>
+        <details v-if="graphRelationMappings.some(m => m.active)">
+          <summary>已启用的关系归并</summary>
+          <div v-for="mapping in graphRelationMappings.filter(m => m.active)" :key="mapping.id" class="field-hint">
+            {{ mapping.sourceText }} → {{ mapping.targetText }}
+            <button class="secondary-btn" :disabled="clarificationBusy" @click="revokeRelationMapping(mapping.id)">撤销归并并重新整理</button>
+          </div>
+        </details>
+        <div v-if="graphExtractionStatus?.sourcesWithoutFacts" class="field-hint">
+          {{ graphExtractionStatus.sourcesWithoutFacts }} 条来源尚未提取出关系；获准原文仍可直接检索，补充提取仅用于改善关联导航。
+          <button class="secondary-btn" :disabled="memoryMutating || !graphExtractionStatus.enabled || !graphExtractionStatus.modelReady" @click="reextractEmptyGraphSources">重新提取无事实记录（每次最多 5 条）</button>
+        </div>
+        <div v-if="graphL2View" class="field-hint" :title="graphL2View.manifestId">L2 关系快照已就绪：{{ graphL2View.candidates }} 条候选、{{ graphL2View.relations }} 条已发布关系（图模式下可参与聊天召回）</div>
+
+        <div class="api-status-message">
+          <button class="secondary-btn" :disabled="graphDiagnosticLoading" @click="inspectGraphInputs">{{ graphDiagnosticLoading ? '检查中…' : '检查图记忆接入' }}</button>
+          <p v-if="graphDiagnosticMessage">{{ graphDiagnosticMessage }}</p>
+        </div>
+
+        </details>
+
       </div>
     </div>
 
@@ -2061,24 +2566,60 @@ async function doReset() {
     <!-- Voice error toast -->
     <div v-if="voiceError" class="voice-error">{{ voiceError }}</div>
 
+    <div v-if="!isLoading && (clarificationItems.length || semanticFailures)" class="memory-clarifications">
+      <div v-if="clarificationError" class="field-hint">{{ clarificationError }}</div>
+      <div v-for="item in clarificationItems" :key="item.id + item.candidateId" class="memory-card">
+        <strong>补充记忆信息</strong>
+        <blockquote>{{ item.sourceText }}</blockquote>
+        <p>{{ item.question }}</p>
+        <button v-for="choice in item.options" :key="choice" class="secondary-btn"
+          @click="clarificationReplies[item.id + item.candidateId] = choice">{{ choice }}</button>
+        <textarea class="settings-input clarification-input" rows="3" v-model="clarificationReplies[item.id + item.candidateId]" placeholder="补充说明，也可以在下面选择已有消息" :disabled="clarificationBusy" />
+        <select class="settings-input" v-model="clarificationContextIds[item.id + item.candidateId]" :disabled="clarificationBusy">
+          <option value="">不引用其他消息</option>
+          <option v-for="context in clarificationContexts" :key="context.id" :value="context.id">{{ context.text }}</option>
+        </select>
+        <button class="secondary-btn" :disabled="clarificationBusy" @click="answerClarification(item)">提交补充</button>
+        <button class="secondary-btn" :disabled="clarificationBusy" @click="dismissClarification(item)">不保存这条候选</button>
+        <span class="field-hint">可以稍后再答，正常聊天无需等待。</span>
+      </div>
+      <button v-if="semanticFailures" class="secondary-btn" :disabled="clarificationBusy" @click="retrySemanticFailures">重试未完成的记忆整理（{{ semanticFailures }}）</button>
+    </div>
+    <div class="skill-selection">
+      <label for="chat-skill">本轮 Skill</label>
+      <select id="chat-skill" v-model="selectedSkillId" :disabled="isLoading || conversationSwitching">
+        <option value="">按任务自动选择</option>
+        <option v-for="skill in enabledSkills" :key="skill.id" :value="skill.id">{{ skill.name }}</option>
+      </select>
+      <button class="secondary-btn" @click="openSkillManager">管理 Skill</button>
+      <button class="secondary-btn" :disabled="documentsBusy" @click="openDocumentManager">文档{{ documentItems.length ? `（${documentItems.length}）` : '' }}</button>
+      <span v-if="skillUseHistory.length">最近加载：{{ skillUseHistory.at(-1)?.name }}</span>
+    </div>
     <div class="input-area">
+      <button class="tool-btn" :disabled="documentsBusy || conversationSwitching" title="选择 PDF 或 Word 文档" @click="pickDocuments">📎</button>
       <button class="tool-btn" :disabled="isCapturing || isLoading" title="识屏" @click="captureScreen">
         {{ isCapturing ? '⏳' : '📷' }}
       </button>
       <button class="tool-btn" :class="{ listening: isListening }" :disabled="isLoading" title="语音输入" @click="toggleListening">
         {{ isListening ? '🔴' : '🎤' }}
       </button>
-      <textarea v-model="input" placeholder="输入消息..." :disabled="isLoading" @keydown="onKeydown" rows="1" />
+      <textarea v-model="input" placeholder="输入消息..." aria-label="聊天消息" :disabled="isLoading || conversationSwitching" @keydown="onKeydown" rows="3" />
       <button class="send-btn" :disabled="isLoading || (!input.trim() && !pendingImage)" @click="send">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path d="M22 2L11 13" /><path d="M22 2L15 22L11 13L2 9L22 2Z" />
         </svg>
       </button>
     </div>
+    <div class="input-help">Enter 发送 · Shift + Enter 换行 · 切换对话会保留文本和图片草稿</div>
   </div>
 </template>
 
 <style>
+.memory-clarifications { flex-shrink: 0; max-height: 260px; overflow-y: auto; padding: 12px 16px; border-top: 1px solid var(--border); }
+.memory-clarifications .memory-card { padding: 12px; margin-bottom: 10px; border-radius: 10px; background: var(--surface); border: 1px solid var(--border); }
+.memory-clarifications blockquote { margin: 8px 0; padding-left: 10px; border-left: 2px solid var(--accent); overflow-wrap: anywhere; }
+.memory-clarifications .settings-input { display: block; width: 100%; box-sizing: border-box; margin: 8px 0; }
+.clarification-input { resize: vertical; min-height: 72px; }
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 
@@ -2106,6 +2647,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 .header .version-badge { color: var(--text-muted); font-size: 10px; font-variant-numeric: tabular-nums; }
 .header .badge { font-size: 11px; color: var(--accent); background: var(--accent-soft); padding: 2px 8px; border-radius: 6px; }
 .header .spacer { flex: 1; }
+.conversation-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.conversation-bar label { color: var(--text); font-size: 12px; }
+.conversation-bar select, .conversation-bar input { min-width: 150px; max-width: 260px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--bg); font: inherit; font-size: 12px; }
+.conversation-bar > span { color: var(--text-muted); font-size: 11px; }
+.conversation-error { padding: 8px 20px; color: #e76f61; font-size: 12px; }
 .icon-btn { background: transparent; color: var(--text-muted); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-size: 14px; cursor: pointer; font-family: inherit; }
 .icon-btn:hover { background: var(--surface); color: var(--text); }
 .icon-btn.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
@@ -2118,9 +2664,31 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 
 /* API settings dialog */
 .modal-backdrop { position: fixed; inset: 0; z-index: 300; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(0,0,0,0.58); backdrop-filter: blur(3px); }
-.api-dialog, .memory-dialog { max-height: calc(100vh - 48px); overflow-y: auto; padding: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: 0 24px 70px rgba(0,0,0,0.45); }
+.api-dialog, .memory-dialog, .skill-dialog { max-height: calc(100vh - 48px); overflow-y: auto; padding: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: 0 24px 70px rgba(0,0,0,0.45); }
 .api-dialog { width: min(480px, 100%); }
 .memory-dialog { width: min(780px, 100%); }
+.skill-dialog { width: min(760px, 100%); }
+.skill-dialog > .dialog-header { position: sticky; top: -22px; z-index: 2; margin: -22px -22px 12px; padding: 18px 22px 14px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.skill-toolbar, .skill-selection { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.skill-toolbar { margin: 12px 0; }
+.skill-toolbar input { flex: 1; min-width: 160px; }
+.skill-card { margin-top: 12px; padding: 13px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg); }
+.skill-card-title { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 13px; }
+.skill-card-title > span { color: var(--text-muted); font-size: 11px; }
+.skill-card-title label { margin-left: auto; font-size: 12px; }
+.skill-card > p { margin: 8px 0; color: var(--text); font-size: 12px; line-height: 1.6; }
+.skill-card > button { margin-top: 10px; margin-right: 8px; }
+.skill-path { margin-top: 6px; font-size: 10px; color: var(--text-muted); overflow-wrap: anywhere; }
+.skill-preview { max-height: 280px; overflow: auto; margin-top: 10px; padding: 10px; border-radius: 6px; background: var(--surface); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.skill-selection { padding: 8px 20px 0; background: var(--bg); color: var(--text-muted); font-size: 11px; }
+.skill-selection select { max-width: 260px; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); color: var(--text); font: inherit; }
+.document-preview { margin-top: 16px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.document-preview img { display: block; max-width: 100%; margin: 10px auto; border: 1px solid var(--border); }
+.document-preview p { white-space: pre-wrap; font-size: 12px; line-height: 1.7; }
+.document-preview h3, .document-preview h4 { margin: 12px 0 8px; }
+.document-preview table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 10px 0; }
+.document-preview td { padding: 8px; border: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; }
+.header { flex-wrap: wrap; }
 .dialog-header { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 20px; }
 .dialog-header h2 { font-size: 19px; font-weight: 650; }
 .dialog-header p { margin-top: 5px; color: var(--text-muted); font-size: 12px; }
@@ -2142,6 +2710,48 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 .secondary-btn:disabled, .primary-btn:disabled, .dialog-close:disabled { opacity: 0.5; cursor: default; }
 
 /* Long-term memory manager */
+.memory-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 16px; }
+.memory-overview > div { display: grid; gap: 6px; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.memory-overview span { color: var(--text); font-size: 12px; }
+.memory-overview strong { color: var(--accent); font-size: 25px; font-weight: 650; }
+.memory-overview small { color: var(--text-muted); font-size: 11px; line-height: 1.5; }
+.memory-section { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+.memory-section h3 { margin: 0; font-size: 14px; font-weight: 650; }
+.memory-section > .field-hint { margin-bottom: 10px; }
+.memory-dialog summary { cursor: pointer; line-height: 1.6; }
+.memory-advanced > summary { color: var(--text-muted); font-size: 12px; font-weight: 600; }
+.memory-subheading { margin: 18px 0 8px; font-size: 12px; }
+.memory-fact-fields { display: grid; gap: 7px; margin: 10px 0; font-size: 12px; }
+.memory-fact-fields > div { display: grid; grid-template-columns: minmax(70px, 0.3fr) 1fr; gap: 12px; }
+.memory-fact-fields dt { color: var(--text-muted); overflow-wrap: anywhere; }
+.memory-fact-fields dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.formal-claims { margin-top: 12px; }
+.formal-claims > article { margin-top: 8px; }
+.formal-claims blockquote { margin: 8px 0; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--surface); white-space: pre-wrap; overflow-wrap: anywhere; }
+.memory-dialog .memory-item-meta { flex-wrap: wrap; }
+.memory-dialog .memory-list-header { gap: 12px; flex-wrap: wrap; }
+.memory-dialog .semantic-model-card p { white-space: normal; line-height: 1.5; }
+.memory-dialog > .dialog-header { position: sticky; top: -22px; z-index: 2; margin: -22px -22px 16px; padding: 18px 22px 14px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.memory-dialog .field-hint { font-size: 12px; line-height: 1.65; }
+.memory-dialog .field-hint p { margin-top: 8px; }
+.memory-dialog .memory-check-row { align-items: flex-start; font-size: 12px; line-height: 1.6; }
+.memory-dialog .memory-check-row input { flex-shrink: 0; margin-top: 3px; }
+.memory-dialog .memory-item-meta, .memory-dialog .memory-list-header span { font-size: 11px; line-height: 1.5; }
+.memory-dialog .memory-settings-grid label { font-size: 12px; }
+.memory-dialog .memory-item-actions, .memory-dialog .memory-footer { flex-wrap: wrap; }
+.memory-dialog summary:focus-visible, .memory-dialog button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.memory-context-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.memory-context-tags span { padding: 3px 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-muted); font-size: 11px; }
+.memory-more-btn { margin-top: 10px; }
+.memory-source-list > summary { font-size: 14px; font-weight: 600; }
+.memory-source-list > article { margin-top: 8px; }
+.memory-dialog .memory-settings-title { justify-content: flex-start; flex-wrap: wrap; font-size: 13px; list-style: none; }
+.memory-settings-title::-webkit-details-marker { display: none; }
+.memory-settings-title::before { content: '▸'; color: var(--text-muted); }
+.memory-settings-panel[open] > .memory-settings-title::before { content: '▾'; }
+.memory-settings-title .memory-encryption-state { margin-left: auto; }
+@media (max-width: 480px) { .memory-overview { grid-template-columns: 1fr; } .memory-summary { flex-wrap: wrap; } }
+
 .memory-summary { display: flex; align-items: center; gap: 8px; }
 .memory-path { margin-top: 10px; padding: 8px 10px; overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text-muted); font-family: Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .memory-settings-panel { margin-top: 14px; padding: 13px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
@@ -2280,6 +2890,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 .input-area textarea { flex: 1; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 14px; outline: none; font-family: inherit; resize: none; max-height: 120px; }
 .input-area textarea:focus { border-color: var(--accent); }
+.input-help { padding: 0 20px 8px; background: var(--bg); color: var(--text-muted); font-size: 11px; }
 .send-btn { background: var(--accent); color: #fff; border: none; border-radius: 10px; width: 42px; height: 42px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.15s; flex-shrink: 0; }
 .send-btn:disabled { opacity: 0.4; cursor: default; }
 .send-btn:not(:disabled):hover { background: var(--accent-hover); }

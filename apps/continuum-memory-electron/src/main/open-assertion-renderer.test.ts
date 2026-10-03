@@ -75,7 +75,7 @@ describe('open graph desktop controls', () => {
       items: [{ assertion: { ref: { id: 'neighbor' }, text: '恒温箱B2发生故障' }, depth: 1, via: { mentionText: '恒温箱B2' } }], sources: [] } },
     async (find, root) => {
       find('input').props['onUpdate:modelValue']('样品S7'); await vue.nextTick()
-      await find('button', '搜索相关开放记忆').props.onClick(); await vue.nextTick()
+      await find('button', '本地查询').props.onClick(); await vue.nextTick()
       expect(calls[0]).toEqual({ channel: 'memory:graph-open-search', input: { query: '样品S7', maximumDepth: 2, includeCandidates: false } })
       expect(text(root)).toContain('恒温箱B2发生故障')
       expect(text(root)).toContain('同名不等于同一实体')
@@ -92,7 +92,7 @@ describe('open graph desktop controls', () => {
       const checkbox = all(root).find(n => n.type === 'input' && n.props.type === 'checkbox')
       checkbox.props['onUpdate:modelValue'](true)
       find('input').props['onUpdate:modelValue']('样品S7'); await vue.nextTick()
-      await find('button', '搜索相关开放记忆').props.onClick(); await vue.nextTick()
+      await find('button', '本地查询').props.onClick(); await vue.nextTick()
       expect(calls[0]?.input.includeCandidates).toBe(true)
       expect(text(root)).toContain('未核实候选')
       expect(text(root)).toContain('相似度仅表示相关性')

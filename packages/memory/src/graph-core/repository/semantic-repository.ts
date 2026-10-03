@@ -106,7 +106,8 @@ function buildBundle(l1: GraphL1Store, v4: MemoryV4Repository, registry: GraphPr
   const predicates = registry.registrations.filter(item => claims.some(claim => claim.atom.predicate === item.spec.name))
     .map(item => item.spec).sort((a, b) => a.name.localeCompare(b.name))
   const revisions = { v4: snapshot.revision, semantics: (previous?.revisions.semantics ?? 0) + 1,
-    predicates: 1, rules: 0, aliases: 0 }
+    predicates: 1 + registry.registrations.filter(item => item.spec.registrationKind === 'basic').length,
+    rules: 0, aliases: 0 }
   const content = { scope, information: captures ? projectCapturedInformation(captures.snapshot(), scope) : [],
     openAssertions: captures && extractions ? projectOpenAssertions(captures.snapshot(), extractions, scope) : [],
     entities: [...entities.values()].sort((a, b) => a.ref.id.localeCompare(b.ref.id)),
@@ -156,6 +157,22 @@ export function exactClaimAvailable(claim: GraphClaimRecord,
     || version.subjectId !== fact.subjectId || JSON.stringify(version.object) !== JSON.stringify(fact.object)
     || version.validFrom !== fact.validFrom || version.validTo !== fact.validTo
     || snapshot.factVersions.some(item => item.factId === fact.id && item.version > version.version)) return false
+  if (fact.sourceStatement || version.sourceStatement || claim.sourceStatement) {
+    const statement = fact.sourceStatement
+    if (!statement || !version.sourceStatement || !claim.sourceStatement
+      || JSON.stringify(statement) !== JSON.stringify(version.sourceStatement)
+      || statement.predicateId !== claim.atom.predicate
+      || JSON.stringify(statement.arguments) !== JSON.stringify(claim.atom.args)) return false
+    const { arguments: _arguments, ...definition } = statement
+    if (JSON.stringify(definition) !== JSON.stringify(claim.sourceStatement)) return false
+    const relation = statement.relationSpan
+    if (!claim.provenance.sources.some(source => {
+      const episode = snapshot.episodes.find(item => item.id === source.episodeId)
+      return source.locator.kind === 'text-span' && relation.start >= source.locator.start
+        && relation.end <= source.locator.end && relation.start < relation.end
+        && episode?.content?.slice(relation.start, relation.end) === statement.relationText
+    })) return false
+  }
   const terms = Object.values(claim.atom.args) as GraphGroundTerm[]
   if (!terms.some(term => term.kind === 'entity' && term.ref.id === fact.subjectId)
     || !terms.some(term => term.kind === fact.objectType && (term.kind === 'entity'

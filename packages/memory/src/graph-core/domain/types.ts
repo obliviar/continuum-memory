@@ -110,6 +110,8 @@ export interface GraphPredicateSpec {
   readonly transitivity: 'none' | 'approved'
   readonly inferenceAllowed: boolean
   readonly world: 'open'
+  readonly registrationKind?: 'basic'
+  readonly relationText?: string
 }
 
 /** A context is a discourse frame, not an individual Claim or a graph path. */
@@ -145,6 +147,15 @@ export interface GraphClaimRecord extends GraphSemanticRecord {
     readonly role: 'supports' | 'refutes' | 'references'
     readonly strength: 'direct' | 'reference-only' | 'legacy-derived'
   }>
+  readonly sourceStatement?: {
+    readonly predicateId: string
+    readonly predicateVersion: number
+    readonly relationText: string
+    readonly relationSpan: { readonly start: number; readonly end: number }
+    readonly mappingId?: string
+    readonly roleMapping?: Readonly<Record<string, string>>
+    readonly qualifiers?: Readonly<Record<string, unknown>>
+  }
 }
 
 /** An accepted anyOf root does not accept either child as a standalone fact. */

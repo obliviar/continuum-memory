@@ -3,6 +3,7 @@ import type { GraphResult, GraphSourceRef, GraphTimeExtent } from '@continuum-me
 import type { GraphClaimRecord, GraphProjectionSnapshot } from '../domain/types'
 import type { GraphNliObservation, GraphRelationCandidate } from '../domain/relation-types'
 import { graphRelationPairKey, type GraphRelationJudgementTask } from './relation-task-queue'
+import { basicStatementIdentitiesCompatible } from '../domain/source-statement-comparison'
 import type { GraphRelationRepository } from './relation-repository'
 
 export const GRAPH_L2_TASK_STAGING_VERSION = 'l2-nli-task-staging-v1'
@@ -55,6 +56,9 @@ export async function stageGraphRelationTasks(input: {
       || refKey(premise.context) !== refKey(hypothesis.context)
       || !contexts.has(refKey(premise.context))) { skip('different-context-or-scope'); continue }
     if (premise.modality !== hypothesis.modality) { skip('different-modality'); continue }
+    if (!basicStatementIdentitiesCompatible(premise, hypothesis, input.core.semanticBundle.entities)) {
+      skip('unresolved-basic-identity'); continue
+    }
     const validTime = intersection(premise.validTime, hypothesis.validTime)
     if (!validTime) { skip('disjoint-valid-time'); continue }
     const premiseText = input.evidenceText(premise)

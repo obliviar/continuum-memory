@@ -122,6 +122,8 @@ export function assertMemoryV4Snapshot(value: unknown): asserts value is MemoryV
     requireEnum(version.objectType, OBJECT_TYPES, `fact version ${position}.objectType`)
     requireJsonValue(version.normalizedValue, `fact version ${position}.normalizedValue`)
     requireString(version.canonicalText, `fact version ${position}.canonicalText`)
+    if (version.sourceStatement !== undefined)
+      requireSourceStatement(version.sourceStatement, `fact version ${position}.sourceStatement`)
     requireEnum(version.polarity, POLARITIES, `fact version ${position}.polarity`)
     requireEnum(version.modality, MODALITIES, `fact version ${position}.modality`)
     if (version.condition !== undefined)
@@ -149,7 +151,8 @@ export function assertMemoryV4Snapshot(value: unknown): asserts value is MemoryV
       throw new Error(`Memory V4 fact ${fact.id} has no auditable version history`)
     const latest = versions.reduce((left, right) => right.version > left.version ? right : left).record
     if (latest.canonicalText !== fact.canonicalText || latest.status !== fact.status
-      || latest.predicate !== fact.predicate || JSON.stringify(latest.object) !== JSON.stringify(fact.object))
+      || latest.predicate !== fact.predicate || JSON.stringify(latest.object) !== JSON.stringify(fact.object)
+      || JSON.stringify(latest.sourceStatement) !== JSON.stringify(fact.sourceStatement))
       throw new Error(`Memory V4 fact ${fact.id} does not match its latest version`)
     for (const item of versions) {
       const isLatest = item.record === latest
@@ -554,6 +557,8 @@ function validateFact(
   requireEnum(fact.origin, FACT_ORIGINS, `fact ${position}.origin`)
   if (fact.metadata !== undefined)
     requireJsonValue(fact.metadata, `fact ${position}.metadata`)
+  if (fact.sourceStatement !== undefined)
+    requireSourceStatement(fact.sourceStatement, `fact ${position}.sourceStatement`)
   requireString(fact.extractorVersion, `fact ${position}.extractorVersion`)
   requireString(fact.verifierVersion, `fact ${position}.verifierVersion`)
 }
@@ -704,6 +709,36 @@ function requireJsonValue(value: unknown, label: string): void {
 function requireScore(value: unknown, label: string): void {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1)
     throw new Error(`Memory V4 ${label} is not a score in [0, 1]`)
+}
+
+function requireSourceStatement(value: unknown, label: string): void {
+  requireJsonValue(value, label)
+  const statement = requireRecord(value, label)
+  requireString(statement.predicateId, `${label}.predicateId`)
+  requireNonNegativeInteger(statement.predicateVersion, `${label}.predicateVersion`, 1)
+  requireString(statement.relationText, `${label}.relationText`)
+  const span = requireRecord(statement.relationSpan, `${label}.relationSpan`)
+  requireNonNegativeInteger(span.start, `${label}.relationSpan.start`)
+  requireNonNegativeInteger(span.end, `${label}.relationSpan.end`, 1)
+  if ((span.end as number) <= (span.start as number)) throw new Error(`Memory V4 ${label} has an empty relation span`)
+  const args = requireRecord(statement.arguments, `${label}.arguments`)
+  if (!Object.keys(args).length) throw new Error(`Memory V4 ${label} has no arguments`)
+  for (const [role, raw] of Object.entries(args)) {
+    requireString(role, `${label}.role`)
+    const term = requireRecord(raw, `${label}.arguments.${role}`)
+    requireEnum(term.kind, ['entity', 'string', 'number', 'boolean', 'date'] as const, `${label}.argument.kind`)
+    if (term.kind === 'entity') {
+      const ref = requireRecord(term.ref, `${label}.argument.ref`)
+      requireEnum(ref.kind, ['entity'] as const, `${label}.argument.ref.kind`)
+      requireString(ref.id, `${label}.argument.ref.id`)
+      requireNonNegativeInteger(ref.version, `${label}.argument.ref.version`, 1)
+    }
+    else if (term.kind === 'string' || term.kind === 'date') requireString(term.value, `${label}.argument.value`)
+    else if (term.kind === 'number' && (typeof term.value !== 'number' || !Number.isFinite(term.value)))
+      throw new Error(`Memory V4 ${label} has an invalid numeric argument`)
+    else if (term.kind === 'boolean' && typeof term.value !== 'boolean')
+      throw new Error(`Memory V4 ${label} has an invalid boolean argument`)
+  }
 }
 
 function requireTimestamp(value: unknown, label: string): number {

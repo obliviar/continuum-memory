@@ -27,7 +27,7 @@ describe('shared UIE with rules fallback', () => {
       expect(() => parseUieExtractionTargets(invalid)).toThrow()
     expect(() => parseUieExtractionTargets(Array.from({ length: 65 }, (_, i) => `类型${i}`).join('；'))).toThrow()
   })
-  it('calls UIE and keeps its candidates review-only alongside rules', async () => {
+  it('automatically qualifies a clear grounded UIE relation alongside rules', async () => {
     const onGraphExtraction = vi.fn()
     const extractor = createUieRuleFallbackExtractor({
       uie: { extract: vi.fn().mockResolvedValue(extraction) },
@@ -38,7 +38,8 @@ describe('shared UIE with rules fallback', () => {
       metadata: { sourceMessageIds: ['message-1'] } })
     expect(candidates).toHaveLength(2)
     expect(candidates[0]).toEqual(rule)
-    expect(candidates[1]).toMatchObject({ metadata: { requiresReview: true, extractionChannel: 'uie-base-local' } })
+    expect(candidates[1]).toMatchObject({ metadata: { requiresReview: false, extractionChannel: 'uie-base-local',
+      autoReviewPolicy: 'uie-grounded-assertion-v2' } })
     expect(onGraphExtraction).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       sourceId: 'message-1', modelId: 'uie-base', status: 'complete',
     }))

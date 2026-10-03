@@ -6,6 +6,19 @@ import {
 } from './graph-extraction-result'
 
 describe('graph extraction result protocol', () => {
+  it('retains explicit scalar false, planned and time while missing qualifiers remain unknown', () => {
+    const text = '顾宁计划接手项目。'
+    const run = createGraphExtractionRun({ sourceId: 'scalar', sourceText: text, modelId: 'api', rawOutput: { graph: {
+      entities: [{ id: 'p', type: 'person', text: '顾宁', span: { start: 0, end: 2 }, modelScore: 0.9 },
+        { id: 'o', type: 'project', text: '项目', span: { start: 6, end: 8 }, modelScore: 0.9 }], facts: [],
+      assertions: [{ id: 'a', relationText: '接手', relationSpan: { start: 4, end: 6 },
+        participants: [{ mentionId: 'p', role: 'agent' }, { mentionId: 'o', role: 'object' }],
+        evidenceSpan: { start: 0, end: 9 }, modelScore: 0.9,
+        context: { negation: false, condition: null, modality: 'planned' } }] } } })
+    expect(run.assertionCandidates![0]!.context).toMatchObject({ negation: { value: false, resolution: 'resolved' },
+      condition: { value: null, resolution: 'absent' }, modality: { value: 'planned', resolution: 'resolved' },
+      time: { value: null, resolution: 'unresolved' } })
+  })
   it('persists all UIE facts before score and count policy', () => {
     const sourceText = 'Alice likes tea'
     const facts = Array.from({ length: 10 }, (_, index) => ({

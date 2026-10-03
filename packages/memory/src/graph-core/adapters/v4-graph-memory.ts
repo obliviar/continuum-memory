@@ -102,7 +102,7 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         // Do not answer a relation question with unrelated scalar facts as though an edge had been found.
         if (/为什么|为何|原因|导致|先后|先.*后|\b(why|cause|caused|before|after)\b/i.test(request.query))
           return fail('unsupported-capability', 'This host route has no L2 traversal; use the bounded relation service')
-        const gathered = collectCurrentL1(options, request.scope, timestamp)
+        const gathered = collectCurrentL1(options, request.scope, timestamp, request.visibleFacts)
         const projection = gathered.projection
         const claimByFact = new Map(projection.semanticBundle.claims.map(claim => [claim.fact.id, claim]))
         const includeUnknown = timePlan.value.source === 'caller' && request.temporal.valid.kind === 'at'
@@ -171,6 +171,12 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
           const { input, claim } = byId.get(hit.id)!
           const entry: GraphEvidenceClaim = { kind: 'direct', ref: claim.ref, fact: claim.fact,
             citation: `G${claims.length + 1}`, content: input.fact.canonicalText,
+            ...(claim.sourceStatement?.qualifiers ? { qualifiers: claim.sourceStatement.qualifiers } : {}),
+            ...(claim.provenance.sources.length > 1 ? { supplementalQuotations: claim.provenance.sources.slice(1).map(source => {
+              const episode = input.sources.find(s => s.episode.id === source.episodeId)!.episode
+              return { source, content: source.locator.kind === 'text-span'
+                ? episode.content!.slice(source.locator.start, source.locator.end) : episode.content! }
+            }) } : {}),
             sources: claim.provenance.sources, polarity: claim.polarity, modality: claim.modality,
             conditionText: claim.condition.kind === 'none' ? null : claim.condition.text, context: claim.context, validTime: claim.validTime,
             // Verified source extraction does not certify that competing explanations were exhaustively checked.
@@ -183,7 +189,7 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         const elapsed = performance.now() - start
         if (elapsed >= request.budget.maxElapsedMs) return fail('budget-exhausted', 'Direct recall elapsed-time budget exhausted')
         // Re-read CURRENT tombstones, policy and exact contents even when an encrypted projection exists.
-        const finalInputs = collectCurrentL1(options, request.scope, now())
+        const finalInputs = collectCurrentL1(options, request.scope, now(), request.visibleFacts)
         const fresh = new Map(finalInputs.inputs.map(input => [input.fact.id, graphHash(input)]))
         if (!options.authorizeScope(request.scope) || graphHash(finalInputs.projection) !== graphHash(projection)
           || inputs.some(input => fresh.get(input.fact.id) !== graphHash(input)))

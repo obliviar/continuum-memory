@@ -4,7 +4,7 @@ import { createMemoryV4Repository } from '../v4/repository/memory-v4-repository'
 import { createGraphExtractionRun, type FactContext } from './graph-extraction-result'
 import { createGraphPredicateRegistry, normalizeGraphExtraction, type GraphEntityRecord } from './graph-identity-normalization'
 import { assessGraphClaim, confirmGraphClaim, rejectGraphClaim, deferGraphClaim,
-  setGraphUseAssessment, createGraphL1Store, createGraphL1Writer } from './graph-l1-write'
+  setGraphUseAssessment, createGraphL1Store, createGraphL1Writer, parseGraphTimeInterval } from './graph-l1-write'
 import { createGraphSemanticRepository } from '../graph-core/repository/semantic-repository'
 import { createGraphL1ProjectionRepository } from '../graph-core/repository/l1-projection-repository'
 import { reviewGraphAdmission } from './graph-admission-review'
@@ -45,6 +45,33 @@ function memoryPersistence() {
 }
 
 describe('reviewed graph L1 publication', () => {
+  it('normalizes explicit Chinese dates and calendar months without inventing relative dates', () => {
+    expect(parseGraphTimeInterval('2026年11月')).toEqual({ kind: 'interval',
+      from: Date.UTC(2026, 10, 1), to: Date.UTC(2026, 11, 1) })
+    expect(parseGraphTimeInterval('2026年10月2日')).toEqual(parseGraphTimeInterval('2026-10-02'))
+    expect(parseGraphTimeInterval('2026年13月')).toBeUndefined()
+    expect(parseGraphTimeInterval('2026年2月30日')).toBeUndefined()
+    expect(parseGraphTimeInterval('目前')).toBeUndefined()
+  })
+  it('requires semantic fidelity review for local UIE before automatic publication', () => {
+    const { run, fact } = fixture()
+    run.modelId = 'uie-base'
+    expect(assessGraphClaim(run, fact, { sensitivity: 'normal', sharePolicy: 'allow-remote' }))
+      .toMatchObject({ status: 'pending', reason: 'uie-requires-semantic-review' })
+    run.semanticReview = { version: 'source-semantics-v3', runId: run.id, candidateIds: [fact.sourceFactId] }
+    expect(assessGraphClaim(run, fact, { sensitivity: 'normal', sharePolicy: 'allow-remote' }).status).toBe('approved')
+  })
+  it('retires publication receipts and never resurrects a withdrawn Claim on replay', async () => {
+    const { run, fact } = fixture(), v4 = createMemoryV4Repository(), l1 = createGraphL1Store(memoryPersistence())
+    const writer = createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
+    const review = assessGraphClaim(run, fact, { sensitivity: 'normal', sharePolicy: 'allow-remote' })
+    const task = (await writer.submit(run, fact, review, entities))!
+    l1.retireClaims([task.id])
+    expect(l1.tasks()[0]?.state).toBe('retired')
+    expect((await writer.submit(run, fact, review, entities))?.state).toBe('retired')
+    await writer.retryPending()
+    expect(l1.claims()).toEqual([])
+  })
   it('rejects an incomplete or imprecise admission decision before graph write', () => {
     const { run, fact } = fixture()
     expect(() => reviewGraphAdmission(run, fact.sourceFactId,
@@ -292,13 +319,14 @@ describe('reviewed graph L1 publication', () => {
     expect(v4.snapshot().factVersions).toHaveLength(1)
   })
 
-  it('keeps pending review out of V4 and records user confirmation separately from model score', async () => {
+  it('publishes low-score source records and preserves an explicit human deferral or confirmation', async () => {
     const v4 = createMemoryV4Repository({ now: () => 1_800_000_000_000 })
     const l1 = createGraphL1Store(memoryPersistence())
     const writer = createGraphL1Writer(v4, l1, createGraphPredicateRegistry(), scope)
     const { run, fact } = fixture(0.6)
-    const pending = assessGraphClaim(run, fact, { sensitivity: 'private', sharePolicy: 'local-only' }, 1_800_000_000_000)
-    expect(pending.status).toBe('pending')
+    const automatic = assessGraphClaim(run, fact, { sensitivity: 'private', sharePolicy: 'local-only' }, 1_800_000_000_000)
+    expect(automatic.status).toBe('approved')
+    const pending = deferGraphClaim(automatic, 'User requested an identity decision')
     expect(deferGraphClaim(pending, 'Wait for source check')).toMatchObject({ status: 'pending', reason: 'Wait for source check' })
     expect(rejectGraphClaim(pending, 'Incorrect company')).toMatchObject({ status: 'rejected', reason: 'Incorrect company' })
     expect(await writer.submit(run, fact, pending, entities)).toBeUndefined()

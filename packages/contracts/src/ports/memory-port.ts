@@ -238,6 +238,10 @@ export interface AgentMemoryPort {
   remember: (content: string, scope: MemoryScope, metadata?: Record<string, unknown>) => Promise<void>
   /** Extract and persist durable facts from a completed conversation turn. */
   capture: (turn: MemoryCapture, scope: MemoryScope) => Promise<number>
+  /** Resolves after raw source/task persistence, without awaiting extraction. */
+  enqueueCapture?: (turn: MemoryCapture, scope: MemoryScope) => Promise<void>
+  beginRecallTurn?: (scope: MemoryScope) => Promise<(fragment: MemoryFragment) => boolean>
+  validateRecall?: (fragments: MemoryFragment[], scope: MemoryScope) => Promise<MemoryFragment[]>
   /** Remove a memory by id, constrained to its owner scope. */
   forget: (id: string, scope: MemoryScope) => Promise<void>
   /** Irreversibly remove a memory and compact managed persistence. */

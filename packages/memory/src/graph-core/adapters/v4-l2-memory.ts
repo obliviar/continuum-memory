@@ -60,19 +60,25 @@ export function createV4L2Memory(options: V4L2MemoryOptions) {
     save: () => { throw new Error('Native relation writes must use the authoritative repository') },
   } : options.relationPersistence!
   let checkpoint: string | undefined, core: ReturnType<typeof createV4GraphMemory> | undefined
-  const corePort = () => {
+  let fenceFingerprint = ''
+  const corePort = (visibleFacts?: readonly { id: string; version: number }[]) => {
     const disk = options.persistence.load()
-    if (!core || disk !== checkpoint) {
-      core = createV4GraphMemory({ ...options, resolveGraphAccess: id => grants.get(id) ?? options.resolveGraphAccess?.(id) })
+    const fence = graphHash(visibleFacts ?? null)
+    if (!core || disk !== checkpoint || fence !== fenceFingerprint) {
+      core = createV4GraphMemory({ ...options, resolveGraphAccess: id => grants.get(id) ?? options.resolveGraphAccess?.(id),
+        canRead: record => options.canRead(record) && (visibleFacts === undefined || !('predicate' in record)
+          || visibleFacts.some(ref => ref.id === record.id && ref.version === Math.max(...options.repository.snapshot()
+            .factVersions.filter(v => v.factId === record.id).map(v => v.version)))) })
       checkpoint = disk
+      fenceFingerprint = fence
     }
     return core
   }
   /** Trusted host write entry. A stale repository requires explicit review/rebuild, never automatic rebinding. */
-  function prepareRelations(scope: GraphScope): GraphResult<{
+  function prepareRelations(scope: GraphScope, visibleFacts?: readonly { id: string; version: number }[]): GraphResult<{
     core: ReturnType<typeof createV4GraphMemory>; repository: GraphRelationRepository; candidates: readonly GraphClaimRecord[]
   }> {
-    const port = corePort()
+    const port = corePort(visibleFacts)
     const published = port.l1.publishCurrent({ scope, operationId: randomUUID(), expectedManifestId: port.l1.snapshot()?.manifest.manifestId ?? null })
     if (!published.ok) return published
     checkpoint = options.persistence.load()
@@ -134,7 +140,7 @@ export function createV4L2Memory(options: V4L2MemoryOptions) {
           const result = await corePort().recall({ ...request, budget }); checkpoint = options.persistence.load(); return result
         }
         if (planned.value.status !== 'ready') return failure('unsupported-capability', 'Clarify the target event and relation question')
-        const prepared = prepareRelations(request.scope); if (!prepared.ok) return prepared
+        const prepared = prepareRelations(request.scope, request.visibleFacts); if (!prepared.ok) return prepared
         const { core: current, repository } = prepared.value
         const projection = current.l1.snapshot()!, relationSnapshot = repository.snapshot()
         const relationCheckpoint = relationState.load()
@@ -152,6 +158,10 @@ export function createV4L2Memory(options: V4L2MemoryOptions) {
         let candidateRefs: GraphClaimRecord['ref'][] = []
         try {
           const relationRead = createGraphRelationReadPort({ repository, isCoreViewLive: current.l1.isViewLive,
+            allowRelation: relation => request.visibleFacts === undefined || [relation.from, relation.to].every(ref => {
+              const claim = projection.semanticBundle.claims.find(c => graphHash(c.ref) === graphHash(ref))
+              return claim && request.visibleFacts!.some(f => f.id === claim.fact.id && f.version === claim.fact.version)
+            }),
             verifySources: async (refs, grant) => { const r = sources.read(refs, grant); return r.ok ? { ok: true, value: undefined } : r } })
           const bridge = createL2GraphRecallAdapter({ coreReadPort: current.l1, relationReadPort: relationRead,
             coreEvidenceReader: current.l1.evidenceReader, countTokens: options.countTokens,

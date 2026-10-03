@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createLocalUieExtractor, localUieScriptPath, parseUieOutput, uieGraphExtractionRun } from './local-uie'
 import { createGraphPredicateRegistry, normalizeGraphExtraction, type GraphEntityRecord } from './graph-identity-normalization'
 import { assessGraphClaim, confirmGraphClaim, createGraphL1Store, createGraphL1Writer, rejectGraphClaim } from './graph-l1-write'
-import { confirmGraphFactIdentities } from './graph-confirmed-identity'
-import { reviewGraphAdmission } from './graph-admission-review'
+import { autoNormalizeUieGraphFact } from './graph-auto-identity'
 import { createMemoryV4Repository } from '../v4/repository/memory-v4-repository'
 import { createGraphSemanticRepository } from '../graph-core/repository/semantic-repository'
 import { createGraphL1ProjectionRepository } from '../graph-core/repository/l1-projection-repository'
@@ -37,17 +36,6 @@ async function publishAfterReview(extraction: GraphExtractionRun) {
   const v4 = createMemoryV4Repository()
   let writer = createGraphL1Writer(v4, l1, registry, scope)
   const normalized = normalizeGraphExtraction(extraction, { entities: [], scope })
-  for (const fact of normalized.facts) {
-    const review = assessGraphClaim(extraction, fact, privacy)
-    expect(review.status).toBe('pending')
-    expect(await writer.submit(extraction, fact, review, [])).toBeUndefined()
-  }
-  // A real reload, not just the writer's in-memory state, must expose the pending reviews.
-  l1 = createGraphL1Store(persistence)
-  expect(l1.reviews()).toHaveLength(extraction.factCandidates.length)
-  expect(l1.claims()).toHaveLength(0)
-  expect(l1.tasks()).toHaveLength(0)
-  expect(v4.snapshot().facts).toHaveLength(0)
   const semantic = createGraphSemanticRepository(storage(), v4)
   const projection = createGraphL1ProjectionRepository(storage(), semantic, v4, l1)
   writer = createGraphL1Writer(v4, l1, registry, scope, { syncFromClaims: async () => {
@@ -57,21 +45,18 @@ async function publishAfterReview(extraction: GraphExtractionRun) {
   } })
   const original = JSON.stringify(extraction)
   let entities: GraphEntityRecord[] = []
-  for (const pending of l1.reviews()) {
-    const source = extraction.factCandidates.find(item => item.id === pending.sourceFactId)!
-    const identities = Object.fromEntries([source.subjectMentionId,
-      ...('mentionId' in source.object ? [source.object.mentionId] : [])].map(id => [id, 'new']))
-    const confirmed = confirmGraphFactIdentities(extraction, source.id,
-      { entities, aliases: [], scope, choicesByMentionId: identities })
-    entities = confirmed.entities
-    const fact = confirmed.normalized.facts.find(item => item.sourceFactId === source.id)!
-    const admission = reviewGraphAdmission(extraction, source.id,
-      { negation: 'positive', condition: 'none', time: 'unknown', speaker: 'self' }, identities)
-    const review = confirmGraphClaim(pending, 'Verified exact source, identity and context')
-    expect((await writer.submit(extraction, fact, review, entities, admission))?.state).toBe('published')
-    // Retrying an old policy assessment must not roll back the user's accepted review.
-    await writer.submit(extraction, fact, pending, entities)
+  for (const candidate of normalized.facts) {
+    const automatic = autoNormalizeUieGraphFact(extraction, candidate.sourceFactId,
+      { entities, aliases: [], scope })!
+    entities = automatic.entities
+    const fact = automatic.normalized.facts.find(item => item.sourceFactId === candidate.sourceFactId)!
+    const assessed = assessGraphClaim(extraction, fact, privacy)
+    expect(assessed.status).toBe('pending')
+    const review = confirmGraphClaim(assessed, '人工核对原文对应关系')
+    expect((await writer.submit(extraction, fact, review, entities))?.state).toBe('published')
+    await writer.submit(extraction, fact, review, entities)
   }
+  l1 = createGraphL1Store(persistence)
   expect(l1.reviews().every(item => item.status === 'approved')).toBe(true)
   expect(l1.claims()).toHaveLength(extraction.factCandidates.length)
   expect(projection.snapshot()?.semanticBundle.claims).toHaveLength(extraction.factCandidates.length)

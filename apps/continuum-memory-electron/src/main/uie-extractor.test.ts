@@ -90,7 +90,7 @@ describe('local UIE-base output adapter', () => {
     expect(uieReviewCandidates(text, result)).toEqual([])
   })
 
-  it('turns an explicit first-person field into a review-only memory candidate', () => {
+  it('qualifies an explicit high-confidence first-person field for ordinary auto review', () => {
     const text = '我叫张三。'
     const result = parseUieOutput(text, {
       姓名: [{ text: '张三', start: 2, end: 4, probability: 0.98 }],
@@ -98,7 +98,7 @@ describe('local UIE-base output adapter', () => {
     expect(uieReviewCandidates(text, result)).toMatchObject([
       {
         content: '用户姓名/名字：张三',
-        metadata: { predicate: 'profile.name', requiresReview: true, confidence: 0.98 },
+        metadata: { predicate: 'profile.name', requiresReview: false, confidence: 0.98 },
       },
     ])
   })

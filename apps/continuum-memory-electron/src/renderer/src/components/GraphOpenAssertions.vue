@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import type { GraphOpenAssertionRecord, OpenAssertionSearchHit } from '@continuum-memory/memory'
 
-const props = defineProps<{ ready: boolean; busy: boolean; items: GraphOpenAssertionRecord[];
+const props = defineProps<{ ready: boolean; busy: boolean; conversationId?: string; items: GraphOpenAssertionRecord[];
   sources: Array<{ id: string; text: string; sourceId: string }> }>()
 const emit = defineEmits<{ refresh: []; busy: [value: boolean] }>()
 const { ipcRenderer } = (window as any).require('electron')
@@ -19,7 +19,7 @@ async function request(channel: string, input: Record<string, unknown>, onSucces
   if (working.value || props.busy) return
   working.value = true; emit('busy', true); failed.value = false; message.value = '正在处理…'
   try {
-    const result = await ipcRenderer.invoke(channel, input)
+    const result = await ipcRenderer.invoke(channel, input, { conversationId: props.conversationId ?? 'default' })
     if (!result?.ok) throw new Error(result?.error || '操作失败。')
     onSuccess(result)
   } catch (error) {
@@ -55,8 +55,8 @@ function extract() {
 
 <template>
   <section v-if="ready" class="memory-review-panel">
-    <strong>开放关系与事件</strong>
-    <p class="field-hint">明确、低风险的原文关系可自动用于本地关联查询，无需逐条确认；本页显示列表中有 {{ automaticCount }} 条自动准入记录。不确定内容按需核实。入图不代表事实成立，同名对象不会自动合并。</p>
+    <strong>原文关联查询</strong>
+    <p class="field-hint">从开放关系与事件中查找相关原文。当前列表有 {{ automaticCount }} 条记录可自动用于本地查询；入图不代表事实成立。</p>
     <details>
     <summary>按需核对与管理开放记录（当前列表 {{ items.length }} 条）</summary>
     <div class="open-items">
@@ -72,9 +72,10 @@ function extract() {
     </div>
     </div>
     </details>
-    <input v-model="query" class="settings-input" placeholder="查询实体或信息，例如：样品 S7" maxlength="500" @keydown.enter="search" />
+    <label class="field-label" for="open-memory-query">查找相关原文</label>
+    <input id="open-memory-query" v-model="query" class="settings-input" placeholder="输入人物、对象或信息，例如：样品 S7" maxlength="500" @keydown.enter="!$event.isComposing && $event.keyCode !== 229 && search()" />
     <label class="field-hint"><input v-model="includeCandidates" type="checkbox" :disabled="busy || working" />同时显示未核实关联候选（带原文，不作为已确认事实）</label>
-    <button class="secondary-btn" :disabled="busy || working || !query.trim()" @click="search">搜索相关开放记忆</button>
+    <button class="secondary-btn" :disabled="busy || working || !query.trim()" @click="search">{{ working ? '处理中…' : '本地查询' }}</button>
     <div v-if="searchMode" class="field-hint">{{ searchMode }}；相似度仅表示相关性，不决定审核或实体身份。</div>
     <div v-for="hit in hits" :key="hit.assertion.ref.id" class="memory-review-item">
       <div>{{ hit.assertion.text }}</div>
@@ -106,4 +107,6 @@ function extract() {
 .memory-review-item > div + div { margin-top: 6px; }
 .memory-review-item button { margin-top: 8px; margin-right: 8px; }
 input, select { margin-top: 8px; }
+label.field-hint { display: flex; align-items: flex-start; gap: 6px; margin: 10px 0; }
+label.field-hint input { margin-top: 3px; flex-shrink: 0; }
 </style>

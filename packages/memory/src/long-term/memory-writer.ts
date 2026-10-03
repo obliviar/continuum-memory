@@ -221,9 +221,22 @@ export function createMemoryWriter(options: MemoryWriterOptions): MemoryWriter {
   }
 
   const writer: MemoryWriter = {
+    async enqueueCapture(turn, scope) {
+      if (captureRepository) {
+        const tasks = captureRepository.register(turn, scope, processorVersion, options.maximumSegmentCharacters)
+          .filter(task => task.status === 'pending' && task.processorVersion === processorVersion)
+        notifyCaptureSourcesChanged()
+        for (const task of tasks) void scheduleTask(task.id).catch(error => {
+          try { options.onBackgroundCaptureError?.(error, turn, scope) } catch { /* diagnostic only */ }
+        })
+      }
+      else enqueueBackground(turn, scope)
+    },
     list: store.list,
     recall: store.recall,
     recallAdaptive: store.recallAdaptive,
+    beginRecallTurn: store.beginRecallTurn,
+    validateRecall: store.validateRecall,
     remember,
     forget: store.forget,
     async purge(id, scope) {

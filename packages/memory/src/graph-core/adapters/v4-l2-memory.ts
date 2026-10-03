@@ -8,20 +8,27 @@ import { createGraphRelationRepository, createEmptyGraphRelationSnapshot, type G
 import { createGraphRelationReadPort } from '../repository/relation-read-port'
 import { createL2GraphRecallAdapter } from '../recall/l2-recall-adapter'
 import { createBoundedGraphRecall } from '../recall/bounded-graph-recall'
-import { searchDirectSemantic } from '../recall/direct-semantic'
+import { DIRECT_SEMANTIC_MIN_COSINE, searchDirectSemantic } from '../recall/direct-semantic'
+import { validL2SemanticFallback, selectL2SemanticFallback, type L2SemanticFallbackOptions } from '../recall/l2-semantic-fallback'
 import { rankL2Seeds } from '../recall/l2-seed-ranking'
 import { planGraphQuery } from '../recall/query-plan'
 import { createV4RelationSourceReader } from './v4-relation-sources'
 import { createV4RelationReview } from './v4-relation-review'
 import type { GraphAccessContext } from '../ports/graph-ports'
 import { createNativeL1ReadAdapter } from './native-l1-read-adapter'
-import { claimMatchesTime, entityCandidateNames } from './accepted-l1-input'
+import { claimMatchesTime, entityCandidateNames, entityCandidateBindings } from './accepted-l1-input'
+import type { L2EntityBinding } from '../recall/l2-entity-target'
 import { assertGraphRelationSnapshot } from '../domain/relation-core'
+import { searchEntityVectorSeeds } from '../recall/entity-vector-seeds'
+import { candidateLimit, selectRecallCandidates } from '../recall/candidate-selection'
+import { emitRecallDiagnostic, type RecallDiagnostics } from '../recall/recall-diagnostics'
 
 export const V4_L2_BUDGET = { ...V4_GRAPH_BUDGET, maxSeeds: 4, maxNodes: 32, maxEdges: 32, maxHops: 2, maxEvidenceTokens: 12000 }
 export interface V4L2MemoryOptions extends V4GraphMemoryOptions {
   /** Required for the legacy isolated L2 path; native mode reads its authoritative repository instead. */
   relationPersistence?: GraphRelationPersistence
+  /** Explicit experimental fallback; never auto-enabled by native or desktop mode. */
+  semanticFallback?: L2SemanticFallbackOptions
   /** When configured, the native reviewed repository is authoritative. No fallback to the legacy file. */
   nativeRelations?: {
     projection: () => GraphProjectionSnapshot | undefined
@@ -110,6 +117,11 @@ export function createV4L2Memory(options: V4L2MemoryOptions) {
     async recall(request) {
       const start = performance.now()
       try {
+        const retrievalMode = options.retrievalMode ?? 'hybrid'
+        const vectorMode = retrievalMode === 'vector' || retrievalMode === 'entity-vector'
+        if (!['entity-vector', 'vector', 'hybrid', 'lexical'].includes(retrievalMode)) return failure('invalid-request', 'Unknown retrieval mode')
+        if (vectorMode && (!options.semantic || (retrievalMode === 'entity-vector' && !options.entitySemantic)))
+          return failure('not-ready', 'Vector graph recall requires the local semantic model and the requested indexes')
         if (request.protocolVersion !== 'memory-graph/v1' || !request.recallId?.trim() || !request.query?.trim() || request.query.length > 2000
           || !Array.isArray(request.sharePolicies) || !Array.isArray(request.sensitivities) || !request.temporal
           || request.mode !== 'direct-only' || request.expectedHierarchyManifestId || !request.budget
@@ -138,8 +150,12 @@ export function createV4L2Memory(options: V4L2MemoryOptions) {
         const access: GraphAccessContext = { accessContextId: randomUUID(), authorizationVersion: randomUUID(),
           scope: structuredClone(request.scope), sharePolicies: [...request.sharePolicies], sensitivities: [...request.sensitivities] }
         grants.set(access.accessContextId, access)
+        const diagnostic = (stage: Parameters<RecallDiagnostics>[0]['stage'], factIds: string[], details: string[] = []) =>
+          emitRecallDiagnostic(options.diagnostics, { recallId: request.recallId, route: 'L2', stage,
+            elapsedMs: performance.now() - start, factIds, details })
         let semanticIncomplete = false
         const seedSearchScope: string[] = []
+        let candidateRefs: GraphClaimRecord['ref'][] = []
         try {
           const relationRead = createGraphRelationReadPort({ repository, isCoreViewLive: current.l1.isViewLive,
             allowRelation: relation => request.visibleFacts === undefined || [relation.from, relation.to].every(ref => {
@@ -152,24 +168,81 @@ export function createV4L2Memory(options: V4L2MemoryOptions) {
             readRelationSources: async (_view, refs) => sources.read(refs, access),
             searchSeeds: async (search, view) => {
               const eligible: { claim: GraphClaimRecord; fact: MemoryFactV4 }[] = []
+              const catalog: L2EntityBinding[] = []
+              const bindings = new Map<string, L2EntityBinding[]>()
               const facts = new Map(options.repository.snapshot().facts.map(f => [f.id, f]))
               // Eligibility is checked by the pinned core reader; denied/time-incompatible records never enter vector search.
               for (const claim of prepared.value.candidates) {
                 if (!access.sharePolicies.includes(claim.sharePolicy) || !access.sensitivities.includes(claim.sensitivity)
-                  || !claimMatchesTime(claim, search.temporal)) continue
+                  || claim.review.status !== 'accepted' || claim.review.reviewedAt > search.temporal.knownAt
+                  || claim.transactionTime.recordedAt > search.temporal.knownAt || claim.transactionTime.closedAt !== null) continue
+                const refs = entityCandidateBindings(claim, projection, access.sharePolicies, access.sensitivities, search.temporal.knownAt)
+                bindings.set(graphHash(claim.ref), refs); catalog.push(...refs)
+                if (!claimMatchesTime(claim, search.temporal)) continue
                 const fact = facts.get(claim.fact.id)
                 if (fact) eligible.push({ claim, fact })
               }
-              const semantic = await searchDirectSemantic(search.query, [...new Map(eligible.map(e => [e.fact.id, e.fact])).values()], options.semantic,
+              const fallback = retrievalMode === 'hybrid' ? options.semanticFallback : undefined
+              diagnostic('eligibility', eligible.map(entry => entry.fact.id))
+              const fallbackValid = fallback && validL2SemanticFallback(fallback, options.semantic)
+              const semantic = retrievalMode === 'entity-vector' ? await searchEntityVectorSeeds({
+                query: search.query, projection, entries: eligible, scope: search.scope, temporal: search.temporal,
+                sharePolicies: access.sharePolicies, sensitivities: access.sensitivities,
+                entitySemantic: options.entitySemantic, claimSemantic: options.semantic,
+                claimCandidateMode: options.entityClaimCandidates ?? 'wide',
+                entityLimit: request.budget.maxSeeds === 0 ? 0 : Math.min(options.entityCandidateLimit ?? 4, request.budget.maxNodes),
+                onLocalCandidates: ids => diagnostic('entity-entry', [...ids]),
+                remainingMs: request.budget.maxElapsedMs - (performance.now() - start),
+                canReadEntity: entity => sources.read(entity.provenance.sources, access).ok,
+              }) : await searchDirectSemantic(search.query, [...new Map(eligible.map(e => [e.fact.id, e.fact])).values()],
+                retrievalMode === 'lexical' ? undefined : fallbackValid ? { ...options.semantic!, minCosine: fallback.minCosine } : options.semantic,
                 request.budget.maxElapsedMs - (performance.now() - start))
+              if (vectorMode && semantic.incomplete && !semantic.hits.length)
+                return failure('not-ready', 'Vector candidate search unavailable or incomplete; no lexical fallback was used')
               semanticIncomplete ||= semantic.incomplete
               const byClaim = new Map(eligible.map(e => [graphHash(e.claim.ref), e]))
-              const ranked = rankL2Seeds(search.query, search.scope, eligible.map(({ fact, claim }) => ({
+              const documents = eligible.map(({ fact, claim }) => ({
                 id: graphHash(claim.ref), factId: fact.id, text: fact.canonicalText, predicate: fact.predicate,
                 entityNames: entityCandidateNames(claim, projection, access.sharePolicies, access.sensitivities),
-              })), semantic.hits, request.budget.maxSeeds)
-              seedSearchScope.push(...ranked.scope, ...semantic.scope)
-              const items = ranked.items.map(({ id, ...hit }) => ({ ...hit, ref: byClaim.get(id)!.claim.ref }))
+                entityBindings: bindings.get(graphHash(claim.ref)),
+              }))
+              const wideLocal = retrievalMode === 'entity-vector' && options.entityClaimCandidates !== 'threshold'
+              const thresholdHits = semantic.hits.filter(hit => hit.score >= (options.semantic?.minCosine ?? DIRECT_SEMANTIC_MIN_COSINE))
+              const normalHits = wideLocal ? semantic.hits : thresholdHits
+              const poolLimit = candidateLimit(options.candidateSelection)
+              let ranked = rankL2Seeds(search.query, search.scope, documents, normalHits, poolLimit, catalog,
+                retrievalMode === 'entity-vector' ? 'vector' : retrievalMode)
+              if (fallback) {
+                if (!fallbackValid) seedSearchScope.push('semantic-fallback:invalid-config')
+                else if (ranked.items.length) seedSearchScope.push('semantic-fallback:not-needed')
+                else if (request.budget.maxSeeds === 0) seedSearchScope.push('semantic-fallback:seed-budget-zero')
+                else {
+                  const extra = selectL2SemanticFallback(semantic, fallback)
+                  seedSearchScope.push(...extra.scope)
+                  if (extra.hits.length) {
+                    const proposed = rankL2Seeds(search.query, search.scope, documents, extra.hits, poolLimit, catalog)
+                    seedSearchScope.push(proposed.items.length ? 'semantic-fallback:admitted' : 'semantic-fallback:target-mismatch')
+                    if (proposed.items.length) ranked = proposed
+                  }
+                }
+              }
+              diagnostic('retrieval', ranked.items.map(hit => byClaim.get(hit.id)!.fact.id), [...ranked.scope, ...semantic.scope])
+              const selection = await selectRecallCandidates({ query: search.query,
+                admissibleIds: wideLocal ? new Set(ranked.items.filter(hit => thresholdHits.some(h => h.id === byClaim.get(hit.id)!.fact.id)).map(hit => hit.id)) : undefined,
+                hits: ranked.items.map(hit => ({ id: hit.id, score: hit.relevance })),
+                text: id => byClaim.get(id)!.fact.canonicalText, options: options.candidateSelection,
+                finalLimit: request.budget.maxSeeds, remainingMs: request.budget.maxElapsedMs - (performance.now() - start) })
+              const original = new Map(ranked.items.map(hit => [hit.id, hit]))
+              seedSearchScope.push(...ranked.scope.filter(s => !s.startsWith('seed-selected:')), ...semantic.scope, ...selection.scope,
+                `seed-selected:${selection.selected.length}`, ...(selection.truncated ? ['seed-top-k-truncated'] : []))
+              diagnostic('candidate-pool', selection.candidates.map(hit => byClaim.get(hit.id)!.fact.id), selection.scope)
+              diagnostic('selection', selection.selected.map(hit => byClaim.get(hit.id)!.fact.id), selection.scope)
+              candidateRefs = selection.candidates.map(hit => byClaim.get(hit.id)!.claim.ref)
+              const reranked = selection.scope.some(s => s.startsWith('reranker:applied:')) || !!options.candidateSelection?.evidenceSelector
+              const items = selection.selected.map((hit, index) => ({ route: original.get(hit.id)!.route,
+                // The seed port requires bounded, descending priority, not calibrated probabilities.
+                relevance: reranked ? 1 - index / Math.max(1, selection.selected.length) : original.get(hit.id)!.relevance,
+                ref: byClaim.get(hit.id)!.claim.ref }))
               const read = await view.resolveClaims(items.map(i => i.ref)); if (!read.ok) return read
               return { ok: true, value: { items, scanned: eligible.length, completion: 'complete' } }
             } })
@@ -210,14 +283,14 @@ export function createV4L2Memory(options: V4L2MemoryOptions) {
             trace: { recallId: request.recallId, manifestId: projection.manifest.manifestId, policyVersion: V4_SCALAR_MAPPING_POLICY,
               temporal: recalled.value.queryPlan.temporal, completeness: 'incomplete',
               searchScope: ['current-verified-L1', 'reviewed-L2', 'source-asserted-relations', 'no-rule-proofs', 'no-exhaustive-conflict-audit',
-                ...seedSearchScope,
+                `retrieval-mode:${retrievalMode}`, 'relation-read:adjacency-index', ...seedSearchScope,
                 options.nativeRelations ? 'native-reviewed-L2' : 'legacy-reviewed-L2',
                 `question:${recalled.value.queryPlan.questionType}`, `direction:${recalled.value.queryPlan.traversal?.direction}`,
                 `relations:${relationSnapshot.manifest.manifestId}`, ...(semanticIncomplete ? ['semantic-incomplete'] : []),
                 ...(!relations.length ? ['no-eligible-relation-evidence'] : [])],
               stopReason: !traversal ? 'no-eligible-seeds'
                 : traversal.stopReason === 'depth-limit' || traversal.stopReason === 'hop-budget' ? 'hop-budget' : 'exhausted-within-scope',
-              candidateRefs: recalled.value.seeds.items.map(s => s.ref), evaluatedRefs: refs, selectedRefs: refs, rejected: [],
+              candidateRefs, evaluatedRefs: refs, selectedRefs: refs, rejected: [],
               usage: { seeds: recalled.value.seeds.items.length, nodes: claims.length, edges: traversal?.scannedEdges ?? 0,
                 maxHopReached: Math.max(0, ...traversal?.paths.map(p => p.depth) ?? []), ruleBindings: 0, proofSteps: 0,
                 elapsedMs: performance.now() - start, evidenceTokens: 0 } } }
@@ -229,6 +302,8 @@ export function createV4L2Memory(options: V4L2MemoryOptions) {
             || relationState.load() !== relationCheckpoint)
             return failure('stale-projection', 'Source or relation publication changed before delivery')
           const output = { ...result, trace: { ...result.trace, usage: { ...result.trace.usage, evidenceTokens: cost } } }
+          diagnostic('delivery', claims.flatMap(claim => claim.kind === 'direct' ? [claim.fact.id] : []),
+            [`relations-returned:${relations.length}`, output.trace.stopReason])
           if (receipts.size >= 128) receipts.delete(receipts.keys().next().value!)
           receipts.set(request.recallId, structuredClone(output)); return { ok: true, value: output }
         } finally { grants.delete(access.accessContextId) }

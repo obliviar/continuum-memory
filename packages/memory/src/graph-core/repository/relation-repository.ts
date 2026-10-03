@@ -24,6 +24,8 @@ export interface GraphRelationRepositoryOptions {
 
 export interface GraphRelationRepository {
   snapshot: () => GraphRelationSnapshot
+  /** Avoid copying all relations for each page's live-manifest check. */
+  currentManifest?: () => GraphRelationSnapshot['manifest']
   publish: (request: {
     readonly operationId: string
     readonly expectedManifestId: string
@@ -68,6 +70,7 @@ export function createGraphRelationRepository(options: GraphRelationRepositoryOp
   }
 
   return {
+    currentManifest: () => clone({ ...current.manifest, ...(!unchanged() ? { state: 'stale' as const } : {}) }),
     snapshot: () => {
       const snapshot = clone(current)
       return unchanged() ? snapshot : { ...snapshot, manifest: { ...snapshot.manifest, state: 'stale' } }

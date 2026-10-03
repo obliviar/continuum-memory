@@ -15,6 +15,7 @@ import {
   createEncryptedFilePersistence,
   createEncryptedGraphL1Persistence,
   createV4L2Memory,
+  prepareEntityVectors,
   createEncryptedGraphRelationPersistence,
   diagnoseV4GraphInputs,
   V4_L2_BUDGET,
@@ -541,6 +542,8 @@ let memory: ReturnType<typeof createMemoryWriter> | undefined
 let memoryPersistence: EncryptedMemoryPersistence | undefined
 let memoryEmbeddingIndex: MemoryEmbeddingIndex | undefined
 let memoryV4EmbeddingIndex: MemoryEmbeddingIndex | undefined
+// Separate in-memory derived cache: fact-index reconciliation must not erase Entity vectors.
+let graphEntityEmbeddingIndex = createMemoryEmbeddingIndex()
 let memoryV4SemanticBackgroundIndex: MemoryV4SemanticBackgroundIndex | undefined
 let memoryInitializationError = ''
 let memoryLegacyMigrated = false
@@ -1167,6 +1170,7 @@ function initializeMemory(): void {
   memoryEmbeddingIndex = undefined
   openContextVectorCache.clear()
   memoryV4EmbeddingIndex = undefined
+  graphEntityEmbeddingIndex = createMemoryEmbeddingIndex()
   memoryV4SemanticBackgroundIndex = undefined
   memoryV4Shadow = undefined
   memoryV4Repository = undefined
@@ -1942,6 +1946,16 @@ async function prepareDesktopGraphRecall(flushCaptures: () => Promise<void>): Pr
       if (repository !== memoryV4Repository || semantic !== graphSemanticRepository || projection !== graphL1ProjectionRepository)
         throw new Error('Graph memory reloaded during L1 synchronization')
       await queueGraphL2Sync()
+      if (memorySemanticActive) {
+        const entityProjection = projection.snapshot(), entityIndex = graphEntityEmbeddingIndex
+        if (entityProjection?.manifest.state === 'ready') await prepareEntityVectors({
+          bundle: entityProjection.semanticBundle, index: entityIndex, model: SEMANTIC_MEMORY_FINGERPRINT,
+          embed: text => semanticMemory.embed(text),
+          isCurrent: () => memorySemanticActive && graphEntityEmbeddingIndex === entityIndex
+            && graphL1ProjectionRepository === projection
+            && projection.snapshot()?.manifest.manifestId === entityProjection.manifest.manifestId,
+        })
+      }
     } })
 }
 
@@ -1950,6 +1964,10 @@ function createDesktopGraphMemory() {
   return repository && l1Persistence
     ? createV4L2Memory({
         repository, persistence: l1Persistence,
+        // Trusted launch-time controls for comparison; ordinary requests cannot switch retrieval policies.
+        retrievalMode: process.env.CONTINUUM_GRAPH_RETRIEVAL === 'hybrid' ? 'hybrid'
+          : process.env.CONTINUUM_GRAPH_RETRIEVAL === 'lexical' ? 'lexical'
+            : process.env.CONTINUUM_GRAPH_RETRIEVAL === 'vector' ? 'vector' : 'entity-vector',
         includeOwnedSessions: true,
         nativeRelations: { projection: () => graphL1ProjectionRepository?.snapshot(), repository: () => graphRelationRepository },
         acceptedBundle: () => selectRetrievableGraphBundle(graphL1ProjectionRepository?.snapshot()?.semanticBundle, graphL1Store?.tasks() ?? []),
@@ -1963,6 +1981,12 @@ function createDesktopGraphMemory() {
         countTokens: countGraphTokens,
         utcOffsetMinutes: -new Date().getTimezoneOffset(),
         ...(memorySemanticActive && memoryV4EmbeddingIndex ? {
+          entitySemantic: {
+            model: SEMANTIC_MEMORY_FINGERPRINT, dimensions: SEMANTIC_MEMORY_EXPECTED_DIMENSION,
+            index: { get: (id: string, model: string, content: string) =>
+              memorySemanticActive ? graphEntityEmbeddingIndex.get(id, model, content) : undefined },
+            embedQuery: prepareMemoryV4SemanticQuery,
+          },
           semantic: {
             model: SEMANTIC_MEMORY_FINGERPRINT,
             dimensions: SEMANTIC_MEMORY_EXPECTED_DIMENSION,

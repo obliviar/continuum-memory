@@ -2,6 +2,8 @@ import type { Embedder } from '@continuum-memory/contracts'
 import { createMemoryEmbeddingIndex } from '../../long-term/embedding-index'
 import { DIRECT_SEMANTIC_MIN_COSINE } from '../recall/direct-semantic'
 import { runDirectRecallRegression } from './direct-recall-regression'
+import { runDirectStructuredRegression } from './direct-structured-regression'
+import type { MemoryV4Snapshot } from '../../v4/domain/types'
 
 type RecallReport = Awaited<ReturnType<typeof runDirectRecallRegression>>
 function summarize(report: RecallReport) {
@@ -27,39 +29,46 @@ export async function compareDirectRecallModel(embedder: Embedder, options: {
   if (!thresholds.length || thresholds.some(t => !Number.isFinite(t) || t <= 0 || t > 1)
     || !thresholds.includes(DIRECT_SEMANTIC_MIN_COSINE))
     throw new Error('Thresholds must be in (0, 1] and include the production default')
-  const baseline = await runDirectRecallRegression()
+  const baseline = await runDirectRecallRegression({ structuredRecall: false })
+  const structuredBaseline = await runDirectRecallRegression()
   const factVectors = new Map<string, number[]>()
   const pending = new Set<Promise<unknown>>()
   const drain = () => Promise.allSettled([...pending])
   let factEmbeddingMs = 0
   const trials = []
+  const prepareSemantic = async (snapshot: MemoryV4Snapshot, minCosine: number) => {
+    await drain()
+    const index = createMemoryEmbeddingIndex()
+    for (const fact of snapshot.facts) {
+      let vector = factVectors.get(fact.canonicalText)
+      if (!vector) {
+        const start = performance.now()
+        vector = await embedder.embed(fact.canonicalText)
+        factEmbeddingMs += performance.now() - start
+        factVectors.set(fact.canonicalText, vector)
+      }
+      index.putBatch([{ memoryId: fact.id, model: embedder.model, content: fact.canonicalText, vector }])
+    }
+    return { model: embedder.model, dimensions: embedder.dimensions, index, minCosine,
+      embedQuery: (query: string) => {
+        // Live queries retain the production timeout; drain timed-out operations before the next case.
+        const operation = Promise.resolve().then(() => embedder.embed(query))
+          .then(vector => ({ model: embedder.model, vector }))
+        pending.add(operation)
+        void operation.then(() => pending.delete(operation), () => pending.delete(operation))
+        return operation
+      } }
+  }
+  const run = (minCosine: number, structuredRecall: boolean) => runDirectRecallRegression({ structuredRecall,
+    prepareSemantic: snapshot => prepareSemantic(snapshot, minCosine) })
+  let vectorOnlyControl: RecallReport
+  let structuredChecks: Awaited<ReturnType<typeof runDirectStructuredRegression>>
   try {
+    options.onProgress?.('Evaluating keyword + vector control (structured route disabled)')
+    vectorOnlyControl = await run(DIRECT_SEMANTIC_MIN_COSINE, false)
     for (const minCosine of thresholds) {
       options.onProgress?.(`Evaluating cosine >= ${minCosine}`)
-      const report = await runDirectRecallRegression({ prepareSemantic: async snapshot => {
-        // A timed-out inference must finish before the next trial; no overlapped timing samples.
-        await drain()
-        const index = createMemoryEmbeddingIndex()
-        for (const fact of snapshot.facts) {
-          let vector = factVectors.get(fact.canonicalText)
-          if (!vector) {
-            const start = performance.now()
-            vector = await embedder.embed(fact.canonicalText)
-            factEmbeddingMs += performance.now() - start
-            factVectors.set(fact.canonicalText, vector)
-          }
-          index.putBatch([{ memoryId: fact.id, model: embedder.model, content: fact.canonicalText, vector }])
-        }
-        return { model: embedder.model, dimensions: embedder.dimensions, index, minCosine,
-          embedQuery: query => {
-            // Query vectors are deliberately not cached: exercise the runtime timeout as well.
-            const operation = Promise.resolve().then(() => embedder.embed(query))
-              .then(vector => ({ model: embedder.model, vector }))
-            pending.add(operation)
-            void operation.then(() => pending.delete(operation), () => pending.delete(operation))
-            return operation
-          } }
-      } })
+      const report = await run(minCosine, true)
       const comparison = report.cases.map((row, i) => {
         const old = baseline.cases[i]!
         if (old.id !== row.id || JSON.stringify(old.expected) !== JSON.stringify(row.expected))
@@ -72,8 +81,10 @@ export async function compareDirectRecallModel(embedder: Embedder, options: {
           change: !old.qualityPassed && row.qualityPassed ? 'improved'
             : old.qualityPassed && !row.qualityPassed ? 'regressed' : 'unchanged' }
       })
-      trials.push({ minCosine, summary: summarize(report), comparison })
+      trials.push({ minCosine, structuredRecall: true, summary: summarize(report), comparison })
     }
+    options.onProgress?.('Checking structured paraphrases and boundaries with the same local provider')
+    structuredChecks = await runDirectStructuredRegression(snapshot => prepareSemantic(snapshot, DIRECT_SEMANTIC_MIN_COSINE))
   } finally { await drain() }
   const current = trials.find(trial => trial.minCosine === DIRECT_SEMANTIC_MIN_COSINE)!
   return {
@@ -82,9 +93,14 @@ export async function compareDirectRecallModel(embedder: Embedder, options: {
     timing: 'warm-model; prepared-fact-vectors; live-query-embedding; initialization-excluded; single-pass',
     factPreparation: { uniqueTexts: factVectors.size, embeddingMs: factEmbeddingMs },
     baseline: { summary: summarize(baseline), cases: baseline.cases }, trials,
+    structuredBaseline: { summary: summarize(structuredBaseline), cases: structuredBaseline.cases },
+    structuredChecks,
+    vectorOnlyControl: { minCosine: DIRECT_SEMANTIC_MIN_COSINE, structuredRecall: false,
+      summary: summarize(vectorOnlyControl), cases: vectorOnlyControl.cases },
     productionThreshold: DIRECT_SEMANTIC_MIN_COSINE,
     qualityGatePassed: current.summary.exactMatches === current.summary.tests
-      && current.summary.semanticUsed > 0 && current.summary.semanticDegraded === 0,
-    limitation: 'Small synthetic development set; threshold sweep is exploratory, not held-out validation. Production settings are unchanged.',
+      && current.summary.semanticUsed > 0 && current.summary.semanticDegraded === 0
+      && structuredChecks.checks.every(check => check.passed),
+    limitation: 'Small synthetic development set; no held-out quality claim. Trials include the structured route; use the controls to attribute gains. Thresholds are unchanged.',
   }
 }

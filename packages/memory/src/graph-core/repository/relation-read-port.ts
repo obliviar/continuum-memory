@@ -16,6 +16,7 @@ import type {
   GraphRelationReadView,
 } from '../ports/graph-relation-ports'
 import type { GraphRelationRepository } from './relation-repository'
+import { createL2AdjacencyIndex } from '../projection/l2-adjacency-index'
 
 export interface GraphRelationReadPortOptions {
   readonly repository: GraphRelationRepository
@@ -49,12 +50,15 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
       const cursorSecret = randomBytes(32)
       let closed = false
       let scannedTotal = 0
+      const byRef = new Map(snapshot.relations.map(relation => [refKey(relation.ref), relation]))
+      const adjacency = createL2AdjacencyIndex(projectGraphRelationEdges(snapshot, coreView.context.temporal.knownAt))
+      const pages = new Map<string, readonly GraphRelationEdge[]>()
 
       async function checkLive(): Promise<GraphResult<void>> {
         if (closed || !await coreViewIsLive(options, coreView.viewId))
           return error('view-closed', 'Relation or core view is closed')
-        const current = options.repository.snapshot()
-        if (current.manifest.state !== 'ready' || current.manifest.manifestId !== pinnedId)
+        const current = options.repository.currentManifest?.() ?? options.repository.snapshot().manifest
+        if (current.state !== 'ready' || current.manifestId !== pinnedId)
           return error('stale-projection', 'Relation snapshot changed after view open')
         return { ok: true, value: undefined }
       }
@@ -82,7 +86,6 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
           const live = await checkLive()
           if (!live.ok)
             return live
-          const byRef = new Map(snapshot.relations.map(relation => [refKey(relation.ref), relation]))
           const result: GraphRelationRecord[] = []
           for (const ref of refs) {
             const relation = byRef.get(refKey(ref))
@@ -120,13 +123,13 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
             offset = cursor.offset
             scannedBefore = cursor.scanned
           }
-          const byRef = new Map(snapshot.relations.map(relation => [refKey(relation.ref), relation]))
-          const eligible = projectGraphRelationEdges(snapshot, coreView.context.temporal.knownAt)
+          const eligible = pages.get(fingerprint) ?? adjacency.candidates(query.claim)
             .filter(edge => matchesNeighbor(edge, query)
               && (!options.allowRelation || options.allowRelation(byRef.get(refKey(edge.relation))!))
               && matchesValidTime(edge.validTime, coreView.context.temporal)
               && authorizedByPolicy(byRef.get(refKey(edge.relation))!, coreView.context.access))
             .sort((a, b) => a.id.localeCompare(b.id))
+          pages.set(fingerprint, eligible)
           if (offset > eligible.length)
             return error('invalid-request', 'Relation cursor is outside the result set')
           const remaining = coreView.context.budget.maxHops === 0 ? 0 : Math.max(0, coreView.context.budget.maxEdges - scannedTotal)
@@ -154,7 +157,7 @@ export function createGraphRelationReadPort(options: GraphRelationReadPortOption
               : { items: detachedItems, scanned: count, completion: 'more', nextCursor }
           return { ok: true, value: page }
         },
-        async close() { closed = true },
+        async close() { closed = true; pages.clear() },
       }
       return { ok: true, value: view }
     },

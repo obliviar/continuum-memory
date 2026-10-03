@@ -16,6 +16,24 @@ afterEach(() => {
 })
 
 describe('persistent vector store', () => {
+  it('keeps recall visibility independent of the 1000-row management list limit', async () => {
+    const scope = { ownerId: 'scale-owner', agentId: 'agent' }, store = createVectorStore()
+    const old = (await store.remember('历史条目零号', scope, { memoryKey: 'scale-0', cardinality: 'single', sourceMessageIds: ['old-source'] }))!
+    for (let i = 1; i <= 1001; i++)
+      await store.remember(`独立历史条目${i}`, scope, { memoryKey: `scale-${i}`, cardinality: 'single' })
+    expect(await store.list(scope, 20_000)).toHaveLength(1000)
+    const visible = await store.beginRecallTurn(scope)
+    expect(visible(old)).toBe(true)
+    const other = (await store.remember('其他用户的条目', { ownerId: 'other', agentId: 'agent' }))!
+    expect(visible(other)).toBe(false)
+    expect(await store.validateRecall([old], scope)).toEqual([old])
+    expect(store.blockedSourceMessageIds(scope).has('old-source')).toBe(false)
+    await store.update(old.id, scope, { sharePolicy: 'local-only' })
+    expect((await store.validateRecall([old], scope))[0]?.sharePolicy).toBe('local-only')
+    expect(store.blockedSourceMessageIds(scope).has('old-source')).toBe(true)
+    expect(store.blockedSourceMessageIds({ ownerId: 'other', agentId: 'agent' }).has('old-source')).toBe(false)
+  })
+
   it('persists content edits as update commits and keeps suppressed memories out of recall', async () => {
     const commits: V3MemoryCommit[] = []
     const store = createVectorStore({ onCommittedChange: commit => commits.push(commit) })

@@ -5,6 +5,31 @@ import { createAgentRuntime } from './agent-runtime'
 import { createSessionManager } from '../session/session-manager'
 
 describe('source evidence in model messages', () => {
+  it('allows a bounded document workflow with six tool steps to finish its answer', async () => {
+    let round = 0, executed = 0
+    const runtime = createAgentRuntime({ persona: { systemPrompt: 'test', model: 'test' }, session: createSessionManager(10), maxToolRounds: 10,
+      tools: { hasTools: () => true, definitions: () => [], execute: async () => { executed++; return { toolCallId: '', content: 'step completed' } } },
+      llm: { async *stream() {
+        if (round++ < 6) yield { type: 'tool-call', id: `step-${round}`, name: 'document_step', arguments: '{}' } as const
+        else yield { type: 'text-delta', text: 'document ready' } as const
+      } },
+    })
+    expect((await runtime.send('s', '创建文档')).text).toBe('document ready')
+    expect(executed).toBe(6)
+  })
+  it('uses a selected workflow for one turn without storing its instructions as chat or memory evidence', async () => {
+    const session = createSessionManager(10), prompts: any[][] = [], captures: string[] = []
+    const runtime = createAgentRuntime({ persona: { systemPrompt: 'test', model: 'test' }, session,
+      memory: { recall: async () => [], enqueueCapture: async (input: { userMessage: string }) => { captures.push(input.userMessage) } } as unknown as AgentMemoryPort,
+      llm: { async *stream(_model, messages) { prompts.push(structuredClone(messages)); yield { type: 'text-delta', text: 'ok' } as const } },
+    })
+    await runtime.send('s', '总结这段文本', { skill: { id: 'builtin:summary', payload: 'WORKFLOW_GUIDANCE_ONLY' } })
+    expect(prompts[0]?.some(m => m.role === 'tool' && m.name === 'use_skill' && m.content === 'WORKFLOW_GUIDANCE_ONLY')).toBe(true)
+    expect(captures).toEqual(['总结这段文本'])
+    expect(JSON.stringify(session.getSessionMessages('s'))).not.toContain('WORKFLOW_GUIDANCE_ONLY')
+    await runtime.send('s', '下一轮普通问题')
+    expect(JSON.stringify(prompts[1])).not.toContain('WORKFLOW_GUIDANCE_ONLY')
+  })
   it('retries a transient published-view conflict without waiting for extraction or fabricating graph facts', async () => {
     let attempts = 0
     const memory = { capture: async () => 0, graph: { recall: async () => { attempts++; return {

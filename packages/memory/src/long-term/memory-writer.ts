@@ -235,6 +235,8 @@ export function createMemoryWriter(options: MemoryWriterOptions): MemoryWriter {
     list: store.list,
     recall: store.recall,
     recallAdaptive: store.recallAdaptive,
+    beginRecallTurn: store.beginRecallTurn,
+    validateRecall: store.validateRecall,
     remember,
     forget: store.forget,
     async purge(id, scope) {

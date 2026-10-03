@@ -18,7 +18,7 @@ describe('memory recall permission notice', () => {
   it('distinguishes active raw retrieval from optional Claim publication', async () => {
     const html = await render()
     expect(html).toContain('已开启，无需逐条审核')
-    expect(html).toContain('未发布 Claim 不会单独阻止原文召回')
+    expect(html).toContain('未发布正式事实（L1）不会单独阻止原文召回')
     expect(html).toContain('已开启不代表每条来源都可发送')
     expect(html).not.toContain('<button')
   })
@@ -47,7 +47,7 @@ describe('memory recall permission notice', () => {
       expect(opening).toBeDefined()
       expect(opening).not.toMatch(/\bopen\b/)
     }
-    expect(app).toContain('此 private 是 UIE 正式 Claim 的默认本地隔离策略')
+    expect(app).toContain('此 private 是 UIE 正式事实（L1）的默认本地隔离策略')
     expect(app).not.toContain('原文独立保存，不参与记忆召回')
   })
 })

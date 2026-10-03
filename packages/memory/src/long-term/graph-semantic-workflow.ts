@@ -304,7 +304,8 @@ export function createGraphSemanticWorkflow(options: {
         && item.configFingerprint === legacy
       for (const item of items.filter(i => (!readyOnly || (i.status === 'ready'
         && (i.configFingerprint === configFingerprint() || qualifierRepair(i)) && current(i)))
-        && ((['pending', 'failed'].includes(i.status) && i.attempts < 3)
+        && ((['pending', 'failed'].includes(i.status)
+          && (i.attempts < 3 || i.configFingerprint !== configFingerprint()))
         || (i.status === 'ready' && i.decisions.some(d => d.verdict === 'supported')))).slice(0, Math.max(0, Math.min(5, limit)))) {
         if (item.status === 'ready' && (item.configFingerprint === configFingerprint() || qualifierRepair(item)) && current(item)) {
           const replacement = { ...item, run: { ...item.run, id: randomUUID() }, updatedAt: now() }

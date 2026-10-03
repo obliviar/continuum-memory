@@ -271,6 +271,27 @@ describe('API semantic review, mappings and explicit clarification', () => {
     expect(registry.definitions()).toHaveLength(0)
   })
 
+  it.each(['model', 'baseURL'] as const)('retries exhausted failures after changing %s across restart', async (field) => {
+    const registry = createBasicGraphRelationRegistry(storage(), scope), persistence = storage()
+    const mutableConfig = { ...config, baseURL: 'https://first.invalid/v1' }
+    let calls = 0
+    const settings = { persistence, registry, getConfig: () => ({ ...mutableConfig }), canUse: () => true,
+      complete: async () => { calls++; return calls <= 3 ? 'invalid' : supported() } }
+    const workflow = createGraphSemanticWorkflow(settings)
+    await workflow.process(run()); await workflow.retry(); await workflow.retry()
+    expect(workflow.list()[0]?.attempts).toBe(3)
+    const restarted = createGraphSemanticWorkflow(settings)
+    await restarted.retry()
+    expect(calls).toBe(3)
+    mutableConfig[field] = field === 'model' ? 'second' : 'https://second.invalid/v1'
+    // Startup recovery only republishes compatible ready items; explicit retry evaluates the new config.
+    expect(await restarted.retry(5, true)).toEqual([])
+    const recovered = await restarted.retry()
+    expect(calls).toBe(4)
+    expect(recovered[0]?.semanticReview?.candidateIds).toEqual(['r'])
+    expect(restarted.list()[0]).toMatchObject({ status: 'ready', attempts: 1 })
+  })
+
   it('limits failures to three attempts across restart and never publishes invalid semantic output', async () => {
     const registry = createBasicGraphRelationRegistry(storage(), scope), persistence = storage()
     const settings = { persistence, registry, getConfig: () => config, canUse: () => true, complete: async () => 'invalid' }

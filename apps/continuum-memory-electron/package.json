@@ -37,6 +37,10 @@
     ],
     "extraResources": [
       {
+        "from": "resources/document_tools.py",
+        "to": "document_tools.py"
+      },
+      {
         "from": "../../packages/memory/resources/uie_extract.py",
         "to": "uie_extract.py"
       },

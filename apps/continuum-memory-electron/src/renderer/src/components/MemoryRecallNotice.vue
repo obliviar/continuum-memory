@@ -15,7 +15,11 @@ const active = computed(() => props.memoryEnabled && props.enabled && props.remo
       <p class="field-hint">尚未授权将普通历史原文发送给当前 API。这不是图事实审核问题；开启后，获准原文可直接参与关联召回。</p>
       <button class="secondary-btn" :disabled="busy" @click="emit('enable')">授权向当前 API 发送普通历史原文并开启召回</button>
     </template>
-    <p v-else class="field-hint">关系只用于寻找已有原文，不生成新事实。实体身份、低模型分数或未发布 Claim 不会单独阻止原文召回；隐私、密钥、拒绝、删除和分享限制仍会排除来源。已开启不代表每条来源都可发送或每次都会命中。</p>
-    <p class="field-hint">下面的规范事实确认属于可选管理，不是原文召回的前置步骤；不会自动合并同名实体或把未确认关系当作事实。</p>
+    <p v-else class="field-hint">聊天时可查找获准的历史原文，并发送给当前 API。已开启不代表每条来源都可发送或每次都会命中。</p>
+    <details class="field-hint">
+      <summary>了解原文召回与事实审核的区别</summary>
+      <p>关系用于寻找已有原文。实体身份、低模型分数或未发布正式事实（L1）不会单独阻止原文召回；隐私、密钥、拒绝、删除和分享限制仍会排除来源。</p>
+      <p>事实确认属于可选管理。系统不会自动合并同名实体，也不会把未确认关系当作事实。</p>
+    </details>
   </section>
 </template>

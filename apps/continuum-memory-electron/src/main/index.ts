@@ -1,9 +1,13 @@
-import { app, BrowserWindow, ipcMain, desktopCapturer, powerMonitor, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, desktopCapturer, powerMonitor, safeStorage, shell, dialog } from 'electron'
+import { createDesktopSkillService } from './skills'
+import { createDocumentService, probeDocumentRuntime, type DocumentRuntime } from './documents'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { runBackgroundTaskBatch } from './background-task-batch'
+import { createConversationRegistry, type DesktopConversation } from './conversation-registry'
+import { isGraphExtractionEnabled, shouldPersistGraphExtraction } from './graph-extraction-policy'
 
 import { createAgentRuntime, createSessionManager, createChatHooks } from '@continuum-memory/core'
 import { createOpenAILlm } from '@continuum-memory/llm-openai'
@@ -307,7 +311,6 @@ const persist = createPersistence(userDataDir)
 const settingsMgr = createSettingsManager(persist)
 
 // ── LLM & Tools ────────────────────────────────────────
-const tools = createToolRegistry([webSearchTool, fileReadTool, httpFetchTool])
 
 interface ApiConfig {
   apiKey: string
@@ -362,7 +365,7 @@ function saveApiConfig() {
 
 // ── Encrypted session store ─────────────────────────────
 const sessionStore = createSessionManager(200)
-const sessionsCache = { default: sessionStore.getSessionMessages('default') }
+const sessionsCache: Record<string, ReturnType<typeof sessionStore.getSessionMessages>> = { default: sessionStore.getSessionMessages('default') }
 const sessionStoragePath = join(userDataDir, 'sessions.enc')
 const sessionKeyPath = join(userDataDir, 'session-key.json')
 const legacySessionStoragePath = join(userDataDir, 'sessions.json')
@@ -389,6 +392,7 @@ function initializeSessions(): void {
       if (!Array.isArray(messages))
         throw new Error(`Encrypted session ${sessionId} is not an array`)
       sessionStore.ensureSession(sessionId)
+      sessionsCache[sessionId] = sessionStore.getSessionMessages(sessionId)
       for (const msg of messages)
         sessionStore.appendSessionMessage(sessionId, msg)
     }
@@ -405,10 +409,81 @@ function initializeSessions(): void {
 function saveSessions() {
   if (!sessionPersistence)
     return
-  sessionsCache.default = sessionStore.getSessionMessages('default')
+  for (const id of Object.keys(sessionsCache)) sessionsCache[id] = sessionStore.getSessionMessages(id)
   sessionPersistence.save(JSON.stringify(sessionsCache))
 }
 
+const settings = settingsMgr.get()
+let agentName = settings.agentName || 'Continuum Memory'
+
+function buildPersona(name: string): string {
+  return [
+    `Your name is ${name}. You are a friendly and helpful AI companion.`,
+    `Always refer to yourself as "${name}" when introducing yourself or referring to yourself.`,
+    `If someone asks your name, tell them it is ${name}.`,
+    `Respond warmly and naturally, as ${name} would.`,
+  ].join(' ')
+}
+
+let currentPersona = settings.agentName ? buildPersona(settings.agentName) : 'You are a helpful AI assistant named Continuum Memory.'
+
+
+const rootUserDataDir = userDataDir
+const rootPersist = persist
+let skillService: ReturnType<typeof createDesktopSkillService>
+let documentRuntime: DocumentRuntime
+type PartitionHandler = (event: Electron.IpcMainInvokeEvent, ...args: any[]) => any
+interface ConversationPartition {
+  handlers: Map<string, PartitionHandler>
+  start(): Promise<void>
+  activate(): void
+  shutdown(): Promise<void>
+  smoke(): Promise<void>
+}
+let conversationRegistry: ReturnType<typeof createConversationRegistry>
+const partitions = new Map<string, Promise<ConversationPartition>>()
+let activePartition: ConversationPartition
+function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error) }
+
+const sharedLocalUie = createLocalUieExtractor({
+  pythonPath: config.uiePythonPath,
+  modelHome: config.uieModelHome,
+  modelPath: config.uieModelPath,
+  scriptPath: app.isPackaged
+    ? join(process.resourcesPath, 'uie_extract.py')
+    : join(app.getAppPath(), '..', '..', 'packages', 'memory', 'resources', 'uie_extract.py'),
+})
+
+// Model runtimes contain no memory catalog; request IDs keep concurrent partitions separate.
+// A partition reload must not dispose a model being used by another partition.
+const sharedNliModels = new Map<string, ReturnType<typeof createLocalErlangshenNli>>()
+function getSharedNliModel(options: Parameters<typeof createLocalErlangshenNli>[0]) {
+  const key = JSON.stringify(options)
+  let model = sharedNliModels.get(key)
+  if (!model) { model = createLocalErlangshenNli(options); sharedNliModels.set(key, model) }
+  return { ...model, close() {} }
+}
+
+function createConversationPartition(conversation: DesktopConversation, userDataDir: string): ConversationPartition {
+  mkdirSync(userDataDir, { recursive: true })
+  const persist = createPersistence(userDataDir)
+  const handlers = new Map<string, PartitionHandler>()
+  const partitionIpc = { handle: (channel: string, handler: PartitionHandler) => {
+    if (handlers.has(channel)) throw new Error(`Duplicate partition handler: ${channel}`)
+    handlers.set(channel, handler)
+  } }
+  const sendPartitionEvent = (channel: string, payload?: unknown) =>
+    mainWindow?.webContents.send(channel, payload, { conversationId: conversation.id })
+  const documentPersistence = safeStorage.isEncryptionAvailable() ? createEncryptedFilePersistence({
+    encryptedPath: join(userDataDir, 'documents.enc'), keyPath: join(userDataDir, 'documents-key.json'),
+    protectKey: key => safeStorage.encryptString(key.toString('base64')),
+    unprotectKey: key => Buffer.from(safeStorage.decryptString(key), 'base64'),
+  }) : { load: () => undefined, save: (_value: string) => {} }
+  const documents = createDocumentService({ root: join(userDataDir, 'documents'), runtime: documentRuntime,
+    persistence: documentPersistence, onChanged: () => sendPartitionEvent('documents:changed', documents.list()) })
+  const tools = createToolRegistry([webSearchTool, fileReadTool, httpFetchTool,
+    ...documents.tools(),
+    ...skillService.tools(conversation.id, () => sendPartitionEvent('skills:used', skillService.history(conversation.id)))])
 // ── Scheme A long-term memory ───────────────────────────
 type MemoryExtractionMode = 'rules' | 'smart' | 'uie' | 'open'
 type MemoryRemotePolicy = 'normal-only' | 'allow-private' | 'disabled'
@@ -461,7 +536,7 @@ function normalizeMemorySettings(value: Partial<MemorySettings> | undefined): Me
   }
 }
 
-let memorySettings = normalizeMemorySettings(persist.loadJson<Partial<MemorySettings>>('memory-settings', defaultMemorySettings))
+let memorySettings = normalizeMemorySettings(persist.loadJson<Partial<MemorySettings>>('memory-settings', rootPersist.loadJson<Partial<MemorySettings>>('memory-settings', defaultMemorySettings)))
 let memory: ReturnType<typeof createMemoryWriter> | undefined
 let memoryPersistence: EncryptedMemoryPersistence | undefined
 let memoryEmbeddingIndex: MemoryEmbeddingIndex | undefined
@@ -792,7 +867,7 @@ let semanticModelProgress: SemanticModelProgress = { status: 'idle' }
 let semanticPreparationPromise: Promise<void> | undefined
 let imageMemoryProgress: { status: string; progress?: number } = { status: 'idle' }
 const purgeConfirmation = createMemoryPurgeConfirmationGate()
-const semanticMemory = createSemanticMemoryService(join(userDataDir, 'models', 'memory'), (progress) => {
+const semanticMemory = createSemanticMemoryService(join(rootUserDataDir, 'models', 'memory'), (progress) => {
   updateSemanticModelProgress(progress)
 })
 // Query-only cache; never puts private contextual vectors in an external service or disk.
@@ -807,22 +882,15 @@ async function embedOpenContext(text: string): Promise<number[]> {
   openContextVectorCache.set(key, [...vector])
   return vector
 }
-const imageMemory = createImageMemoryService(join(userDataDir, 'models', 'ocr'), (progress) => {
+const imageMemory = createImageMemoryService(join(rootUserDataDir, 'models', 'ocr'), (progress) => {
   imageMemoryProgress = progress
-  mainWindow?.webContents.send('memory:ocr-progress', progress)
+  sendPartitionEvent('memory:ocr-progress', progress)
 })
-const localUie = createLocalUieExtractor({
-  pythonPath: config.uiePythonPath,
-  modelHome: config.uieModelHome,
-  modelPath: config.uieModelPath,
-  scriptPath: app.isPackaged
-    ? join(process.resourcesPath, 'uie_extract.py')
-    : join(app.getAppPath(), '..', '..', 'packages', 'memory', 'resources', 'uie_extract.py'),
-})
+const localUie = { ...sharedLocalUie, dispose() {} }
 
 function updateSemanticModelProgress(progress: SemanticModelProgress): void {
   semanticModelProgress = progress
-  mainWindow?.webContents.send('memory:model-progress', progress)
+  sendPartitionEvent('memory:model-progress', progress)
 }
 
 function prepareSemanticMemoryIndex(): Promise<void> {
@@ -908,7 +976,7 @@ async function saveGraphExtraction(run: GraphExtractionRun, forceSemanticReview 
     && (forceSemanticReview || run.remoteExtraction || ((memorySettings.extractionMode === 'open' || memorySettings.extractionMode === 'smart')
     && (run.modelId === apiConfig.model || run.modelId === 'uie-base'))) && run.status === 'complete') {
     const assessed = await graphSemanticWorkflow.process(run)
-    if (!assessed) { syncGraphSemantic(); mainWindow?.webContents.send('memory:changed'); return }
+    if (!assessed) { syncGraphSemantic(); sendPartitionEvent('memory:changed'); return }
     run = assessed
   }
   if (run.semanticReview) graphExtractionStore.savePublicationView?.(run)
@@ -963,7 +1031,7 @@ async function saveGraphExtraction(run: GraphExtractionRun, forceSemanticReview 
   }
   syncGraphSemantic()
   reconcileGraphPublicationStatus()
-  mainWindow?.webContents.send('memory:changed')
+  sendPartitionEvent('memory:changed')
 }
 
 function createConfiguredMemoryExtractor(): MemoryExtractor {
@@ -971,6 +1039,9 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
   const captureApiConfig = { ...apiConfig }
   const canSendSource = (turn: Parameters<MemoryExtractor>[0]): boolean => {
     if (captureSettings.remotePolicy === 'disabled' || !isSafeMemoryContent(turn.userMessage)) return false
+    const blocked = memoryStore?.blockedSourceMessageIds(localMemoryScope)
+    if (Array.isArray(turn.metadata?.sourceMessageIds)
+      && turn.metadata.sourceMessageIds.some(id => typeof id === 'string' && blocked?.has(id))) return false
     const privacy = inferMemoryPrivacy(turn.userMessage)
     // Enabling an extraction mode never overrides local-only private/secret source policy.
     return privacy.sensitivity === 'normal' && privacy.sharePolicy === 'allow-remote'
@@ -979,7 +1050,7 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
     getConfig: () => captureApiConfig,
     fallback: extractMemoryCandidates,
     canSendSource,
-    saveGraphExtraction: run => captureSettings.graphExtractionEnabled ? saveGraphExtraction(run) : undefined,
+    saveGraphExtraction: run => shouldPersistGraphExtraction(captureSettings, 'remote') ? saveGraphExtraction(run) : undefined,
   })
   const openExtractor = createOpenGraphExtractor({
     getConfig: () => captureApiConfig,
@@ -992,7 +1063,7 @@ function createConfiguredMemoryExtractor(): MemoryExtractor {
     adaptiveSchema: true,
     rules: extractMemoryCandidates,
     onGraphExtraction: async (_turn, run) => {
-      if (captureSettings.graphExtractionEnabled || captureSettings.extractionMode === 'uie')
+      if (shouldPersistGraphExtraction(captureSettings, 'local'))
         await saveGraphExtraction(run)
       if (run.modelId === 'uie-base') graphExtractionError = ''
     },
@@ -1366,7 +1437,7 @@ function initializeMemory(): void {
         unprotectKey: protectedKey => Buffer.from(safeStorage.decryptString(protectedKey), 'base64'),
       }), graphSemanticRepository, v4Repository, graphL1Store!, graphCaptureRepository, graphExtractionStore)
       const nliRevision = config.nliModelPath ? basename(config.nliModelPath) : 'unavailable'
-      graphNliJudge = createLocalErlangshenNli({
+      graphNliJudge = getSharedNliModel({
         pythonPath: config.nliPythonPath,
         modelPath: config.nliModelPath,
         dependenciesPath: config.nliDependenciesPath,
@@ -1414,18 +1485,22 @@ function initializeMemory(): void {
           if (workflowRegistry !== graphBasicRelations || workflowCaptures !== graphCaptureRepository
             || workflowExtractions !== graphExtractionStore || memorySettings.remotePolicy === 'disabled') return false;
           const snapshot = workflowCaptures.snapshot();
+          const blocked = memoryStore?.blockedSourceMessageIds(localMemoryScope) ?? new Set<string>();
           const matches = snapshot.sources.filter(source => source.status === 'active'
             && source.scope.ownerId === localMemoryScope.ownerId && source.scope.agentId === localMemoryScope.agentId
             && (source.id === run.sourceId || source.messageIds.includes(run.sourceId))
+            && !source.messageIds.some(id => blocked.has(id))
             && (source.turn?.userMessage === run.sourceText || snapshot.tasks.some(task => task.sourceId === source.id
               && source.turn?.userMessage.slice(task.start, task.end) === run.sourceText)));
           return matches.length === 1 && (run.supplementalEvidence ?? []).every(extra => {
+            if (blocked.has(extra.sourceId)) return false;
             if (extra.sourceId.startsWith('clarification:')) return graphSemanticWorkflow?.list().some(i =>
               i.reply?.sourceId === extra.sourceId && i.reply.text === extra.text && !['cancelled', 'dismissed'].includes(i.status));
             if (snapshot.sources.some(s => (s.id === extra.sourceId || s.messageIds.includes(extra.sourceId)) && s.status !== 'active')) return false;
             const captured = snapshot.sources.find(s => s.status === 'active' && (s.id === extra.sourceId || s.messageIds.includes(extra.sourceId))
               && s.scope.ownerId === localMemoryScope.ownerId && s.scope.agentId === localMemoryScope.agentId);
-            const message = sessionStore.getSessionMessages(matches[0]!.scope.sessionId ?? 'default').find(m => m.id === extra.sourceId && m.role === 'user');
+            if (captured?.messageIds.some(id => blocked.has(id))) return false;
+            const message = sessionStore.getSessionMessages(matches[0]!.scope.sessionId ?? conversation.id).find(m => m.id === extra.sourceId && m.role === 'user');
             return (captured?.turn?.userMessage ?? message?.content) === extra.text
               && !graphL1Store?.reviews().some(r => r.sourceId === extra.sourceId && isUserSourceWithdrawal(r));
           }) && inferMemoryPrivacy(matches[0]!.turn!.userMessage).sensitivity === 'normal'
@@ -1433,11 +1508,13 @@ function initializeMemory(): void {
         },
         lookupContext: run => {
           const snapshot = workflowCaptures.snapshot();
+          const blocked = memoryStore?.blockedSourceMessageIds(localMemoryScope) ?? new Set<string>();
           const root = snapshot.sources.find(s => s.status === 'active' && (s.id === run.sourceId || s.messageIds.includes(run.sourceId)));
           if (!root) return [];
           const ids = root.turn?.context?.recentMessages.filter(m => m.role === 'user').map(m => m.id).filter((id): id is string => !!id) ?? [];
-          const history = sessionStore.getSessionMessages(root.scope.sessionId ?? 'default');
+          const history = sessionStore.getSessionMessages(root.scope.sessionId ?? conversation.id);
           return ids.flatMap(id => {
+            if (blocked.has(id)) return [];
             if (snapshot.sources.some(s => s.messageIds.includes(id) && s.status !== 'active')) return [];
             const captured = snapshot.sources.find(s => s.status === 'active' && s.messageIds.includes(id)
               && s.scope.ownerId === localMemoryScope.ownerId && s.scope.agentId === localMemoryScope.agentId);
@@ -1448,7 +1525,9 @@ function initializeMemory(): void {
           }).slice(-3);
         },
         readContext: id => {
+          const blocked = memoryStore?.blockedSourceMessageIds(localMemoryScope) ?? new Set<string>();
           const source = workflowCaptures.snapshot().sources.find(s => (s.id === id || s.messageIds.includes(id))
+            && !s.messageIds.some(messageId => blocked.has(messageId))
             && s.status === 'active' && s.scope.ownerId === localMemoryScope.ownerId && s.scope.agentId === localMemoryScope.agentId);
           const text = source?.turn?.userMessage;
           return text && text.length <= 4000 && inferMemoryPrivacy(text).sensitivity === 'normal'
@@ -1968,17 +2047,18 @@ function memoryForRemoteRuntime() {
     async beginRecallTurn(scope: Parameters<typeof localMemory.list>[0]) {
       const v4 = memoryV4Repository?.snapshot();
       const published = new Set(graphL1Store?.tasks().filter(t => t.state === 'published').map(t => t.id) ?? []);
-      const rows = await localMemory.list(scope, 20_000);
-      const visible = new Set(rows.map(m => JSON.stringify([m.id, m.content])));
+      const legacyVisible = await localMemory.beginRecallTurn!(scope);
+      const visible = new Set<string>();
       for (const fact of v4?.facts ?? []) if (fact.scope.ownerId === scope.ownerId
         && (scope.agentId === undefined || fact.scope.agentId === scope.agentId)
         && (scope.sessionId === undefined || fact.scope.sessionId === scope.sessionId)
         && (!fact.metadata?.graphTaskId || published.has(String(fact.metadata.graphTaskId)))) visible.add(JSON.stringify([fact.id, fact.canonicalText]));
-      return (fragment: Awaited<ReturnType<typeof localMemory.list>>[number]) => visible.has(JSON.stringify([fragment.id, fragment.content]));
+      return (fragment: Awaited<ReturnType<typeof localMemory.list>>[number]) => legacyVisible(fragment)
+        || visible.has(JSON.stringify([fragment.id, fragment.content]));
     },
     async validateRecall(fragments: Awaited<ReturnType<typeof localMemory.list>>, scope: Parameters<typeof localMemory.list>[0]) {
       if (memorySettings.remotePolicy === 'disabled') return [];
-      const rows = await localMemory.list(scope, 20_000), facts = memoryV4Repository?.snapshot().facts ?? [];
+      const rows = await localMemory.validateRecall!(fragments, scope), facts = memoryV4Repository?.snapshot().facts ?? [];
       return fragments.filter(m => rows.some(row => row.id === m.id && row.content === m.content
         && !['suppressed', 'deleted', 'orphaned', 'expired'].includes(row.status ?? '') && row.sharePolicy === 'allow-remote'
         && (row.sensitivity === 'normal' || memorySettings.remotePolicy === 'allow-private'))
@@ -2025,23 +2105,9 @@ function memoryForRemoteRuntime() {
 }
 
 // ── Runtime ─────────────────────────────────────────────
-const settings = settingsMgr.get()
-let agentName = settings.agentName || 'Continuum Memory'
-
-function buildPersona(name: string): string {
-  return [
-    `Your name is ${name}. You are a friendly and helpful AI companion.`,
-    `Always refer to yourself as "${name}" when introducing yourself or referring to yourself.`,
-    `If someone asks your name, tell them it is ${name}.`,
-    `Respond warmly and naturally, as ${name} would.`,
-  ].join(' ')
-}
-
-let currentPersona = settings.agentName ? buildPersona(settings.agentName) : 'You are a helpful AI assistant named Continuum Memory.'
-
 const hooks = createChatHooks()
 hooks.onTokenLiteral(async (literal) => {
-  mainWindow?.webContents.send('chat:token', literal)
+  sendPartitionEvent('chat:token', literal)
 })
 
 let runtime: ReturnType<typeof createAgentRuntime>
@@ -2086,6 +2152,7 @@ function rebuildRuntime() {
       recall: (query, scope) => beginDesktopSourceRecall()(query, scope),
     } } : {}),
     tools: tools.hasTools() ? tools : undefined,
+    maxToolRounds: 10,
     hooks,
   })
 }
@@ -2100,9 +2167,7 @@ function beginDesktopSourceRecall() {
       || !allowed() || _scope.ownerId !== localMemoryScope.ownerId
       || (_scope.agentId !== undefined && _scope.agentId !== localMemoryScope.agentId)) return [];
     const blocked = new Set(graphL1Store?.reviews().filter(isUserSourceWithdrawal).map(r => r.sourceId) ?? []);
-    const stored = await memory?.list(localMemoryScope) ?? [];
-    for (const item of stored) if (item.sharePolicy !== 'allow-remote' || ['suppressed', 'deleted', 'orphaned'].includes(item.status ?? ''))
-      for (const id of item.sourceMessageIds ?? []) blocked.add(id);
+    for (const id of memoryStore?.blockedSourceMessageIds(localMemoryScope) ?? []) blocked.add(id);
     if (captures !== graphCaptureRepository || !allowed()) return [];
     return recallOpenSources({ captures: captures.snapshot(),
       extractions: { list: () => extractions.list().filter(r => runIds.has(r.id)), openReviews: () => extractions.openReviews() },
@@ -2270,22 +2335,40 @@ async function migrateOpenL1() {
     return { ok: true, processed, skipped, remaining: Math.max(0, candidates.length - processed - skipped) };
   }
 
+let chatBusy = false
 function setupIPC() {
-  ipcMain.handle('app:version', () => app.getVersion())
+  partitionIpc.handle('documents:list', () => documents.list())
+  partitionIpc.handle('documents:pick', async () => {
+    const result = await dialog.showOpenDialog({ title: '选择 PDF 或 Word 文档', properties: ['openFile', 'multiSelections'],
+      filters: [{ name: 'PDF / Word', extensions: ['pdf', 'docx'] }] })
+    return result.canceled ? documents.list() : documents.importFiles(result.filePaths)
+  })
+  partitionIpc.handle('documents:preview', (_event, id: string) => documents.preview(id))
+  partitionIpc.handle('documents:open', async (_event, id: string) => {
+    const error = await shell.openPath(documents.path(id)); return error ? { ok: false, error } : { ok: true }
+  })
+  partitionIpc.handle('documents:location', (_event, id: string) => { shell.showItemInFolder(documents.path(id)); return { ok: true } })
+  partitionIpc.handle('app:version', () => app.getVersion())
 
-  ipcMain.handle('chat:send', async (_event, message: string, attachments?: { type: 'image'; data: string; mimeType: string }[]) => {
+  partitionIpc.handle('chat:send', async (_event, message: string, attachments?: { type: 'image'; data: string; mimeType: string }[], selection?: { skillId?: string }) => {
+    if (chatBusy) return { ok: false, error: '此对话正在生成回复，请稍候。' }
     if (!apiConfig.apiKey.trim())
       return { ok: false, error: '尚未配置 API Key，请点击右上角“API 设置”。' }
+    chatBusy = true
     const internalReview = memoryV4InternalReview.begin(message)
     try {
-      const result = await runtime.send('default', message, attachments && attachments.length > 0
-        ? { attachments, input: { type: 'image' } }
-        : undefined)
+      const selectedSkill = selection?.skillId ? skillService.load(selection.skillId, conversation.id) : undefined
+      if (selectedSkill) sendPartitionEvent('skills:used', skillService.history(conversation.id))
+      const result = await runtime.send(conversation.id, message, {
+        ...(attachments?.length ? { attachments, input: { type: 'image' as const } } : {}),
+        ...(selectedSkill ? { skill: { id: selectedSkill.id, payload: JSON.stringify(selectedSkill) } } : {}),
+      })
       const memoryReview = await internalReview?.finish()
       return {
         ok: true,
         text: result.text,
         toolCalls: result.toolCalls,
+        history: sessionStore.getSessionMessages(conversation.id),
         ...(memoryReview ? { memoryReview } : {}),
       }
     }
@@ -2295,11 +2378,12 @@ function setupIPC() {
       return { ok: false, error: errorMessage(error) }
     }
     finally {
+      chatBusy = false
       saveSessions()
     }
   })
 
-  ipcMain.handle('memory:clarification-answer', async (_event, input: { id: string; candidateId: string; sourceRevision: string; text: string; contextSourceId?: string }) => {
+  partitionIpc.handle('memory:clarification-answer', async (_event, input: { id: string; candidateId: string; sourceRevision: string; text: string; contextSourceId?: string }) => {
     try {
       if (!graphSemanticWorkflow) return { ok: false, error: '澄清流程尚未就绪。' };
       const run = await graphSemanticWorkflow.answer(input.id, input.candidateId, input.sourceRevision, input.text, input.contextSourceId);
@@ -2307,14 +2391,14 @@ function setupIPC() {
         const reply = run.supplementalEvidence?.at(-1);
         if (reply) {
           const tasks = graphCaptureRepository?.register({ userMessage: reply.text, assistantMessage: '',
-            metadata: { sessionId: 'default', sourceMessageIds: [reply.sourceId], clarificationFor: run.sourceId } }, localMemoryScope, 'clarification-evidence-v1') ?? [];
+            metadata: { sessionId: conversation.id, sourceMessageIds: [reply.sourceId], clarificationFor: run.sourceId } }, localMemoryScope, 'clarification-evidence-v1') ?? [];
           for (const task of tasks) if (graphCaptureRepository?.claim(task.id)) graphCaptureRepository.finish(task.id, { candidateCount: 0, writtenCount: 0 });
-          sessionStore.appendSessionMessage('default', { id: reply.sourceId, role: 'user', content: reply.text, createdAt: Date.now() });
+          sessionStore.appendSessionMessage(conversation.id, { id: reply.sourceId, role: 'user', content: reply.text, createdAt: Date.now() });
           saveSessions();
         }
         await saveGraphExtraction(run);
       }
-      mainWindow?.webContents.send('memory:changed');
+      sendPartitionEvent('memory:changed');
       return { ok: true };
     } catch (error) {
       const code = error instanceof Error ? error.message : '';
@@ -2323,11 +2407,11 @@ function setupIPC() {
         : '模型尚未完成补充信息处理，说明已保留，可稍后重新提交。' };
     }
   });
-  ipcMain.handle('memory:clarification-dismiss', (_event, input: { id: string; candidateId: string }) => {
+  partitionIpc.handle('memory:clarification-dismiss', (_event, input: { id: string; candidateId: string }) => {
     try { graphSemanticWorkflow?.dismiss(input.id, input.candidateId); return { ok: true }; }
     catch { return { ok: false, error: '待澄清项已失效。' }; }
   });
-  ipcMain.handle('memory:relation-mapping-revoke', async (_event, id: string) => {
+  partitionIpc.handle('memory:relation-mapping-revoke', async (_event, id: string) => {
     if (!graphBasicRelations || typeof id !== 'string') return { ok: false };
     const affected = graphL1Store?.tasks().filter(t => t.run.factCandidates.some(f => f.mappingId === id)) ?? [];
     graphBasicRelations.revokeMapping(id);
@@ -2339,16 +2423,16 @@ function setupIPC() {
     invalidateGraphL1Projection(); syncGraphSemantic();
     for (const task of affected) void saveGraphExtraction({ ...task.run, id: crypto.randomUUID() })
       .catch(() => { graphExtractionError = '映射撤销后的独立关系重建尚未完成'; });
-    mainWindow?.webContents.send('memory:changed');
+    sendPartitionEvent('memory:changed');
     return { ok: true };
   });
-  ipcMain.handle('memory:open-l1-migrate', migrateOpenL1);
-  ipcMain.handle('memory:semantic-retry', async () => {
+  partitionIpc.handle('memory:open-l1-migrate', migrateOpenL1);
+  partitionIpc.handle('memory:semantic-retry', async () => {
     const runs = await graphSemanticWorkflow?.retry(5) ?? [];
     for (const run of runs) await saveGraphExtraction(run);
     return { ok: true, processed: runs.length };
   });
-  ipcMain.handle('memory:clarifications-list', () => ({
+  partitionIpc.handle('memory:clarifications-list', () => ({
     items: graphSemanticWorkflow?.list().filter(i => i.status === 'waiting').flatMap(i => i.decisions
       .filter(d => d.verdict === 'needs-context').map(d => ({ id: i.id, candidateId: d.candidateId,
         sourceId: i.run.sourceId, sourceRevision: i.run.sourceRevision, sourceText: i.run.sourceText,
@@ -2361,7 +2445,7 @@ function setupIPC() {
     failed: graphSemanticWorkflow?.list().filter(i => i.status === 'failed'
       || (i.status === 'ready' && i.decisions.some(d => d.verdict === 'supported'))).length ?? 0,
   }));
-  ipcMain.handle('screen:capture', async () => {
+  partitionIpc.handle('screen:capture', async () => {
     const sources = await desktopCapturer.getSources({
       types: ['screen', 'window'],
       thumbnailSize: { width: 1280, height: 720 },
@@ -2380,11 +2464,11 @@ function setupIPC() {
     return { ok: true, data: match[2]!, mimeType: match[1]! }
   })
 
-  ipcMain.handle('settings:get', () => {
+  partitionIpc.handle('settings:get', () => {
     return settingsMgr.get()
   })
 
-  ipcMain.handle('settings:set-name', async (_event, name: string) => {
+  partitionIpc.handle('settings:set-name', async (_event, name: string) => {
     settingsMgr.setName(name)
     agentName = name
     currentPersona = buildPersona(name)
@@ -2393,18 +2477,18 @@ function setupIPC() {
     return { ok: true }
   })
 
-  ipcMain.handle('settings:set-theme', async (_event, theme: string) => {
+  partitionIpc.handle('settings:set-theme', async (_event, theme: string) => {
     settingsMgr.setTheme(theme)
     return { ok: true }
   })
 
-  ipcMain.handle('api:get', () => ({
+  partitionIpc.handle('api:get', () => ({
     configured: !!apiConfig.apiKey.trim(),
     baseURL: apiConfig.baseURL,
     model: apiConfig.model,
   }))
 
-  ipcMain.handle('api:set', async (_event, input: { apiKey?: string; baseURL?: string; model?: string }) => {
+  partitionIpc.handle('api:set', async (_event, input: { apiKey?: string; baseURL?: string; model?: string }) => {
     const apiKey = input.apiKey?.trim() || apiConfig.apiKey
     const baseURL = input.baseURL?.trim() || ''
     const model = input.model?.trim() || ''
@@ -2432,12 +2516,12 @@ function setupIPC() {
     return { ok: true, configured: true }
   })
 
-  ipcMain.handle('sessions:history', () => {
-    return sessionStore.getSessionMessages('default')
+  partitionIpc.handle('sessions:history', () => {
+    return sessionStore.getSessionMessages(conversation.id)
   })
 
-  ipcMain.handle('sessions:truncate-after', async (_event, messageId: string) => {
-    const msgs = sessionStore.getSessionMessages('default')
+  partitionIpc.handle('sessions:truncate-after', async (_event, messageId: string) => {
+    const msgs = sessionStore.getSessionMessages(conversation.id)
     const idx = msgs.findIndex(m => m.id === messageId)
     if (idx < 0)
       return { ok: false, error: 'message not found' }
@@ -2449,7 +2533,7 @@ function setupIPC() {
     return { ok: true }
   })
 
-  ipcMain.handle('memory:graph-diagnostics', () => {
+  partitionIpc.handle('memory:graph-diagnostics', () => {
     if (!memoryV4Repository) return { ok: false, error: 'V4 仓库尚未就绪。' }
     try {
       const report = diagnoseV4GraphInputs(memoryV4Repository, {
@@ -2466,7 +2550,7 @@ function setupIPC() {
     }
   })
 
-  ipcMain.handle('memory:status', async () => ({
+  partitionIpc.handle('memory:status', async () => ({
     graphClaimCount: graphL1Store?.claims().length ?? 0,
     capture: memory?.captureStatus(),
     enabled: !!memory,
@@ -2529,7 +2613,7 @@ function setupIPC() {
     ocr: { progress: imageMemoryProgress, cachePath: imageMemory.cachePath },
   }))
 
-  ipcMain.handle('memory:list', async (_event, limit = 200) => {
+  partitionIpc.handle('memory:list', async (_event, limit = 200) => {
     const openAssertions = graphCaptureRepository && graphExtractionStore
       ? projectOpenAssertions(graphCaptureRepository.snapshot(), graphExtractionStore, localMemoryScope) : []
     const openCandidateKeys = new Set(openAssertions.map(item => `${item.extraction.runId}\0${item.extraction.candidateId}`))
@@ -2621,8 +2705,7 @@ function setupIPC() {
         sourceText: task?.run.sourceText ?? '', supplementalEvidence: task?.run.supplementalEvidence ?? [] }
     }),
     graphExtraction: {
-      enabled: !!graphExtractionStore && (memorySettings.extractionMode === 'uie' || memorySettings.extractionMode === 'open'
-        || memorySettings.graphExtractionEnabled),
+      enabled: !!graphExtractionStore && isGraphExtractionEnabled(memorySettings),
       modelReady: memorySettings.extractionMode === 'open' || memorySettings.extractionMode === 'smart'
         ? !!apiConfig.apiKey.trim() && !!apiConfig.model.trim() && memorySettings.remotePolicy !== 'disabled'
         : localUie.isReady(),
@@ -2722,7 +2805,7 @@ function setupIPC() {
     })
   })
 
-  ipcMain.handle('memory:candidate-review', async (
+  partitionIpc.handle('memory:candidate-review', async (
     _event,
     input: { id?: unknown; outcome?: unknown; note?: unknown },
   ) => {
@@ -2741,7 +2824,7 @@ function setupIPC() {
     return changed ? { ok: true } : { ok: false, error: '候选不存在、已审核或不属于当前作用域。' }
   })
 
-  ipcMain.handle('memory:graph-review', async (
+  partitionIpc.handle('memory:graph-review', async (
     _event,
     input: { id?: unknown; outcome?: unknown; reason?: unknown; retrievalRetain?: unknown; proactivePreference?: unknown;
       context?: unknown; identities?: unknown; sourceRevision?: unknown },
@@ -2804,7 +2887,7 @@ function setupIPC() {
     catch (error) { return { ok: false, error: errorMessage(error) } }
   })
 
-  ipcMain.handle('memory:graph-open-review', async (_event,
+  partitionIpc.handle('memory:graph-open-review', async (_event,
     input: { id?: unknown; sourceRevision?: unknown; outcome?: unknown; reason?: unknown }) => {
     if (!graphCaptureRepository || !graphExtractionStore || !graphSemanticRepository || !graphL1Store || !memoryV4Repository)
       return { ok: false, error: '图存储不可用。' }
@@ -2828,7 +2911,7 @@ function setupIPC() {
     } catch (error) { return { ok: false, error: errorMessage(error) } }
   })
 
-  ipcMain.handle('memory:graph-open-search', async (_event, input: { query?: unknown; maximumDepth?: unknown; includeCandidates?: unknown }) => {
+  partitionIpc.handle('memory:graph-open-search', async (_event, input: { query?: unknown; maximumDepth?: unknown; includeCandidates?: unknown }) => {
     if (typeof input?.query !== 'string' || !input.query.trim() || input.query.length > 500)
       return { ok: false, error: '请输入查询内容。' }
     const view = graphL1ProjectionRepository?.snapshot()
@@ -2846,7 +2929,7 @@ function setupIPC() {
         .replace(/\s+/gu, '').includes(needle)).slice(0, 20).map(item => ({ id: item.ref.id, text: item.content })) }
   })
 
-  ipcMain.handle('memory:graph-custom-extract', async (_event, input: { sourceId?: unknown; targets?: unknown }) => {
+  partitionIpc.handle('memory:graph-custom-extract', async (_event, input: { sourceId?: unknown; targets?: unknown }) => {
     if (!graphCaptureRepository || !graphExtractionStore || !localUie.isReady()) return { ok: false, error: '本地 UIE 或图存储不可用。' }
     if (typeof input?.sourceId !== 'string' || typeof input.targets !== 'string' || !input.targets.trim() || input.targets.length > 2000)
       return { ok: false, error: '请输入抽取目标，例如：样品→存放位置；设备→故障。' }
@@ -2865,7 +2948,7 @@ function setupIPC() {
     } catch (error) { return { ok: false, error: errorMessage(error) } }
   })
 
-  ipcMain.handle('memory:graph-relation-review', async (_event,
+  partitionIpc.handle('memory:graph-relation-review', async (_event,
     input: { key?: unknown; outcome?: unknown; reason?: unknown }) => {
     const key = typeof input?.key === 'string' ? input.key.trim() : ''
     const reason = typeof input?.reason === 'string' ? input.reason.trim() : ''
@@ -2876,7 +2959,7 @@ function setupIPC() {
     return changed ? { ok: true } : { ok: false, error: '候选不存在或 NLI 判断尚未完成。' }
   })
 
-  ipcMain.handle('memory:graph-l2-publish', async (_event,
+  partitionIpc.handle('memory:graph-l2-publish', async (_event,
     input: { candidateId?: unknown; reason?: unknown }) => {
     const candidateId = typeof input?.candidateId === 'string' ? input.candidateId.trim() : ''
     const reason = typeof input?.reason === 'string' ? input.reason.trim() : ''
@@ -2899,7 +2982,7 @@ function setupIPC() {
     catch (error) { return { ok: false, error: errorMessage(error) } }
   })
 
-  ipcMain.handle('memory:v4-internal-feedback', async (
+  partitionIpc.handle('memory:v4-internal-feedback', async (
     _event,
     input: { reviewId?: unknown; factId?: unknown; label?: unknown },
   ) => {
@@ -2932,7 +3015,7 @@ function setupIPC() {
     }
   })
 
-  ipcMain.handle('memory:candidate-reprocess', async (
+  partitionIpc.handle('memory:candidate-reprocess', async (
     _event,
     input: { cursor?: unknown; batchSize?: unknown } = {},
   ) => {
@@ -2966,7 +3049,7 @@ function setupIPC() {
     }
   })
 
-  ipcMain.handle('memory:capture-flush', async () => {
+  partitionIpc.handle('memory:capture-flush', async () => {
     if (!memory)
       return { ok: false, error: '长期记忆已关闭。' }
     await memory.flushPendingCaptures()
@@ -2974,7 +3057,7 @@ function setupIPC() {
     return { ok: true, pendingCaptureSegments: memory.pendingCaptureCount() }
   })
 
-  ipcMain.handle('memory:capture-retry', async () => {
+  partitionIpc.handle('memory:capture-retry', async () => {
     if (!memory) return { ok: false, error: '长期记忆已关闭。' }
     try {
       await memory.resumePendingCaptures(true)
@@ -2985,7 +3068,7 @@ function setupIPC() {
     }
   })
 
-  ipcMain.handle('memory:add', async (_event, content: string) => {
+  partitionIpc.handle('memory:add', async (_event, content: string) => {
     if (!memory)
       return { ok: false, error: '长期记忆已关闭。' }
     const normalized = typeof content === 'string' ? content.trim() : ''
@@ -3003,7 +3086,7 @@ function setupIPC() {
     return { ok: true, count: await memory.count(localMemoryScope) }
   })
 
-  ipcMain.handle('memory:forget', async (_event, id: string) => {
+  partitionIpc.handle('memory:forget', async (_event, id: string) => {
     if (!memory)
       return { ok: false, error: '长期记忆已关闭。' }
     if (typeof id !== 'string' || !id.trim())
@@ -3012,11 +3095,11 @@ function setupIPC() {
     return { ok: true, count: await memory.count(localMemoryScope) }
   })
 
-  ipcMain.handle('memory:purge-prepare', async (_event, id: string) => prepareMemoryPurge(id))
+  partitionIpc.handle('memory:purge-prepare', async (_event, id: string) => prepareMemoryPurge(id))
 
-  ipcMain.handle('memory:purge-confirm', async (_event, input: { id?: unknown; token?: unknown; phrase?: unknown }) => confirmMemoryPurge(input))
+  partitionIpc.handle('memory:purge-confirm', async (_event, input: { id?: unknown; token?: unknown; phrase?: unknown }) => confirmMemoryPurge(input))
 
-  ipcMain.handle('memory:update', async (_event, id: string, patch: Record<string, unknown>) => {
+  partitionIpc.handle('memory:update', async (_event, id: string, patch: Record<string, unknown>) => {
     if (!memory)
       return { ok: false, error: '长期记忆已关闭。' }
     if (typeof id !== 'string' || !id.trim() || !patch || typeof patch !== 'object')
@@ -3044,14 +3127,14 @@ function setupIPC() {
     return updated ? { ok: true } : { ok: false, error: '没有找到该记忆。' }
   })
 
-  ipcMain.handle('memory:restore', async (_event, id: string) => {
+  partitionIpc.handle('memory:restore', async (_event, id: string) => {
     if (!memory)
       return { ok: false, error: '长期记忆已关闭。' }
     const restored = typeof id === 'string' && await memory.restore(id, localMemoryScope)
     return restored ? { ok: true } : { ok: false, error: '没有找到该记忆。' }
   })
 
-  ipcMain.handle('memory:settings-set', async (_event, input: Partial<MemorySettings>) => {
+  partitionIpc.handle('memory:settings-set', async (_event, input: Partial<MemorySettings>) => {
     await memory?.flushPendingCaptures()
     const nextSettings = normalizeMemorySettings({ ...memorySettings, ...input })
     const requestedRolloutStage = input.v4RolloutStage === undefined
@@ -3100,13 +3183,13 @@ function setupIPC() {
   })
 
   let graphReextractBusy = false
-  ipcMain.handle('memory:graph-reextract-empty', async () => {
+  partitionIpc.handle('memory:graph-reextract-empty', async () => {
     if (graphReextractBusy) return { ok: false, error: '正在重新提取，请稍候。' }
     const useOpen = memorySettings.extractionMode === 'open' || memorySettings.extractionMode === 'smart'
     if (!graphExtractionStore || !graphNormalizationStore || !graphL1Store
       || (useOpen ? !apiConfig.apiKey.trim() || !apiConfig.model.trim() || memorySettings.remotePolicy === 'disabled' : !localUie.isReady()))
       return { ok: false, error: '当前提取模型、发送权限或图存储不可用。' }
-    if (!memorySettings.graphExtractionEnabled && memorySettings.extractionMode !== 'uie' && memorySettings.extractionMode !== 'open')
+    if (!isGraphExtractionEnabled(memorySettings))
       return { ok: false, error: '请先开启保存 UIE 图提取结果。' }
     const store = graphExtractionStore
     const sources = graphSourcesWithoutFactCandidates(store.list()).slice(0, 5)
@@ -3159,7 +3242,7 @@ function setupIPC() {
   })
 
   let graphAutoReassessBusy = false
-  ipcMain.handle('memory:graph-auto-reassess', async () => {
+  partitionIpc.handle('memory:graph-auto-reassess', async () => {
     if (graphAutoReassessBusy) return { ok: false, error: '图事实正在自动重审，请稍候。' }
     if (!graphCaptureRepository || !graphExtractionStore || !graphNormalizationStore || !graphL1Store || !graphL1Writer)
       return { ok: false, error: '图事实审核存储当前不可用。' }
@@ -3175,7 +3258,7 @@ function setupIPC() {
     finally { graphAutoReassessBusy = false }
   })
 
-  ipcMain.handle('memory:uie-extract', async (_event, text: unknown) => {
+  partitionIpc.handle('memory:uie-extract', async (_event, text: unknown) => {
     if (typeof text !== 'string' || !text.trim() || text.length > 4000)
       return { ok: false, error: '请输入不超过 4000 字的文本。' }
     try {
@@ -3190,7 +3273,7 @@ function setupIPC() {
     }
   })
 
-  ipcMain.handle('memory:model-install', async () => {
+  partitionIpc.handle('memory:model-install', async () => {
     try {
       await memory?.flushPendingCaptures()
       await semanticMemory.install()
@@ -3206,7 +3289,7 @@ function setupIPC() {
     }
   })
 
-  ipcMain.handle('memory:clear', async () => {
+  partitionIpc.handle('memory:clear', async () => {
     if (!memory)
       return { ok: false, error: '长期记忆已关闭。' }
     invalidateMemoryV4ShadowComparisons()
@@ -3223,7 +3306,7 @@ function setupIPC() {
     return { ok: true, count: 0 }
   })
 
-  ipcMain.handle('memory:open-location', async () => {
+  partitionIpc.handle('memory:open-location', async () => {
     if (existsSync(memoryStoragePath)) {
       shell.showItemInFolder(memoryStoragePath)
       return { ok: true }
@@ -3232,7 +3315,7 @@ function setupIPC() {
     return error ? { ok: false, error } : { ok: true }
   })
 
-  ipcMain.handle('app:reset', async () => {
+  partitionIpc.handle('app:reset', async () => {
     invalidateMemoryV4ShadowComparisons()
     await memory?.clear(localMemoryScope)
     graphExtractionStore?.clear()
@@ -3243,38 +3326,66 @@ function setupIPC() {
     invalidateGraphL1Projection()
     syncGraphSemantic()
     memoryV4ShadowEvaluationStore?.clear()
-    sessionStore.getSessionMessages('default').splice(0)
-    sessionPersistence?.save('{}')
-    persist.saveJson('settings', { agentName: null, firstRunAt: null })
+    sessionStore.getSessionMessages(conversation.id).splice(0)
+    saveSessions()
+    rootPersist.saveJson('settings', { agentName: null, firstRunAt: null })
     persist.saveAllImmediately()
     app.relaunch()
-    app.exit(0)
+    app.quit()
   })
-  setupVoiceIPC()
 }
 
-// ── Window ──────────────────────────────────────────────
-function createWindow() {
-  mainWindow = new BrowserWindow({
-    width: 900,
-    height: 670,
-    minWidth: 600,
-    minHeight: 400,
-    title: agentName,
-    backgroundColor: '#0f1117',
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-    },
-  })
 
-  mainWindow.webContents.on('did-finish-load', () => {
-    writeBootLog('renderer finished loading')
-    // Deterministic, API-free packaged/startup smoke test. It is inactive in
-    // normal launches and lets CI/debug runs verify the renderer plus memory
-    // initialization without leaving Electron processes behind.
-    if (environmentValue('CONTINUUM_MEMORY_SMOKE_TEST', 'DESKPET_SMOKE_TEST') === 'true') {
-      void (async () => {
+  setupIPC()
+  return {
+    handlers,
+    async start() {
+      if (config.memoryEnabled && memorySettings.semanticEnabled && semanticMemory.isInstalled()) {
+        const verified = await semanticMemory.verify()
+        if (!verified) writeBootLog(`semantic startup verification failed: ${semanticMemory.integrity().error ?? 'unknown error'}`)
+      }
+      initializeMemory()
+      rebuildRuntime()
+    },
+    activate() { rebuildRuntime() },
+    async shutdown() {
+  if (graphNliRetryTimer) clearTimeout(graphNliRetryTimer)
+  graphNliJudge?.close()
+  memoryV4ConsolidationRunner?.stop()
+  memoryV4ShadowGeneration += 1
+  memoryV4ShadowTaskQueue?.stop()
+  memoryV4ShadowWorkerClient?.stop()
+  try {
+    memoryV4EmbeddingIndex?.compact()
+  }
+  catch (error) {
+    writeBootLog(`Memory V4 learned semantic index final compact failed: ${errorMessage(error)}`)
+  }
+  try {
+    memoryV4ShadowEvaluationStore?.flush()
+  }
+  catch (error) {
+    writeBootLog(`Memory V4 shadow evaluation final flush failed: ${errorMessage(error)}`)
+  }
+  try {
+    memoryV4InternalFeedbackStore?.flush()
+  }
+  catch (error) {
+    writeBootLog(`Memory V4 Internal feedback final flush failed: ${errorMessage(error)}`)
+  }
+  await memory?.flushPendingCaptures().catch(error => writeBootLog(`Partition capture shutdown failed: ${String(error)}`))
+  try {
+    memoryV4Shadow?.flush()
+  }
+  catch (error) {
+    writeBootLog(`Memory V4 shadow final flush failed: ${errorMessage(error)}`)
+  }
+  saveSessions()
+  persist.saveAllImmediately()
+  localUie.dispose()
+    },
+    async smoke() {
+
         if (memoryV4ReadController) {
           const recalled = await memoryV4ReadController.recallAdaptive('我叫什么名字？', localMemoryScope, {
             maxInjected: 3,
@@ -3318,7 +3429,96 @@ function createWindow() {
         }
         writeBootLog('smoke test completed')
         setTimeout(() => app.quit(), 100)
-      })().catch((error) => {
+
+    },
+  }
+}
+
+async function getPartition(id: string): Promise<ConversationPartition> {
+  const conversation = conversationRegistry.get(id)
+  sessionStore.ensureSession(id)
+  sessionsCache[id] = sessionStore.getSessionMessages(id)
+  let pending = partitions.get(id)
+  if (!pending) {
+    pending = (async () => {
+      const partition = createConversationPartition(conversation, conversationRegistry.directory(id, rootUserDataDir))
+      await partition.start()
+      return partition
+    })()
+    partitions.set(id, pending)
+    pending.catch(() => { if (partitions.get(id) === pending) partitions.delete(id) })
+  }
+  return pending
+}
+function setupConversationIPC() {
+  for (const channel of activePartition.handlers.keys()) ipcMain.handle(channel, async (event, ...args) => {
+    const envelope = args.at(-1)
+    const id = envelope && typeof envelope === 'object' && typeof envelope.conversationId === 'string'
+      ? (args.pop(), envelope.conversationId) : conversationRegistry.active().id
+    const partition = await getPartition(id)
+    return partition.handlers.get(channel)!(event, ...args)
+  })
+  const snapshot = () => ({ activeId: conversationRegistry.active().id, conversations: conversationRegistry.list() })
+  ipcMain.handle('conversations:list', snapshot)
+  let switching = false
+  const select = async (create: boolean, value: unknown) => {
+    if (switching) return { ok: false, error: '正在切换对话，请稍候。' }
+    switching = true
+    try {
+      const previousId = conversationRegistry.active().id
+      const entry = create ? conversationRegistry.create(typeof value === 'string' ? value : '新对话')
+        : conversationRegistry.get(String(value))
+      sessionStore.ensureSession(entry.id)
+      sessionsCache[entry.id] = sessionStore.getSessionMessages(entry.id)
+      saveSessions()
+      try { activePartition = await getPartition(entry.id) }
+      catch (error) { conversationRegistry.select(previousId); throw error }
+      conversationRegistry.select(entry.id)
+      activePartition.activate()
+      return { ok: true, ...snapshot(), history: sessionStore.getSessionMessages(entry.id) }
+    } catch (error) { return { ok: false, error: errorMessage(error) } }
+    finally { switching = false }
+  }
+  ipcMain.handle('conversations:create', (_event, title) => select(true, title))
+  ipcMain.handle('conversations:select', (_event, id) => select(false, id))
+  ipcMain.handle('conversations:rename', (_event, id, title) => {
+    conversationRegistry.rename(id, title)
+    return { ok: true, ...snapshot() }
+  })
+  ipcMain.handle('skills:list', () => skillService.list())
+  ipcMain.handle('skills:refresh', () => skillService.scan())
+  ipcMain.handle('skills:set-enabled', (_event, id, enabled) => skillService.setEnabled(id, enabled))
+  ipcMain.handle('skills:history', (_event, id) => skillService.history(conversationRegistry.get(id).id))
+  ipcMain.handle('skills:preview', (_event, id) => skillService.preview(id))
+  ipcMain.handle('skills:add-directory', async () => {
+    const result = await dialog.showOpenDialog({ title: '选择包含 SKILL.md 的目录', properties: ['openDirectory'] })
+    return result.canceled ? skillService.list() : skillService.addRoot(result.filePaths[0]!)
+  })
+  setupVoiceIPC()
+}
+
+// ── Window ──────────────────────────────────────────────
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 900,
+    height: 670,
+    minWidth: 600,
+    minHeight: 400,
+    title: agentName,
+    backgroundColor: '#0f1117',
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+    },
+  })
+
+  mainWindow.webContents.on('did-finish-load', () => {
+    writeBootLog('renderer finished loading')
+    // Deterministic, API-free packaged/startup smoke test. It is inactive in
+    // normal launches and lets CI/debug runs verify the renderer plus memory
+    // initialization without leaving Electron processes behind.
+    if (environmentValue('CONTINUUM_MEMORY_SMOKE_TEST', 'DESKPET_SMOKE_TEST') === 'true') {
+      void activePartition.smoke().catch((error) => {
         writeBootLog(`smoke test failed: ${errorMessage(error)}`)
         app.exit(2)
       })
@@ -3342,14 +3542,30 @@ function createWindow() {
 app.whenReady().then(async () => {
   apiConfig = loadApiConfig()
   initializeSessions()
-  if (config.memoryEnabled && memorySettings.semanticEnabled && semanticMemory.isInstalled()) {
-    const verified = await semanticMemory.verify()
-    if (!verified)
-      writeBootLog(`semantic startup verification failed: ${semanticMemory.integrity().error ?? 'unknown error'}`)
-  }
-  initializeMemory()
-  rebuildRuntime()
-  setupIPC()
+  const skillPersistence = safeStorage.isEncryptionAvailable() ? createEncryptedFilePersistence({
+    encryptedPath: join(userDataDir, 'skills-state.enc'), keyPath: join(userDataDir, 'skills-state-key.json'),
+    protectKey: key => safeStorage.encryptString(key.toString('base64')),
+    unprotectKey: key => Buffer.from(safeStorage.decryptString(key), 'base64'),
+  }) : { load: () => undefined, save: (_payload: string) => {} }
+  const codexRoot = process.env.CODEX_HOME || join(process.env.USERPROFILE ?? '', '.codex')
+  const skillRoots = process.env.CONTINUUM_MEMORY_SKILL_ROOTS?.split(';').filter(Boolean)
+    ?? [join(codexRoot, 'skills'), ...['openai-bundled', 'openai-curated', 'openai-curated-remote', 'openai-primary-runtime']
+      .map(group => join(codexRoot, 'plugins', 'cache', group))]
+  const dependencyRoot = join(process.env.USERPROFILE ?? '', '.cache', 'codex-runtimes', 'codex-primary-runtime', 'dependencies')
+  documentRuntime = await probeDocumentRuntime({
+    pythonPath: process.env.CONTINUUM_MEMORY_DOCUMENT_PYTHON || join(dependencyRoot, 'python', 'python.exe'),
+    scriptPath: app.isPackaged ? join(process.resourcesPath, 'document_tools.py') : join(app.getAppPath(), 'resources', 'document_tools.py'),
+    popplerPath: process.env.CONTINUUM_MEMORY_PDF_RENDERER || join(dependencyRoot, 'native', 'poppler', 'Library', 'bin', 'pdftoppm.exe'),
+  })
+  skillService = createDesktopSkillService({ roots: skillRoots, persistence: skillPersistence, documentCapabilities: documentRuntime })
+  const registryPersistence = safeStorage.isEncryptionAvailable() ? createEncryptedFilePersistence({
+    encryptedPath: join(userDataDir, 'conversations.enc'), keyPath: join(userDataDir, 'conversations-key.json'),
+    protectKey: key => safeStorage.encryptString(key.toString('base64')),
+    unprotectKey: key => Buffer.from(safeStorage.decryptString(key), 'base64'),
+  }) : { load: () => undefined, save: (_payload: string) => {} }
+  conversationRegistry = createConversationRegistry({ persistence: registryPersistence, legacySessionIds: Object.keys(sessionsCache) })
+  activePartition = await getPartition(conversationRegistry.active().id)
+  setupConversationIPC()
   createWindow()
 
   app.on('activate', () => {
@@ -3363,53 +3579,18 @@ app.on('window-all-closed', () => {
     app.quit()
 })
 
-let memoryShutdownComplete = false
-app.on('before-quit', (event) => {
-  if (graphNliRetryTimer) clearTimeout(graphNliRetryTimer)
-  graphNliJudge?.close()
-  memoryV4ConsolidationRunner?.stop()
-  memoryV4ShadowGeneration += 1
-  memoryV4ShadowTaskQueue?.stop()
-  memoryV4ShadowWorkerClient?.stop()
-  try {
-    memoryV4EmbeddingIndex?.compact()
-  }
-  catch (error) {
-    writeBootLog(`Memory V4 learned semantic index final compact failed: ${errorMessage(error)}`)
-  }
-  try {
-    memoryV4ShadowEvaluationStore?.flush()
-  }
-  catch (error) {
-    writeBootLog(`Memory V4 shadow evaluation final flush failed: ${errorMessage(error)}`)
-  }
-  try {
-    memoryV4InternalFeedbackStore?.flush()
-  }
-  catch (error) {
-    writeBootLog(`Memory V4 Internal feedback final flush failed: ${errorMessage(error)}`)
-  }
-  if (!memoryShutdownComplete && (memory?.pendingCaptureCount() ?? 0) > 0) {
-    event.preventDefault()
-    void memory!.flushPendingCaptures()
-      .catch(error => writeBootLog(`Memory background capture final flush failed: ${errorMessage(error)}`))
-      .finally(() => {
-        memoryShutdownComplete = true
-        memoryV4Shadow?.flush()
-        saveSessions()
-        persist.saveAllImmediately()
-        localUie.dispose()
-        app.quit()
-      })
-    return
-  }
-  try {
-    memoryV4Shadow?.flush()
-  }
-  catch (error) {
-    writeBootLog(`Memory V4 shadow final flush failed: ${errorMessage(error)}`)
-  }
-  saveSessions()
-  persist.saveAllImmediately()
-  localUie.dispose()
+let partitionShutdown: Promise<void> | undefined
+let partitionShutdownComplete = false
+app.on('before-quit', event => {
+  if (partitionShutdownComplete) return
+  event.preventDefault()
+  if (partitionShutdown) return
+  partitionShutdown = (async () => {
+    const outcomes = await Promise.allSettled([...partitions.values()].map(async entry => (await entry).shutdown()))
+    for (const outcome of outcomes) if (outcome.status === 'rejected') writeBootLog(`Partition shutdown failed: ${String(outcome.reason)}`)
+    saveSessions()
+    rootPersist.saveAllImmediately()
+    sharedLocalUie.dispose()
+    for (const model of sharedNliModels.values()) model.close()
+  })().finally(() => { partitionShutdownComplete = true; app.quit() })
 })

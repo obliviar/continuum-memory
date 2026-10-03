@@ -60,6 +60,8 @@ export interface AgentRuntimeDeps {
   /** Resolve a stable, isolated memory owner for a session. */
   resolveMemoryScope?: (sessionId: string) => MemoryScope
   tools?: AgentToolPort
+  /** Host-controlled bound for workflows needing several tool steps. Defaults to five. */
+  maxToolRounds?: number
   stream?: AgentForegroundStreamPort
   hooks?: ChatHookRegistry
 }
@@ -74,6 +76,8 @@ export interface AgentSendOptions {
   input?: { type: 'text' | 'voice' | 'image' }
   /** Fixed legacy recall size. Omit it to use adaptive batched recall. */
   memoryTopK?: number
+  /** Host-loaded workflow guidance for this turn only; never captured as user evidence. */
+  skill?: { id: string; payload: string }
 }
 
 /** Result of a completed chat turn. */
@@ -97,7 +101,8 @@ export interface AgentTurnResult {
  */
 export function createAgentRuntime(deps: AgentRuntimeDeps) {
   const hooks = deps.hooks ?? createChatHooks()
-  const maxToolRounds = 5
+  const maxToolRounds = deps.maxToolRounds ?? 5
+  if (!Number.isSafeInteger(maxToolRounds) || maxToolRounds < 1 || maxToolRounds > 16) throw new Error('Invalid tool round budget')
 
   async function runLLMRound(
     messages: ChatMessage[],
@@ -273,6 +278,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
 
     // Assemble the full message list from history.
     const history = deps.session.getSessionMessages(sessionId)
+    const skillCallId = options?.skill ? crypto.randomUUID() : undefined
     const messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       ...history.map(h => ({
@@ -282,6 +288,9 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
         toolCalls: h.toolCalls,
         name: h.name,
       })),
+      ...(options?.skill ? [{ role: 'assistant' as const, content: '', toolCalls: [{ id: skillCallId!, type: 'function' as const,
+        function: { name: 'use_skill', arguments: JSON.stringify({ skill_id: options.skill.id }) } }] },
+      { role: 'tool' as const, name: 'use_skill', toolCallId: skillCallId!, content: options.skill.payload }] : []),
     ]
 
     try {

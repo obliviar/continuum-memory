@@ -68,6 +68,11 @@ export interface AgentRuntimeDeps {
 
 /** Options for a single send. */
 export interface AgentSendOptions {
+  signal?: AbortSignal
+  /** Retry the latest failed/stopped turn without appending or recapturing its user input. */
+  retryUserMessageId?: string
+  /** Historical excerpt validated by the host, separate from the user's new statement. */
+  quote?: ChatHistoryItem['quote']
   /** Override the persona's default model. */
   model?: string
   /** Image attachments appended to the user message content parts. */
@@ -82,6 +87,9 @@ export interface AgentSendOptions {
 
 /** Result of a completed chat turn. */
 export interface AgentTurnResult {
+  stopped?: boolean
+  userMessageId?: string
+  assistantMessageId?: string
   text: string
   toolCalls: ToolCall[]
 }
@@ -108,10 +116,9 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
     messages: ChatMessage[],
     model: string,
     ctx: ChatStreamEventContext,
+    signal?: AbortSignal,
   ): Promise<AgentTurnResult> {
-    const streamOpts = deps.tools && deps.tools.hasTools()
-      ? { tools: deps.tools.definitions() }
-      : undefined
+    const streamOpts = { ...(deps.tools && deps.tools.hasTools() ? { tools: deps.tools.definitions() } : {}), ...(signal ? { signal } : {}) }
 
     let assistantText = ''
     const toolCalls: ToolCall[] = []
@@ -119,8 +126,17 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
     const streaming: StreamingAssistantMessage = { id: assistantId, role: 'assistant', content: '', done: false }
     deps.stream?.reset()
 
-    for await (const event of deps.llm.stream(model, messages, streamOpts)) {
-      await handleStreamEvent(event, streaming, toolCalls, ctx)
+    try {
+      if (!signal?.aborted) for await (const event of deps.llm.stream(model, messages, streamOpts)) {
+        if (signal?.aborted) break
+        await handleStreamEvent(event, streaming, toolCalls, ctx)
+      }
+    } catch (error) { if (!signal?.aborted) throw error }
+    if (signal?.aborted) {
+      streaming.done = true
+      deps.stream?.patch(streaming)
+      await hooks.emitStreamEndHooks(ctx)
+      return { text: streaming.content, toolCalls: [], stopped: true }
     }
 
     assistantText = streaming.content
@@ -164,12 +180,14 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
   async function executeToolCalls(
     sessionId: string,
     toolCalls: ToolCall[],
+    signal?: AbortSignal,
   ): Promise<ChatMessage[]> {
     if (!deps.tools || toolCalls.length === 0)
       return []
 
     const results: ChatMessage[] = []
     for (const call of toolCalls) {
+      if (signal?.aborted) break
       let args: Record<string, unknown> = {}
       try {
         args = JSON.parse(call.function.arguments || '{}')
@@ -217,27 +235,40 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
     const isLegacyVisible = !deps.graphRecall ? await deps.memory?.beginRecallTurn?.(memoryScope) : undefined
     await hooks.emitBeforeMessageComposedHooks(userMessage, ctx)
 
+    const originalHistory = deps.session.getSessionMessages(sessionId)
+    const retryIndex = options?.retryUserMessageId ? originalHistory.findIndex(message => message.id === options.retryUserMessageId && message.role === 'user') : -1
+    const retryItem = retryIndex >= 0 ? originalHistory[retryIndex] : undefined
+    if (options?.retryUserMessageId && (!retryItem || retryItem.content !== userMessage
+      || originalHistory.slice(retryIndex + 1).some(message => message.role === 'user' || (message.role === 'assistant' && !['failed','stopped'].includes(message.status ?? '')))))
+      throw new Error('Only the latest failed or stopped user turn can be retried')
+    if (!retryItem && options?.quote && !originalHistory.some(message =>
+      message.id === options.quote!.messageId && message.role === options.quote!.role))
+      throw new Error('Quoted message is not available in this session')
+
     const memoryContext = buildMemoryCaptureContext(deps.session.getSessionMessages(sessionId))
 
     // Build the user message content (possibly multimodal).
+    const quotedContent = formatQuotedUserMessage(userMessage, options?.quote)
     const userContent: ChatMessage['content'] = options?.attachments && options.attachments.length > 0
-      ? [{ type: 'text', text: userMessage }, ...options.attachments]
-      : userMessage
+      ? [{ type: 'text', text: quotedContent }, ...options.attachments]
+      : quotedContent
 
     // Persist the user message.
-    const userItem: ChatHistoryItem = {
+    const userItem: ChatHistoryItem = retryItem ?? {
       id: crypto.randomUUID(),
       role: 'user',
       content: userMessage,
+      ...(options?.attachments?.length ? { hasImage: true } : {}),
+      ...(options?.quote ? { quote: { ...options.quote } } : {}),
       createdAt: Date.now(),
     }
-    appendSessionMessage(sessionId, userItem)
+    if (!retryItem) appendSessionMessage(sessionId, userItem)
 
     const captureInput = { userMessage, assistantMessage: '', context: memoryContext,
       attachments: options?.attachments, metadata: { sessionId, sourceMessageIds: [userItem.id], inputType: ctx.input?.type ?? 'text' } }
-    if (deps.memory?.enqueueCapture) await deps.memory.enqueueCapture(captureInput, memoryScope)
+    if (!retryItem && deps.memory?.enqueueCapture) await deps.memory.enqueueCapture(captureInput, memoryScope)
       .catch(error => { console.error('[continuum-memory] source persistence failed:', error) })
-    else if (deps.memory) void deps.memory.capture(captureInput, memoryScope)
+    else if (!retryItem && deps.memory) void deps.memory.capture(captureInput, memoryScope)
       .catch(error => { console.error('[continuum-memory] background capture failed:', error) })
 
     // Recall long-term memories relevant to this message.
@@ -277,13 +308,13 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
     })
 
     // Assemble the full message list from history.
-    const history = deps.session.getSessionMessages(sessionId)
+    const history = (retryItem ? originalHistory.slice(0,retryIndex+1) : deps.session.getSessionMessages(sessionId)).filter(message => message.status !== 'failed')
     const skillCallId = options?.skill ? crypto.randomUUID() : undefined
     const messages: ChatMessage[] = [
       { role: 'system', content: systemPrompt },
       ...history.map(h => ({
         role: h.role,
-        content: h.id === userItem.id ? userContent : h.content,
+        content: h.id === userItem.id ? userContent : h.role === 'user' ? formatQuotedUserMessage(h.content, h.quote) : h.status === 'stopped' ? `[Historical answer was stopped and may be incomplete]\n${h.content}` : h.content,
         toolCallId: h.toolCallId,
         toolCalls: h.toolCalls,
         name: h.name,
@@ -303,6 +334,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
       let currentMessages = messages
 
       while (round <= maxToolRounds) {
+        if (options?.signal?.aborted) { result = { ...result, toolCalls: [], stopped: true }; break }
         // Recollect immediately before every model round, including after tool-driven deletions.
         // Fixed visibility is combined with fresh liveness checks; extraction never blocks this loop.
         let graphResult: GraphRecallResult | undefined
@@ -359,7 +391,8 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
           memoryPrompt += `\n${sourcePrompt}`
         }
         currentMessages = [{ role: 'system', content: memoryPrompt }, ...currentMessages.slice(1)]
-        result = await runLLMRound(currentMessages, model, ctx)
+        result = await runLLMRound(currentMessages, model, ctx, options?.signal)
+        if (result.stopped) break
         if (graphResult && deps.memory?.graph) {
           try {
             await deps.memory.graph.reportFeedback({
@@ -386,7 +419,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
             toolCalls: result.toolCalls,
           },
         ]
-        const toolResults = await executeToolCalls(sessionId, result.toolCalls)
+        const toolResults = await executeToolCalls(sessionId, result.toolCalls, options?.signal)
         currentMessages = [...currentMessages, ...toolResults]
         round++
       }
@@ -395,6 +428,8 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
       const assistantItem: ChatHistoryItem = {
         id: crypto.randomUUID(),
         role: 'assistant',
+        replyTo: userItem.id,
+        ...(result.stopped ? { status: 'stopped' as const } : {}),
         content: result.text,
         toolCalls: result.toolCalls.length > 0 ? result.toolCalls : undefined,
         createdAt: Date.now(),
@@ -403,10 +438,10 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
 
       // Close the retrieval-feedback loop: citations [M#] in the answer mark
       // injected memories as adopted; the rest are reported as ignored.
-      await reportMemoryRecallFeedback(deps.memory, userMessage, memoryScope, model, adaptiveResult, result.text)
+      if (!result.stopped) await reportMemoryRecallFeedback(deps.memory, userMessage, memoryScope, model, adaptiveResult, result.text)
 
       await hooks.emitAfterSendHooks(result.text, ctx)
-      return result
+      return { ...result, userMessageId: userItem.id, assistantMessageId: assistantItem.id }
     }
     finally {
     }
@@ -575,3 +610,9 @@ function summarizeLocalTopics(contents: string[]): string {
 }
 
 export type AgentRuntime = ReturnType<typeof createAgentRuntime>
+
+function formatQuotedUserMessage(content: string, quote?: ChatHistoryItem['quote']): string {
+  if (!quote) return content
+  const label = quote.role === 'user' ? '用户' : '助手'
+  return `引用的历史${label}消息（供提问参考）：\n${quote.content.split('\n').map(line => `> ${line}`).join('\n')}\n\n本轮用户输入：\n${content}`
+}

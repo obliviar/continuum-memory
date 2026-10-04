@@ -235,3 +235,79 @@ function createMemorySpy() {
   }
   return { captures, unlinked, port }
 }
+
+describe('historical message references', () => {
+  it('sends attributed quotations to the model while capturing only the new user statement', async () => {
+    const memory = createMemorySpy(), session = createSessionManager(10), observed: ChatMessage[][] = []
+    session.ensureSession('quoted')
+    session.appendSessionMessage('quoted', { id: 'old-answer', role: 'assistant', content: '未经核实的旧回答', createdAt: 1 })
+    const runtime = createAgentRuntime({ persona: { systemPrompt: 'test', model: 'test' },
+      llm: createLlm([{ type: 'text-delta', text: '收到' }], observed), session, memory: memory.port })
+    await runtime.send('quoted', '这句话的依据是什么？', { quote: { messageId: 'old-answer', role: 'assistant', content: '未经核实的旧回答' } })
+    const sent = observed[0]?.filter(message => message.role === 'user').at(-1)
+    expect(sent?.content).toContain('引用的历史助手消息')
+    expect(sent?.content).toContain('未经核实的旧回答')
+    expect(memory.captures[0]?.userMessage).toBe('这句话的依据是什么？')
+    const user = session.getSessionMessages('quoted').find(message => message.role === 'user')
+    expect(user?.content).toBe('这句话的依据是什么？')
+    expect(user?.quote?.messageId).toBe('old-answer')
+    await runtime.send('quoted', '继续解释')
+    expect(observed[1]?.some(message => typeof message.content === 'string' && message.content.includes('引用的历史助手消息'))).toBe(true)
+    expect(memory.captures.at(-1)?.userMessage).toBe('继续解释')
+  })
+  it('rejects a reference from another session before saving new evidence', async () => {
+    const memory = createMemorySpy(), session = createSessionManager(10)
+    session.ensureSession('other')
+    session.appendSessionMessage('other', { id: 'foreign', role: 'assistant', content: '其他对话的内容', createdAt: 1 })
+    const runtime = createAgentRuntime({ persona: { systemPrompt: 'test', model: 'test' },
+      llm: createLlm([{ type: 'text-delta', text: '收到' }]), session, memory: memory.port })
+    await expect(runtime.send('current', '解释', { quote: { messageId: 'foreign', role: 'assistant', content: '其他对话的内容' } })).rejects.toThrow('not available in this session')
+    expect(memory.captures).toHaveLength(0)
+    expect(session.getSessionMessages('current')).toHaveLength(0)
+  })
+})
+
+describe('stopping and retrying a response', () => {
+  it('stops an awaiting stream, preserves partial output, and retries without duplicating user evidence', async () => {
+    const memory = createMemorySpy(), session = createSessionManager(20), controller = new AbortController()
+    let calls = 0, started!: () => void
+    const firstToken = new Promise<void>(resolve => { started = resolve })
+    const llm: AgentLLMPort = { async *stream(_model, _messages, options) {
+      calls++
+      if (calls === 1) {
+        yield { type: 'text-delta', text: '已输出的部分' }
+        started()
+        await new Promise<void>(resolve => { if (options?.signal?.aborted) resolve(); else options?.signal?.addEventListener('abort', () => resolve(), { once: true }) })
+        yield { type: 'error', error: new Error('aborted') }
+      } else yield { type: 'text-delta', text: '完整的新回答' }
+    } }
+    const runtime = createAgentRuntime({ persona: { systemPrompt: 'test', model: 'test' }, llm, session, memory: memory.port })
+    const pending = runtime.send('s', '我的项目叫星河。', { signal: controller.signal })
+    await firstToken
+    controller.abort()
+    const stopped = await pending
+    expect(stopped).toMatchObject({ text: '已输出的部分', stopped: true, toolCalls: [] })
+    expect(session.getSessionMessages('s').at(-1)).toMatchObject({ status: 'stopped', replyTo: stopped.userMessageId })
+    const retried = await runtime.send('s', '我的项目叫星河。', { retryUserMessageId: stopped.userMessageId })
+    expect(retried.text).toBe('完整的新回答')
+    expect(session.getSessionMessages('s').filter(message => message.role === 'user')).toHaveLength(1)
+    expect(memory.captures).toHaveLength(1)
+  })
+  it('does not execute pending tool calls after cancellation', async () => {
+    const controller = new AbortController(), executed: string[] = []
+    const llm: AgentLLMPort = { async *stream() { yield { type: 'tool-call', id: 't', name: 'write', arguments: '{}' }; controller.abort() } }
+    const runtime = createAgentRuntime({ persona: { systemPrompt: 'test', model: 'test' }, llm, session: createSessionManager(10),
+      tools: { hasTools: () => true, definitions: () => [], execute: async name => { executed.push(name); return { content: 'done', toolCallId: 't' } } } })
+    expect((await runtime.send('s', '操作', { signal: controller.signal })).stopped).toBe(true)
+    expect(executed).toEqual([])
+  })
+  it('rejects retry of an old question after a newer turn without adding evidence', async () => {
+    const memory = createMemorySpy(), session = createSessionManager(10)
+    session.ensureSession('s')
+    session.appendSessionMessage('s', { id: 'old', role: 'user', content: '旧问题', createdAt: 1 })
+    session.appendSessionMessage('s', { id: 'new', role: 'user', content: '新问题', createdAt: 2 })
+    const runtime = createAgentRuntime({ persona: { systemPrompt: 'test', model: 'test' }, llm: createLlm([]), session, memory: memory.port })
+    await expect(runtime.send('s', '旧问题', { retryUserMessageId: 'old' })).rejects.toThrow('latest failed or stopped')
+    expect(memory.captures).toEqual([])
+  })
+})

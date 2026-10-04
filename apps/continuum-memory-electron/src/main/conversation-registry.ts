@@ -7,6 +7,8 @@ export interface DesktopConversation {
   title: string
   createdAt: number
   legacyRoot?: boolean
+  pinned?: boolean
+  archived?: boolean
 }
 export function createConversationRegistry(options: {
   persistence: { load(): string | undefined; save(payload: string): void }
@@ -26,6 +28,8 @@ export function createConversationRegistry(options: {
       || state.conversations.some(c => typeof c.id !== 'string' || !c.id || c.id.length > 200
         || typeof c.title !== 'string' || !c.title.trim() || c.title.length > 100
         || !Number.isSafeInteger(c.createdAt) || c.createdAt < 0
+        || (c.archived !== undefined && typeof c.archived !== 'boolean')
+        || (c.pinned !== undefined && typeof c.pinned !== 'boolean')
         || (c.legacyRoot !== undefined && c.legacyRoot !== true)
         || (c.legacyRoot ? c.id !== 'default' || c.memorySpaceId !== 'legacy-default'
           : !/^[0-9a-f-]{36}$/i.test(c.memorySpaceId)))) throw new Error('Invalid conversation registry')
@@ -57,6 +61,16 @@ export function createConversationRegistry(options: {
       get(id)
       if (typeof title !== 'string' || !title.trim() || title.length > 100) throw new Error('Invalid conversation title')
       commit({ ...state, conversations: state.conversations.map(c => c.id === id ? { ...c, title: title.trim() } : c) })
+    },
+    pin(id: string, pinned: boolean) {
+      get(id)
+      if (typeof pinned !== 'boolean') throw new Error('Invalid pinned state')
+      commit({ ...state, conversations: state.conversations.map(c => c.id === id ? { ...c, pinned } : c) })
+    },
+    archive(id: string, archived: boolean) {
+      get(id)
+      if (typeof archived !== 'boolean') throw new Error('Invalid archived state')
+      commit({ ...state, conversations: state.conversations.map(c => c.id === id ? { ...c, archived } : c) })
     },
     directory(id: string, root: string) {
       const entry = get(id)

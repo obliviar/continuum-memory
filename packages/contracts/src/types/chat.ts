@@ -31,8 +31,19 @@ export interface ToolCall {
   function: { name: string; arguments: string }
 }
 
+export interface ChatMessageQuote {
+  messageId: string
+  role: 'user' | 'assistant'
+  content: string
+}
+
 /** A finalized history entry persisted in a session. */
 export interface ChatHistoryItem {
+  status?: 'stopped' | 'failed'
+  replyTo?: string
+  hasImage?: boolean
+  /** A host-validated historical excerpt, excluded from fresh user evidence. */
+  quote?: ChatMessageQuote
   id: string
   role: ChatRole
   content: string

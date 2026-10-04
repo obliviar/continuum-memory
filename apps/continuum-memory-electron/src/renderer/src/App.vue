@@ -1,9 +1,27 @@
 <script setup lang="ts">
-import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue'
+import { ref, nextTick, onMounted, onUnmounted, computed, watch } from 'vue'
 import { graphReviewIpcFields, graphReviewTimeError } from '../../shared/graph-review-ipc'
 import type { GraphOpenAssertionRecord } from '@continuum-memory/memory'
 import GraphOpenAssertions from './components/GraphOpenAssertions.vue'
 import MemoryRecallNotice from './components/MemoryRecallNotice.vue'
+import MemoryMark from './components/MemoryMark.vue'
+import AppIcon from './components/AppIcon.vue'
+import SkillPicker from './components/SkillPicker.vue'
+import SendArtwork from './components/SendArtwork.vue'
+import MessageMarkdown from './components/MessageMarkdown.vue'
+import ConversationSearch from './components/ConversationSearch.vue'
+import QuickPhrases from './components/QuickPhrases.vue'
+import GeneralSettings from './components/GeneralSettings.vue'
+import ComposerEditor from './components/ComposerEditor.vue'
+import SavedMessages from './components/SavedMessages.vue'
+import MemoryActivity from './components/MemoryActivity.vue'
+import { DEFAULT_CHAT_PREFERENCES, shortcutFromEvent, type ChatPreferences } from '../../shared/chat-preferences'
+import { bookmarkKey, type MessageBookmarkView } from '../../shared/chat-bookmarks'
+import type { MemoryActivityReport } from '../../shared/memory-activity'
+import type { EditorSelection } from '../../shared/chat-ui'
+import { useChatDrafts } from './chat-drafts'
+import type { ConversationListItem, ConversationSearchResult, MessageQuote, QuickPhrase } from '../../shared/chat-ui'
+import { themes, resolveTheme, type Theme } from './themes'
 
 import { activeConversationId, ipcRenderer } from './conversation-ipc'
 import { dialogFocus as vDialogFocus } from './dialog-focus'
@@ -13,6 +31,11 @@ interface Message {
   content: string
   id: string
   hasImage?: boolean
+  quote?: MessageQuote
+  status?: 'failed' | 'stopped'
+  replyTo?: string
+  persisted?: boolean
+  retryImage?: { data: string; mimeType: string }
   memoryReview?: MemoryV4InternalCandidateReview
 }
 
@@ -59,21 +82,6 @@ const V4_INTERNAL_CANDIDATE_FEEDBACK_OPTIONS: Array<{
   { label: 'expired', text: '已过期' },
   { label: 'privacy', text: '隐私不当' },
 ]
-
-interface Theme {
-  id: string
-  name: string
-  bg: string
-  surface: string
-  surfaceHover: string
-  border: string
-  text: string
-  textMuted: string
-  accent: string
-  accentHover: string
-  accentSoft: string
-  scrollThumb: string
-}
 
 interface MemoryItem {
   id: string
@@ -237,14 +245,6 @@ function createCustomTheme(color: string): Theme {
   }
 }
 
-const themes: Theme[] = [
-  { id: 'dark', name: '深空黑', bg: '#0f1117', surface: '#1c1f26', surfaceHover: '#252830', border: '#252830', text: '#e1e4e8', textMuted: '#666', accent: '#2d7d46', accentHover: '#35954f', accentSoft: 'rgba(45,125,70,0.15)', scrollThumb: '#353840' },
-  { id: 'light', name: '日光白', bg: '#f6f8fa', surface: '#ffffff', surfaceHover: '#eaeef2', border: '#d0d7de', text: '#1f2328', textMuted: '#656d76', accent: '#0969da', accentHover: '#0550ae', accentSoft: 'rgba(9,105,218,0.12)', scrollThumb: '#c0c7cf' },
-  { id: 'forest', name: '清新绿', bg: '#e7f4e9', surface: '#f7fbf7', surfaceHover: '#dceee0', border: '#bed8c4', text: '#1f3525', textMuted: '#5f7664', accent: '#397a4b', accentHover: '#2f663f', accentSoft: 'rgba(57,122,75,0.14)', scrollThumb: '#aacbb2' },
-  { id: 'warm', name: '暖杏色', bg: '#fff0e6', surface: '#fffaf6', surfaceHover: '#fbe4d6', border: '#e8c7b4', text: '#402b20', textMuted: '#7f685b', accent: '#bd5f3f', accentHover: '#9f4c31', accentSoft: 'rgba(189,95,63,0.14)', scrollThumb: '#dbb29a' },
-  { id: 'ocean', name: '晴空蓝', bg: '#e8f3ff', surface: '#f8fbff', surfaceHover: '#dcecff', border: '#bfd7ef', text: '#19334d', textMuted: '#607891', accent: '#1769aa', accentHover: '#12578e', accentSoft: 'rgba(23,105,170,0.14)', scrollThumb: '#a9cae8' },
-]
-
 // ── State ───────────────────────────────────────────────
 const agentName = ref('Continuum Memory')
 const appVersion = ref('')
@@ -252,7 +252,7 @@ const isFirstRun = ref(true)
 const loaded = ref(false)
 const nameInput = ref('')
 const messages = ref<Message[]>([])
-const conversations = ref<{ id: string; title: string; memorySpaceId: string }[]>([])
+const conversations = ref<ConversationListItem[]>([])
 const selectedConversationId = ref('default')
 const conversationSwitching = ref(false)
 const conversationError = ref('')
@@ -260,16 +260,53 @@ const renamingConversation = ref(false)
 const conversationRenameInput = ref('')
 const conversationMessages = new Map<string, Message[]>()
 const pendingConversations = new Set<string>()
-const conversationDrafts = new Map<string, string>()
 const conversationImages = new Map<string, { data: string; mimeType: string } | null>()
 const memoryDrafts = new Map<string, { manual: string; preview: string; editingId: string | null; editingContent: string; replies: Record<string, string> }>()
 const currentConversationTitle = computed(() => conversations.value.find(c => c.id === activeConversationId.value)?.title ?? '当前对话')
 const canSwitchConversation = computed(() => !conversationSwitching.value && !memoryMutating.value && !memoryLoading.value && !apiSaving.value && !isListening.value && !clarificationBusy.value && !semanticInstalling.value && !documentsBusy.value)
 const input = ref('')
+const composerTextarea = ref<HTMLTextAreaElement | null>(null)
+function resizeComposer() {
+  nextTick(() => {
+    const textarea = composerTextarea.value
+    if (!textarea) return
+    // Measure without a scrollbar: its width can wrap even an empty placeholder.
+    textarea.style.overflowY = 'hidden'
+    textarea.style.height = '0px'
+    const style = getComputedStyle(textarea)
+    const minHeight = parseFloat(style.minHeight) || 40
+    const borderHeight = (parseFloat(style.borderTopWidth) || 0) + (parseFloat(style.borderBottomWidth) || 0)
+    const maxHeight = Math.max(minHeight, Math.min(144, Math.floor(window.innerHeight * 0.20)))
+    // Leave two pixels for fractional line heights at non-integer zoom levels.
+    const lineHeight = parseFloat(style.lineHeight) + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom)
+    const naturalHeight = Math.ceil(Math.max(textarea.scrollHeight, lineHeight) + borderHeight + 2)
+    textarea.style.height = `${Math.min(maxHeight, Math.max(minHeight, naturalHeight))}px`
+    textarea.style.overflowY = textarea.scrollHeight > textarea.clientHeight + 1 ? 'auto' : 'hidden'
+  })
+}
+watch(input, resizeComposer)
+let composerWidth = -1
+const composerResizeObserver = new ResizeObserver(entries => {
+  const width = entries[0]?.contentRect.width
+  // Observe width after layout; resizing the height must not trigger a loop.
+  if (width !== undefined && Math.abs(width - composerWidth) > 0.5) {
+    composerWidth = width
+    resizeComposer()
+  }
+})
+watch(composerTextarea, textarea => {
+  composerResizeObserver.disconnect()
+  composerWidth = -1
+  if (textarea) composerResizeObserver.observe(textarea)
+})
 const isLoading = ref(false)
 const chatEl = ref<HTMLElement | null>(null)
 const currentTheme = ref<Theme>(themes[0]!)
+watch(currentTheme, resizeComposer)
 const showThemeMenu = ref(false)
+const showAppMenu = ref(false)
+const compactComposer = ref(window.innerWidth < 420)
+function updateCompactComposer() { compactComposer.value = window.innerWidth < 420; resizeComposer() }
 const customColor = ref(DEFAULT_CUSTOM_COLOR)
 let themePreviewOrigin: Theme | null = null
 
@@ -334,7 +371,6 @@ const skillQuery = ref('')
 const skillStatusMessage = ref('')
 const skillPreview = ref<{ id: string; instructions: string; truncated: boolean } | null>(null)
 const selectedSkillId = ref('')
-const conversationSkills = new Map<string, string>()
 const skillUseHistory = ref<{ id: string; name: string; at: number; mode: string }[]>([])
 const enabledSkills = computed(() => skillItems.value.filter(item => item.available && item.enabled))
 const filteredSkills = computed(() => skillItems.value.filter(item => !skillQuery.value.trim()
@@ -561,7 +597,229 @@ const themeVars = computed(() => ({
   '--accent-hover': currentTheme.value.accentHover,
   '--accent-soft': currentTheme.value.accentSoft,
   '--scroll-thumb': currentTheme.value.scrollThumb,
+  '--sidebar': currentTheme.value.sidebar ?? currentTheme.value.surface,
+  '--accent-ink': currentTheme.value.accentInk ?? currentTheme.value.accent,
+  '--on-accent': currentTheme.value.onAccent ?? '#ffffff',
+  '--marker': currentTheme.value.marker ?? currentTheme.value.accent,
+  '--user-bubble': currentTheme.value.userBubble ?? currentTheme.value.accentSoft,
+  '--color-scheme': currentTheme.value.scheme ?? 'light',
+  '--logo-primary': currentTheme.value.logoPrimary ?? currentTheme.value.accentInk ?? currentTheme.value.accent,
+  '--logo-secondary': currentTheme.value.logoSecondary ?? currentTheme.value.marker ?? currentTheme.value.accent,
 }))
+
+// ── Everyday chat utilities ─────────────────────────────
+const quotedMessage = ref<MessageQuote | undefined>()
+const draftStorage = useChatDrafts()
+const draftStatus = draftStorage.status
+const draftError = draftStorage.error
+const quickPhrases = ref<QuickPhrase[]>([])
+const showQuickPhrases = ref(false)
+const showConversationSearch = ref(false)
+const pinningConversation = ref('')
+const exportingConversation = ref(false)
+const highlightedMessageId = ref('')
+const chatNotice = ref('')
+let chatNoticeTimer: ReturnType<typeof setTimeout> | undefined
+let highlightTimer: ReturnType<typeof setTimeout> | undefined
+const orderedConversations = computed(() => conversations.value.filter(item => !item.archived).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned)))
+
+// ── Reading, navigation and response controls ───────────
+const preferences = ref<ChatPreferences>(structuredClone(DEFAULT_CHAT_PREFERENCES))
+const readerPreview = ref<ChatPreferences | undefined>()
+const showGeneralSettings = ref(false)
+const generalSettingsBusy = ref(false)
+const generalSettingsError = ref('')
+const showArchiveLibrary = ref(false)
+const showSavedMessages = ref(false)
+const bookmarks = ref<MessageBookmarkView[]>([])
+const bookmarkBusy = ref(false)
+const savedKeys = computed(() => new Set(bookmarks.value.map(item => bookmarkKey(item.conversationId, item.messageId))))
+const showComposerEditor = ref(false)
+const editorSelection = ref<EditorSelection>({ start: 0, end: 0, direction: 'none', scrollTop: 0 })
+const showInputMenu = ref(false)
+const followLatest = ref(true)
+const unreadReply = ref(false)
+let manualChatScroll = false
+const stoppingConversations = ref(new Set<string>())
+const stoppingGeneration = computed(() => stoppingConversations.value.has(activeConversationId.value))
+const memoryActivity = ref<MemoryActivityReport>({ enabled: false, items: [], totals: { pending: 0, processing: 0, clarifying: 0, failed: 0, published: 0 }, awaitingProcessor: 0 })
+const memoryActivityLoading = ref(false)
+const showMemoryActivity = ref(false)
+let memoryActivityTimer: ReturnType<typeof setInterval> | undefined
+const currentArchived = computed(() => !!conversations.value.find(item => item.id === activeConversationId.value)?.archived)
+const readerStyle = computed(() => {
+  const reading = (readerPreview.value ?? preferences.value).reading
+  return { '--reader-font-size': reading.fontSize ? `${reading.fontSize}px` : 'var(--reading-size)', '--reader-line-height': String(reading.lineHeight), '--reader-width': reading.contentWidth ? `${reading.contentWidth}px` : '1500px' }
+})
+const sendHint = computed(() => preferences.value.sendKey === 'ctrl-enter' ? 'Ctrl + Enter 发送 · Enter 换行' : 'Enter 发送 · Shift + Enter 换行')
+const memoryActivitySummary = computed(() => {
+  const t = memoryActivity.value.totals
+  if (!memoryActivity.value.enabled) return '记忆未启用'
+  if (t.processing) return `记忆处理中 · ${t.processing}`
+  if (t.pending) return `记忆等待整理 · ${t.pending}`
+  if (t.clarifying) return `记忆待补充 · ${t.clarifying}`
+  if (t.failed) return `记忆处理失败 · ${t.failed}`
+  return '记忆处理状态'
+})
+function openGeneralSettings() { showAppMenu.value = false; closeThemeMenu(true); generalSettingsError.value = ''; readerPreview.value = undefined; showGeneralSettings.value = true }
+function closeGeneralSettings() { if (!generalSettingsBusy.value) { readerPreview.value = undefined; showGeneralSettings.value = false } }
+async function saveGeneralSettings(value: ChatPreferences) {
+  generalSettingsBusy.value = true; generalSettingsError.value = ''
+  try {
+    const result = await ipcRenderer.invoke('chat-ui:preferences-save', value)
+    if (!result.ok) throw new Error(result.error)
+    preferences.value = result.preferences
+    readerPreview.value = undefined; showGeneralSettings.value = false
+    notifyChat('设置已保存')
+    resizeComposer()
+  } catch (error) { generalSettingsError.value = error instanceof Error ? error.message : '设置保存失败。' }
+  finally { generalSettingsBusy.value = false }
+}
+async function refreshBookmarks() {
+  try { const result = await ipcRenderer.invoke('chat-ui:bookmarks-list'); if (!result.ok) throw new Error(result.error); bookmarks.value = result.items }
+  catch (error) { notifyChat(error instanceof Error ? error.message : '收藏加载失败。') }
+}
+async function toggleBookmark(conversationId: string, messageId: string, saved: boolean) {
+  if (bookmarkBusy.value) return
+  bookmarkBusy.value = true
+  try {
+    const result = await ipcRenderer.invoke('chat-ui:bookmark-set', conversationId, messageId, saved)
+    if (!result.ok) throw new Error(result.error)
+    bookmarks.value = result.items
+    notifyChat(saved ? '消息已收藏' : '已取消收藏')
+  } catch (error) { notifyChat(error instanceof Error ? error.message : '收藏操作失败。') }
+  finally { bookmarkBusy.value = false }
+}
+async function openSavedMessage(item: MessageBookmarkView) {
+  await openSearchResult({ id: item.conversationId, title: item.conversationTitle, memorySpaceId: '', messageId: item.messageId })
+  if (activeConversationId.value === item.conversationId) showSavedMessages.value = false
+}
+async function archiveConversation(id: string, archived: boolean) {
+  try {
+    const result = await ipcRenderer.invoke('conversations:archive', id, archived)
+    if (!result.ok) throw new Error(result.error)
+    conversations.value = result.conversations
+    await refreshBookmarks()
+    notifyChat(archived ? '对话已归档，可在归档列表恢复' : '对话已恢复到侧栏')
+  } catch (error) { notifyChat(error instanceof Error ? error.message : '归档操作失败。') }
+}
+function expandComposer() {
+  const t = composerTextarea.value
+  if (!t || isLoading.value) return
+  editorSelection.value = { start: t.selectionStart, end: t.selectionEnd, direction: t.selectionDirection, scrollTop: t.scrollTop }
+  showInputMenu.value = false
+  showComposerEditor.value = true
+}
+function closeComposerEditor(selection: EditorSelection, submit = false) {
+  showComposerEditor.value = false; editorSelection.value = selection
+  resizeComposer()
+  nextTick(() => { const t = composerTextarea.value; t?.focus(); t?.setSelectionRange(selection.start, selection.end, selection.direction); if (t) t.scrollTop = selection.scrollTop; if (submit) void send() })
+}
+function markChatScroll() { manualChatScroll = true }
+function onChatNavigation(event: KeyboardEvent) { if (['PageUp','PageDown','Home','End','ArrowUp','ArrowDown',' '].includes(event.key)) markChatScroll() }
+function onChatScroll() {
+  const el = chatEl.value
+  if (!el || !manualChatScroll) return
+  followLatest.value = el.scrollHeight - el.clientHeight - el.scrollTop < 60
+  if (followLatest.value) unreadReply.value = false
+}
+async function stopGeneration() {
+  const id = activeConversationId.value
+  if (!isLoading.value || stoppingConversations.value.has(id)) return
+  stoppingConversations.value.add(id)
+  try { const result = await ipcRenderer.invoke('chat:stop'); if (!result.ok) throw new Error(result.error) }
+  catch (error) { stoppingConversations.value.delete(id); notifyChat(error instanceof Error ? error.message : '停止请求失败。') }
+}
+async function refreshMemoryActivity() {
+  if (memoryActivityLoading.value || conversationSwitching.value) return
+  const id = activeConversationId.value
+  memoryActivityLoading.value = true
+  try { const result = await ipcRenderer.invoke('memory:activity'); if (id === activeConversationId.value && result?.ok) memoryActivity.value = result.report }
+  catch { if (id === activeConversationId.value) memoryActivity.value = { ...memoryActivity.value, error: '状态更新失败，请稍后刷新。' } }
+  finally { memoryActivityLoading.value = false }
+}
+function onVisibilityChange() { if (!document.hidden) void refreshMemoryActivity().catch(() => {}) }
+
+function notifyChat(message: string) {
+  chatNotice.value = message
+  clearTimeout(chatNoticeTimer)
+  chatNoticeTimer = setTimeout(() => { chatNotice.value = '' }, 4000)
+}
+watch(draftError, error => { if (error) notifyChat(error) })
+function currentDraft() {
+  return { text: input.value, ...(quotedMessage.value ? { quote: { ...quotedMessage.value } } : {}), ...(selectedSkillId.value ? { skillId: selectedSkillId.value } : {}) }
+}
+function messageSelection(message: Message): string {
+  const selection = window.getSelection()
+  const container = [...document.querySelectorAll<HTMLElement>('.message')].find(element => element.dataset.messageId === message.id)?.querySelector('.message-markdown')
+  if (selection && container && container.contains(selection.anchorNode) && container.contains(selection.focusNode)) return selection.toString().trim()
+  return ''
+}
+async function copyMessage(message: Message) {
+  try {
+    const result = await ipcRenderer.invoke('chat-ui:copy', messageSelection(message) || message.content)
+    if (!result.ok) throw new Error(result.error)
+    notifyChat('消息已复制')
+  } catch (error) { notifyChat(error instanceof Error ? error.message : '复制失败，请重试。') }
+}
+function quoteMessage(message: Message) {
+  const content = messageSelection(message) || message.content
+  if (!content.trim()) return
+  if (content.length > 12000) { notifyChat('引用最多 12000 字，请选中需要引用的片段。'); return }
+  quotedMessage.value = { messageId: message.id, role: message.role, content }
+  nextTick(() => composerTextarea.value?.focus())
+}
+async function pinConversation(id: string, pinned: boolean) {
+  if (pinningConversation.value) return
+  pinningConversation.value = id
+  try {
+    const result = await ipcRenderer.invoke('conversations:pin', id, pinned)
+    if (!result.ok) throw new Error(result.error)
+    conversations.value = result.conversations
+    notifyChat(pinned ? '对话已置顶' : '已取消置顶')
+  } catch (error) { notifyChat(error instanceof Error ? error.message : '置顶失败，请重试。') }
+  finally { pinningConversation.value = '' }
+}
+async function openSearchResult(result: ConversationSearchResult) {
+  await selectConversation(result.id)
+  if (activeConversationId.value !== result.id) return
+  showConversationSearch.value = false
+  if (result.messageId) {
+    followLatest.value = false; manualChatScroll = true
+    highlightedMessageId.value = result.messageId
+    clearTimeout(highlightTimer)
+    highlightTimer = setTimeout(() => { highlightedMessageId.value = '' }, 4000)
+    nextTick(() => [...document.querySelectorAll<HTMLElement>('.message')].find(element => element.dataset.messageId === result.messageId)?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
+  }
+}
+function insertPhrase(content: string) {
+  const textarea = composerTextarea.value
+  const start = textarea?.selectionStart ?? input.value.length
+  const end = textarea?.selectionEnd ?? input.value.length
+  const before = input.value.slice(0, start), after = input.value.slice(end)
+  const insertion = `${before && !/\s$/.test(before) ? '\n' : ''}${content}${after && !/^\s/.test(after) ? '\n' : ''}`
+  input.value = before + insertion + after
+  showQuickPhrases.value = false
+  nextTick(() => { textarea?.focus(); textarea?.setSelectionRange(start + insertion.length, start + insertion.length) })
+}
+async function exportConversation(format: 'md' | 'txt') {
+  if (exportingConversation.value || isLoading.value) return
+  exportingConversation.value = true
+  showAppMenu.value = false
+  try {
+    const result = await ipcRenderer.invoke('conversations:export', activeConversationId.value, format)
+    if (!result.ok) throw new Error(result.error)
+    if (!result.canceled) notifyChat(`已导出：${result.filename}`)
+  } catch (error) { notifyChat(error instanceof Error ? error.message : '导出失败，请重试。') }
+  finally { exportingConversation.value = false }
+}
+function onChatShortcut(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || document.querySelector('.modal-backdrop')) return
+  const key = shortcutFromEvent(event), shortcuts = preferences.value.shortcuts
+  if (key === shortcuts.newConversation) { event.preventDefault(); void selectConversation() }
+  else if (key === shortcuts.focusInput) { event.preventDefault(); composerTextarea.value?.focus() }
+  else if (key === shortcuts.search) { event.preventDefault(); showConversationSearch.value = true }
+}
 
 // ── IPC token handler ───────────────────────────────────
 function onToken(_event: unknown, token: string, origin?: { conversationId: string }) {
@@ -570,7 +828,7 @@ function onToken(_event: unknown, token: string, origin?: { conversationId: stri
   const last = target?.[target.length - 1]
   if (last && last.role === 'assistant') {
     last.content += token
-    if (id === activeConversationId.value) scrollToBottom()
+    if (id === activeConversationId.value) { if (followLatest.value) scrollToBottom(false); else unreadReply.value = true }
   }
 }
 
@@ -579,8 +837,17 @@ function onMemoryModelProgress(_event: unknown, progress: typeof semanticModelPr
   semanticModelProgress.value = progress
 }
 
+watch([input, quotedMessage, selectedSkillId], () => {
+  if (loaded.value && !conversationSwitching.value) draftStorage.queue(activeConversationId.value, currentDraft())
+}, { flush: 'sync' })
+
 // ── Lifecycle ───────────────────────────────────────────
 onMounted(async () => {
+  window.addEventListener('resize', updateCompactComposer)
+  document.addEventListener('pointerdown', dismissHeaderMenus)
+  document.addEventListener('keydown', onHeaderEscape)
+  document.addEventListener('keydown', onChatShortcut)
+  document.addEventListener('visibilitychange', onVisibilityChange)
   appVersion.value = await ipcRenderer.invoke('app:version')
   const settings = await ipcRenderer.invoke('settings:get')
   if (settings.agentName) {
@@ -596,7 +863,7 @@ onMounted(async () => {
       }
     }
     else {
-      const t = themes.find(t => t.id === settings.theme)
+      const t = resolveTheme(settings.theme)
       if (t) currentTheme.value = t
     }
   }
@@ -606,6 +873,15 @@ onMounted(async () => {
   conversations.value = conversationState.conversations
   activeConversationId.value = conversationState.activeId
   selectedConversationId.value = conversationState.activeId
+  try {
+    const ui = await draftStorage.load()
+    quickPhrases.value = ui.phrases ?? []
+    if (ui.preferences) preferences.value = ui.preferences
+    const draft = draftStorage.get(activeConversationId.value)
+    input.value = draft.text
+    quotedMessage.value = draft.quote
+    selectedSkillId.value = draft.skillId ?? ''
+  } catch (error) { notifyChat(error instanceof Error ? error.message : '草稿加载失败。') }
   await refreshMemoryStatus()
   await refreshSkills()
   await refreshDocuments()
@@ -614,14 +890,20 @@ onMounted(async () => {
   if (history && history.length > 0) {
     messages.value = history
       .filter((h: { role: string }) => h.role === 'user' || h.role === 'assistant')
-      .map((h: { id?: string; role: 'user' | 'assistant'; content: string }) => ({
+      .map((h: { id?: string; role: 'user' | 'assistant'; content: string; quote?: MessageQuote; status?: 'failed' | 'stopped'; replyTo?: string; hasImage?: boolean }) => ({
         id: h.id || crypto.randomUUID(),
         role: h.role,
         content: h.content,
+        quote: h.quote, status: h.status, replyTo: h.replyTo, hasImage: h.hasImage, persisted: true,
       }))
   }
 
   loaded.value = true
+  await refreshBookmarks()
+  void refreshMemoryActivity().catch(() => {})
+  memoryActivityTimer = setInterval(() => { if (!document.hidden) void refreshMemoryActivity().catch(() => {}) }, 2000)
+  resizeComposer()
+  void document.fonts.ready.then(resizeComposer)
   conversationMessages.set(activeConversationId.value, messages.value)
   if (!isFirstRun.value)
     scrollToBottom()
@@ -634,6 +916,15 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  composerResizeObserver.disconnect()
+  window.removeEventListener('resize', updateCompactComposer)
+  document.removeEventListener('pointerdown', dismissHeaderMenus)
+  document.removeEventListener('keydown', onHeaderEscape)
+  document.removeEventListener('keydown', onChatShortcut)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+  clearInterval(memoryActivityTimer)
+  clearTimeout(chatNoticeTimer)
+  clearTimeout(highlightTimer)
   ipcRenderer.removeListener('chat:token', onToken)
   ipcRenderer.removeListener('memory:model-progress', onMemoryModelProgress)
   ipcRenderer.removeListener('memory:changed', onMemoryChanged)
@@ -734,22 +1025,23 @@ async function saveApiSettings(event?: KeyboardEvent | MouseEvent) {
 // ── Long-term memory manager ────────────────────────────
 function onMemoryChanged(_event?: unknown, _payload?: unknown, origin?: { conversationId: string }) {
   if (origin && origin.conversationId !== activeConversationId.value) return
+  void refreshMemoryActivity().catch(() => {})
   if (!isLoading.value && !conversationSwitching.value) void refreshMemoryStatus()
 }
-function displayHistory(history: { id?: string; role: string; content: string }[]): Message[] {
+function displayHistory(history: { id?: string; role: string; content: string; quote?: MessageQuote; status?: 'failed' | 'stopped'; replyTo?: string; hasImage?: boolean }[]): Message[] {
   return history.filter(h => h.role === 'user' || h.role === 'assistant').map(h => ({
-    id: h.id || crypto.randomUUID(), role: h.role as 'user' | 'assistant', content: h.content,
+    id: h.id || crypto.randomUUID(), role: h.role as 'user' | 'assistant', content: h.content, quote: h.quote, status: h.status, replyTo: h.replyTo, hasImage: h.hasImage, persisted: true,
   }))
 }
 async function selectConversation(id?: string) {
   if (!canSwitchConversation.value || id === activeConversationId.value) return
+  draftStorage.queue(activeConversationId.value, currentDraft())
   conversationSwitching.value = true
+  await draftStorage.flush()
   conversationError.value = ''
   const previousId = activeConversationId.value
   conversationMessages.set(previousId, messages.value)
-  conversationDrafts.set(previousId, input.value)
   conversationImages.set(previousId, pendingImage.value)
-  conversationSkills.set(previousId, selectedSkillId.value)
   memoryDrafts.set(previousId, { manual: manualMemoryInput.value, preview: uiePreviewText.value,
     editingId: editingMemoryId.value, editingContent: editingMemoryContent.value, replies: { ...clarificationReplies.value } })
   try {
@@ -759,7 +1051,9 @@ async function selectConversation(id?: string) {
     conversations.value = result.conversations
     activeConversationId.value = result.activeId
     selectedConversationId.value = result.activeId
-    selectedSkillId.value = conversationSkills.get(result.activeId) ?? ''
+    const draft = draftStorage.get(result.activeId)
+    selectedSkillId.value = draft.skillId ?? ''
+    quotedMessage.value = draft.quote
     skillUseHistory.value = []
     documentItems.value = []
     documentPreview.value = null
@@ -769,7 +1063,7 @@ async function selectConversation(id?: string) {
       ? conversationMessages.get(result.activeId) ?? displayHistory(result.history)
       : displayHistory(result.history)
     conversationMessages.set(result.activeId, messages.value)
-    input.value = conversationDrafts.get(result.activeId) ?? ''
+    input.value = draft.text
     pendingImage.value = conversationImages.get(result.activeId) ?? null
     isLoading.value = pendingConversations.has(result.activeId)
     showMemoryManager.value = false
@@ -800,7 +1094,7 @@ async function selectConversation(id?: string) {
     scrollToBottom()
   } catch (error) {
     conversationError.value = error instanceof Error ? error.message : String(error)
-  } finally { conversationSwitching.value = false }
+  } finally { conversationSwitching.value = false; void refreshMemoryActivity().catch(() => {}) }
 }
 async function renameConversation(event?: KeyboardEvent | MouseEvent) {
   if (event instanceof KeyboardEvent && (event.isComposing || event.keyCode === 229)) return
@@ -1491,63 +1785,66 @@ function formatMemoryDate(item: MemoryItem): string {
 }
 
 // ── Send ────────────────────────────────────────────────
-async function send() {
-  const text = input.value.trim()
-  const image = pendingImage.value
-  if ((!text && !image) || isLoading.value) return
-  if (conversationSwitching.value) return
+async function send(retryUserId?: string) {
+  const retrySource = retryUserId ? messages.value.find(message => message.id === retryUserId && message.role === 'user') : undefined
+  const text = retrySource?.content ?? input.value.trim()
+  const image = retrySource ? retrySource.retryImage : pendingImage.value
+  const reference = retrySource?.quote ?? quotedMessage.value
+  const quote = reference ? { ...reference } : undefined
+  if ((!text && !image) || isLoading.value || conversationSwitching.value) return
   const sendingConversation = activeConversationId.value
+  const skillId = selectedSkillId.value
   pendingConversations.add(sendingConversation)
-
   isLoading.value = true
-  input.value = ''
-  pendingImage.value = null
-
-  const displayContent = image ? (text || '[识屏请求]') : text
-  const userMsg: Message = { role: 'user', content: displayContent, id: crypto.randomUUID(), hasImage: !!image }
-  messages.value.push(userMsg)
-  const assistantMsg: Message = { role: 'assistant', content: '', id: crypto.randomUUID() }
+  const consumeDraft = !retrySource || (input.value.trim() === text && quotedMessage.value?.messageId === quote?.messageId && !pendingImage.value)
+  if (consumeDraft) { input.value = ''; quotedMessage.value = undefined; pendingImage.value = null }
+  const prompt = image ? (text || '请描述这个屏幕截图中的内容。') : text
+  const userMsg: Message = retrySource ?? { role: 'user', content: prompt, id: crypto.randomUUID(), hasImage: !!image, quote, persisted: false, ...(image ? { retryImage: image } : {}) }
+  if (!retrySource) messages.value.push(userMsg)
+  const assistantMsg: Message = { role: 'assistant', content: '', id: crypto.randomUUID(), replyTo: userMsg.id }
   messages.value.push(assistantMsg)
   conversationMessages.set(sendingConversation, messages.value)
   scrollToBottom()
-
   try {
     const attachments = image ? [{ type: 'image' as const, data: image.data, mimeType: image.mimeType }] : undefined
-    const prompt = image ? (text || '请描述这个屏幕截图中的内容。') : text
-    const result = await ipcRenderer.invoke('chat:send', prompt, attachments,
-      selectedSkillId.value ? { skillId: selectedSkillId.value } : undefined)
+    const result = retrySource?.persisted
+      ? await ipcRenderer.invoke('chat:retry', retrySource.id, skillId ? { skillId } : undefined)
+      : await ipcRenderer.invoke('chat:send', prompt, attachments, { ...(skillId ? { skillId } : {}), ...(quote ? { quote } : {}) })
     if (!result?.ok) {
-      const detail = result?.error || '未知错误'
-      assistantMsg.content = assistantMsg.content
-        ? `${assistantMsg.content}\n\n[请求失败] ${detail}`
-        : `[请求失败] ${detail}`
+      assistantMsg.status = 'failed'
+      assistantMsg.content = assistantMsg.content ? `${assistantMsg.content}\n\n请求失败：${result?.error || '未知错误'}` : `请求失败：${result?.error || '未知错误'}`
+      if (consumeDraft) restoreFailedDraft(sendingConversation, text, quote)
+    } else {
+      if (!assistantMsg.content) assistantMsg.content = result.text ?? ''
+      if (result.stopped) assistantMsg.status = 'stopped'
     }
-    else if (!assistantMsg.content && result.text) {
-      assistantMsg.content = result.text
-    }
-    if (result?.memoryReview)
-      assistantMsg.memoryReview = result.memoryReview
-    if (result?.history) {
-      const persisted = result.history.filter((h: { role: string }) => h.role === 'user' || h.role === 'assistant')
-      const pair = persisted.slice(-2)
-      if (pair[0]?.role === 'user') userMsg.id = pair[0].id
+    if (result?.memoryReview) assistantMsg.memoryReview = result.memoryReview
+    if (result?.userMessageId) { userMsg.id = result.userMessageId; userMsg.persisted = true }
+    if (result?.assistantMessageId) assistantMsg.id = result.assistantMessageId
+    else if (result?.history) {
+      const pair = result.history.filter((h: { role: string }) => h.role === 'user' || h.role === 'assistant').slice(-2)
+      if (!retrySource && pair[0]?.role === 'user' && pair[0].content === prompt) { userMsg.id = pair[0].id; userMsg.persisted = true }
       if (pair[1]?.role === 'assistant') assistantMsg.id = pair[1].id
     }
-    if (autoSpeak.value && sendingConversation === activeConversationId.value) {
-      nextTick(() => speak(assistantMsg.content))
-    }
-  }
-  catch (err) {
-    assistantMsg.content = '[Error: ' + (err instanceof Error ? err.message : 'unknown') + ']'
-  }
-  finally {
-    pendingConversations.delete(sendingConversation)
+    assistantMsg.replyTo = userMsg.id
+    if (!result?.stopped && result?.ok && autoSpeak.value && sendingConversation === activeConversationId.value) nextTick(() => speak(assistantMsg.content))
+  } catch (error) {
+    assistantMsg.status = 'failed'; assistantMsg.content = `请求失败：${error instanceof Error ? error.message : '未知错误'}`
+    if (consumeDraft) restoreFailedDraft(sendingConversation, text, quote)
+  } finally {
+    pendingConversations.delete(sendingConversation); stoppingConversations.value.delete(sendingConversation)
     if (sendingConversation === activeConversationId.value) {
       isLoading.value = false
       await refreshMemoryStatus()
-      scrollToBottom()
+      void refreshMemoryActivity().catch(() => {})
+      scrollToBottom(false)
     }
   }
+}
+
+function restoreFailedDraft(id: string, text: string, quote?: MessageQuote) {
+  if (id === activeConversationId.value && !input.value && !quotedMessage.value) { input.value = text; quotedMessage.value = quote }
+  else if (id !== activeConversationId.value) draftStorage.queue(id, { ...draftStorage.get(id), text, ...(quote ? { quote } : {}) })
 }
 
 // ── Rollback ────────────────────────────────────────────
@@ -1556,7 +1853,8 @@ async function rollback(msgId: string) {
   const idx = messages.value.findIndex(m => m.id === msgId)
   if (idx < 0) return
   await ipcRenderer.invoke('sessions:truncate-after', msgId)
-  messages.value.splice(idx)
+  const removed = messages.value.splice(idx)
+  if (removed.some(message => message.id === quotedMessage.value?.messageId)) quotedMessage.value = undefined
 }
 
 // ── Screen capture (识屏) ───────────────────────────────
@@ -1816,27 +2114,49 @@ async function applyCustomTheme() {
   await ipcRenderer.invoke('settings:set-theme', `${CUSTOM_THEME_PREFIX}${customColor.value.toLowerCase()}`)
 }
 
+function dismissHeaderMenus(event: PointerEvent) {
+  const target = event.target
+  if (!(target instanceof Element)) return
+  if (!target.closest('.theme-picker')) closeThemeMenu(true)
+  if (!target.closest('.header-menu')) showAppMenu.value = false
+  if (!target.closest('.input-more-wrap')) showInputMenu.value = false
+}
+function onHeaderEscape(event: KeyboardEvent) {
+  if (event.defaultPrevented || event.key !== 'Escape') return
+  if (showThemeMenu.value) closeThemeMenu(true)
+  showAppMenu.value = false
+}
+function beginRename() {
+  conversationRenameInput.value = currentConversationTitle.value
+  renamingConversation.value = true
+  showAppMenu.value = false
+  nextTick(() => document.querySelector<HTMLInputElement>('.conversation-meta input')?.focus())
+}
+
 // ── Utils ───────────────────────────────────────────────
-function scrollToBottom() {
+function scrollToBottom(force = true) {
+  if (force) { followLatest.value = true; manualChatScroll = false; unreadReply.value = false }
+  if (!followLatest.value) return
   nextTick(() => {
     const el = chatEl.value
-    if (el) el.scrollTop = el.scrollHeight
+    if (el && followLatest.value) { el.scrollTop = el.scrollHeight; unreadReply.value = false }
   })
 }
 
 function onKeydown(e: KeyboardEvent) {
   if (e.isComposing || e.keyCode === 229) return
-  if (e.key === 'Enter' && !e.shiftKey) {
+  const shouldSend = preferences.value.sendKey === 'ctrl-enter' ? (e.ctrlKey || e.metaKey) && !e.shiftKey : !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey
+  if (e.key === 'Enter' && shouldSend) {
     e.preventDefault()
     send()
   }
 }
 
-let confirmReset = false
+const confirmReset = ref(false)
 async function doReset() {
-  if (!confirmReset) {
-    confirmReset = true
-    resetTimer = setTimeout(() => { confirmReset = false }, 3000)
+  if (!confirmReset.value) {
+    confirmReset.value = true
+    resetTimer = setTimeout(() => { confirmReset.value = false }, 3000)
     return
   }
   await ipcRenderer.invoke('app:reset')
@@ -1861,57 +2181,89 @@ async function doReset() {
   </div>
 
   <!-- Chat screen -->
-  <div v-else class="app" :style="themeVars">
-    <div class="header">
-      <span class="name">{{ agentName }}</span>
-      <span v-if="appVersion" class="version-badge">v{{ appVersion }}</span>
-      <span class="badge">在线</span>
-      <span class="spacer" />
-      <button class="icon-btn memory-btn" :class="{ active: memoryEnabled }" title="长期记忆管理" @click="openMemoryManager">
-        🧠 记忆<span v-if="memoryEnabled" class="memory-count">传统 {{ memoryCount }} · L1 {{ memoryL1Count ?? '…' }}</span>
-      </button>
-      <button class="icon-btn api-btn" :class="{ active: apiConfigured }" title="API 设置" @click="openApiSettings">
-        <span class="api-dot" /> API
-      </button>
-      <button class="icon-btn" title="Skill 管理" @click="openSkillManager">🧩 Skill</button>
-      <button class="icon-btn" :class="{ active: autoSpeak }" title="语音播报" @click="toggleAutoSpeak">🔊</button>
-      <div class="theme-picker">
-        <button class="icon-btn" title="切换主题" @click="toggleThemeMenu">🎨</button>
-        <div v-if="showThemeMenu" class="theme-menu" @click.stop>
-          <div v-for="t in themes" :key="t.id" :class="['theme-item', { active: t.id === currentTheme.id }]" @click="selectTheme(t)">
-            <span class="theme-swatch" :style="{ background: t.bg, border: `1px solid ${t.border}` }" />
-            <span class="theme-dot" :style="{ background: t.accent }" />
-            <span>{{ t.name }}</span>
-          </div>
-          <div :class="['theme-custom', { active: currentTheme.id === 'custom' }]">
-            <label for="custom-theme-color">自定义颜色</label>
-            <div class="theme-custom-controls">
-              <input id="custom-theme-color" v-model="customColor" type="color" title="选择自定义颜色" @input="previewCustomTheme" />
-              <span>{{ customColor.toUpperCase() }}</span>
-              <button type="button" @click="applyCustomTheme">应用</button>
+  <div v-else class="app" :style="{ ...themeVars, ...readerStyle }" :data-theme="currentTheme.id" :data-family="currentTheme.family ?? 'warm'" :data-scheme="currentTheme.scheme ?? 'light'">
+    <header class="header">
+      <div class="header-heading"><span class="name">{{ currentConversationTitle }}</span><span v-if="currentArchived" class="archive-label">已归档</span><span class="header-eyebrow"><span class="space-node" />独立记忆空间</span></div>
+      <div class="header-actions">
+        <button class="memory-activity-pill" :class="{ working: memoryActivity.totals.processing || memoryActivity.totals.pending, warning: memoryActivity.totals.failed || memoryActivity.totals.clarifying }" aria-label="记忆处理状态" :title="memoryActivitySummary" @click="showMemoryActivity = true; refreshMemoryActivity()"><AppIcon name="memory" /><span>{{ memoryActivitySummary }}</span></button>
+        <button class="api-btn" :class="{ active: apiConfigured }" title="API 设置" aria-label="API 设置" @click="openApiSettings"><span class="api-dot" /><span class="api-label">{{ apiConfigured ? 'API 已配置' : '配置 API' }}</span></button>
+        <div class="theme-picker">
+          <button class="icon-btn" title="切换主题" aria-label="切换主题" :aria-expanded="showThemeMenu" @click="toggleThemeMenu"><AppIcon name="sun" /></button>
+          <div v-if="showThemeMenu" class="theme-menu" aria-label="界面主题">
+            <div class="theme-menu-title">选择你的工作空间</div>
+            <template v-for="family in ['warm', 'tech']" :key="family">
+              <div class="theme-group-label">{{ family === 'warm' ? '记忆织线 · 温暖质感' : '记忆网络 · 科技感' }}</div>
+              <button v-for="t in themes.filter(theme => theme.family === family)" :key="t.id" :data-theme-option="t.id" :class="['theme-item', { active: t.id === currentTheme.id }]" :aria-pressed="t.id === currentTheme.id" @click="selectTheme(t)">
+                <span class="theme-swatch" :style="{ background: t.bg, border: `1px solid ${t.border}` }"><span :style="{ background: t.accent }" /></span><span>{{ t.name }}</span><span v-if="t.id === currentTheme.id" class="theme-check">✓</span>
+              </button>
+            </template>
+            <div :class="['theme-custom', { active: currentTheme.id === 'custom' }]">
+              <label for="custom-theme-color">自定义颜色</label>
+              <div class="theme-custom-controls"><input id="custom-theme-color" v-model="customColor" type="color" title="选择自定义颜色" @input="previewCustomTheme" /><span>{{ customColor.toUpperCase() }}</span><button type="button" @click="applyCustomTheme">应用</button></div>
+              <small>自动生成明亮背景并保持文字清晰</small>
             </div>
-            <small>自动生成明亮背景并保持文字清晰</small>
+          </div>
+        </div>
+        <div class="header-menu">
+          <button class="icon-btn" title="更多操作" aria-label="更多操作" :aria-expanded="showAppMenu" @click="showAppMenu = !showAppMenu; closeThemeMenu(true)"><AppIcon name="more" /></button>
+          <div v-if="showAppMenu" class="app-menu">
+            <button @click="openApiSettings(); showAppMenu = false"><AppIcon name="settings" />API 设置</button>
+            <button :class="{ selected: autoSpeak }" @click="toggleAutoSpeak(); showAppMenu = false"><AppIcon name="volume" />{{ autoSpeak ? '关闭语音播报' : '开启语音播报' }}</button>
+            <button :disabled="!canSwitchConversation" @click="beginRename"><AppIcon name="rename" />重命名当前对话</button>
+            <button @click="pinConversation(activeConversationId, !conversations.find(c => c.id === activeConversationId)?.pinned); showAppMenu = false"><AppIcon name="pin" />{{ conversations.find(c => c.id === activeConversationId)?.pinned ? '取消置顶当前对话' : '置顶当前对话' }}</button>
+            <button :disabled="isLoading || exportingConversation" @click="exportConversation('md')"><AppIcon name="export" />导出 Markdown</button>
+            <button :disabled="isLoading || exportingConversation" @click="exportConversation('txt')"><AppIcon name="export" />导出 TXT</button>
+            <button @click="archiveConversation(activeConversationId, !currentArchived); showAppMenu = false"><AppIcon name="archive" />{{ currentArchived ? '恢复当前对话' : '归档当前对话' }}</button>
+            <button @click="showArchiveLibrary = true; showAppMenu = false"><AppIcon name="archive" />归档对话</button>
+            <button @click="openGeneralSettings"><AppIcon name="settings" />通用设置</button>
+            <button @click="doReset"><AppIcon name="reset" />{{ confirmReset ? '再次点击确认重置' : '重新开始' }}</button>
           </div>
         </div>
       </div>
-      <button class="icon-btn reset-btn" @click="doReset">{{ confirmReset ? '确认?' : '重新开始' }}</button>
-    </div>
+    </header>
 
-    <div class="conversation-bar">
-      <label for="conversation-select">对话与记忆分区</label>
-      <select id="conversation-select" v-model="selectedConversationId" :disabled="!canSwitchConversation">
-        <option v-for="conversation in conversations" :key="conversation.id" :value="conversation.id">{{ conversation.title }}</option>
-      </select>
-      <button class="secondary-btn" :disabled="!canSwitchConversation || selectedConversationId === activeConversationId" @click="selectConversation(selectedConversationId)">切换对话</button>
-      <button class="secondary-btn" :disabled="!canSwitchConversation" @click="selectConversation()">＋ 新建对话</button>
-      <button v-if="!renamingConversation" class="secondary-btn" :disabled="!canSwitchConversation" @click="conversationRenameInput = currentConversationTitle; renamingConversation = true">重命名</button>
-      <template v-else>
-        <input v-model="conversationRenameInput" aria-label="对话名称" maxlength="100" @keydown.enter="renameConversation" />
-        <button class="secondary-btn" :disabled="!conversationRenameInput.trim()" @click="renameConversation">保存名称</button>
-        <button class="secondary-btn" @click="renamingConversation = false">取消</button>
-      </template>
-      <span>{{ conversationSwitching ? '正在切换…' : `当前：${currentConversationTitle} · 独立记忆` }}</span>
-    </div>
+    <GeneralSettings v-if="showGeneralSettings" :preferences="preferences" :busy="generalSettingsBusy" :error="generalSettingsError" @close="closeGeneralSettings" @preview="readerPreview = $event" @save="saveGeneralSettings" />
+    <ComposerEditor v-if="showComposerEditor" v-model="input" :selection="editorSelection" :disabled="isLoading || conversationSwitching" @close="closeComposerEditor" @send="closeComposerEditor($event, true)" />
+    <SavedMessages v-if="showSavedMessages" :items="bookmarks" :disabled="!canSwitchConversation" @close="showSavedMessages = false" @open="openSavedMessage" @remove="toggleBookmark($event.conversationId, $event.messageId, false)" @notice="notifyChat" />
+    <MemoryActivity v-if="showMemoryActivity" :report="memoryActivity" :loading="memoryActivityLoading" @close="showMemoryActivity = false" @refresh="refreshMemoryActivity" @review="showMemoryActivity = false; openMemoryManager()" />
+    <ConversationSearch v-if="showArchiveLibrary" :conversations="conversations" :archived-only="true" :disabled="!canSwitchConversation" @close="showArchiveLibrary = false" @select="openSearchResult($event); showArchiveLibrary = false" @pin="pinConversation" @archive="archiveConversation" />
+    <ConversationSearch v-if="showConversationSearch" :conversations="conversations" :disabled="!canSwitchConversation" @close="showConversationSearch = false" @select="openSearchResult" @pin="pinConversation" @archive="archiveConversation" />
+    <QuickPhrases v-if="showQuickPhrases" :phrases="quickPhrases" :disabled="isLoading || conversationSwitching" @close="showQuickPhrases = false" @insert="insertPhrase" @updated="quickPhrases = $event" />
+    <div v-if="chatNotice" class="chat-toast" role="status">{{ chatNotice }}</div>
+    <aside class="conversation-bar" aria-label="对话与工具">
+      <div class="sidebar-brand"><MemoryMark class="brand-mark" /><div><strong>Continuum<span>Memory</span></strong><small v-if="agentName !== 'Continuum Memory'">{{ agentName }}</small></div></div>
+      <button class="sidebar-search-button" aria-label="搜索对话" :title="`搜索对话（${preferences.shortcuts.search}）`" @click="showConversationSearch = true"><AppIcon name="search" /><span class="nav-label">搜索对话</span><kbd>{{ preferences.shortcuts.search.replace(/\+/g, ' ') }}</kbd></button>
+      <button class="new-conversation" title="新建对话" aria-label="新建对话" :disabled="!canSwitchConversation" @click="selectConversation()"><span class="new-conversation-medallion"><AppIcon name="plus" /></span><span class="nav-label">新建对话</span></button>
+      <nav class="sidebar-tools" aria-label="工作空间">
+        <button title="长期记忆管理" aria-label="长期记忆管理" @click="openMemoryManager"><AppIcon name="memory" /><span class="nav-label">记忆库</span><span class="sidebar-tool-count">{{ memoryL1Count ?? '…' }}</span></button>
+        <button title="Skill 管理" aria-label="Skill 管理" @click="openSkillManager"><AppIcon name="skill" /><span class="nav-label">Skill</span></button>
+        <button title="收藏消息" aria-label="收藏消息" @click="showSavedMessages = true; refreshBookmarks()"><AppIcon name="bookmark" /><span class="nav-label">收藏</span><span v-if="bookmarks.length" class="sidebar-tool-count">{{ bookmarks.length }}</span></button>
+        <button title="文档" aria-label="文档" :disabled="documentsBusy" @click="openDocumentManager"><AppIcon name="document" /><span class="nav-label">文档</span></button>
+      </nav>
+      <section class="sidebar-history" aria-label="历史对话">
+        <div class="sidebar-history-heading"><span>历史对话</span><span class="sidebar-history-count">{{ orderedConversations.length }}</span><button class="sidebar-history-action" title="查看归档" aria-label="查看归档" @click="showArchiveLibrary = true"><AppIcon name="archive" /></button></div>
+        <nav class="conversation-list" aria-label="对话列表">
+          <div v-for="conversation in orderedConversations" :key="conversation.id" class="conversation-entry">
+          <button class="conversation-item"
+            :class="{ selected: conversation.id === activeConversationId }" :aria-current="conversation.id === activeConversationId ? 'page' : undefined"
+            :title="conversation.title" :aria-label="conversation.title" :disabled="!canSwitchConversation" @click="conversation.id !== activeConversationId && selectConversation(conversation.id)">
+            <AppIcon name="chat" class="conversation-icon" /><span class="conversation-copy"><span class="conversation-title">{{ conversation.title }}</span><small v-if="conversation.id === activeConversationId">当前对话 · 独立记忆</small></span>
+          </button>
+          <button class="conversation-pin" :class="{ pinned: conversation.pinned }" :disabled="!!pinningConversation" :aria-label="`${conversation.pinned ? '取消置顶' : '置顶'}：${conversation.title}`" :title="conversation.pinned ? '取消置顶' : '置顶对话'" :aria-pressed="!!conversation.pinned" @click="pinConversation(conversation.id, !conversation.pinned)"><AppIcon name="pin" /></button>
+          </div>
+        </nav>
+        <div class="conversation-meta" :class="{ 'is-renaming': renamingConversation }">
+          <button v-if="!renamingConversation" class="rename-conversation" :disabled="!canSwitchConversation" @click="beginRename"><AppIcon name="rename" /><span class="nav-label">重命名当前对话</span></button>
+          <template v-else>
+            <input v-model="conversationRenameInput" aria-label="对话名称" maxlength="100" @keydown.enter="renameConversation" />
+            <button class="secondary-btn" :disabled="!conversationRenameInput.trim()" @click="renameConversation">保存名称</button>
+            <button class="secondary-btn" @click="renamingConversation = false">取消</button>
+          </template>
+          <span>{{ conversationSwitching ? '正在切换…' : '每段对话拥有独立记忆' }}</span>
+        </div>
+      </section>
+      <div class="sidebar-footer"><button title="设置" aria-label="通用设置" @click="openGeneralSettings"><AppIcon name="settings" /><span class="nav-label">设置</span></button><small class="nav-label" v-if="appVersion">v{{ appVersion }}</small></div>
+    </aside>
     <div v-if="conversationError" class="conversation-error">{{ conversationError }}</div>
 
     <div v-if="showSkillManager" class="modal-backdrop" @pointerdown.self.prevent>
@@ -1920,7 +2272,7 @@ async function doReset() {
           <div><h2>Skill 管理</h2><p>内置工作流与本机 SKILL.md · {{ enabledSkills.length }} 个已启用</p></div>
           <button class="dialog-close" title="关闭" :disabled="skillsBusy" @click="closeSkillManager">✕</button>
         </div>
-        <p class="field-hint">模型可以按任务查找并加载已启用 Skill，也可以在输入框上方手动选择。加载的是工作流指导；本机 Skill 默认关闭，需要专用工具的项目会显示缺少依赖。</p>
+        <p class="field-hint">模型可以按任务查找并加载已启用 Skill，也可以在输入框右侧手动选择。加载的是工作流指导；本机 Skill 默认关闭，需要专用工具的项目会显示缺少依赖。</p>
         <p class="field-hint">调用时，选中的工作流及所需文本引用会发送给当前聊天 API；不会一次发送全部 Skill 文件。</p>
         <div class="skill-toolbar">
           <input v-model="skillQuery" class="settings-input" aria-label="搜索 Skill" placeholder="搜索名称、用途或依赖…" />
@@ -2488,17 +2840,25 @@ async function doReset() {
       </div>
     </div>
 
-    <div class="chat" ref="chatEl">
+    <div class="chat-shell">
+    <div class="chat" ref="chatEl" tabindex="0" aria-label="聊天记录" @keydown.capture="onChatNavigation" @wheel.passive="markChatScroll" @pointerdown="markChatScroll" @touchstart.passive="markChatScroll" @scroll.passive="onChatScroll">
       <div v-if="messages.length === 0" class="empty">
-        <h1>{{ agentName }}</h1>
-        <p>你的 AI 桌面助手，输入消息开始对话</p>
+        <div class="empty-mark"><MemoryMark /></div>
+        <span class="empty-eyebrow">CONTINUUM MEMORY</span>
+        <h1>从一段对话开始</h1>
+        <p>聊聊你的想法，让重要的信息留在记忆里。</p>
+        <div class="empty-features"><span>◈ 独立记忆</span><span>✧ Skill 协作</span><span>▤ PDF 与 Word</span></div>
       </div>
-      <div v-for="msg in messages" :key="msg.id" :class="['message', msg.role]">
+      <div v-for="msg in messages" :key="msg.id" :data-message-id="msg.id" :class="['message', msg.role, { 'search-highlight': highlightedMessageId === msg.id }]">
+        <span v-if="msg.role === 'assistant'" class="assistant-avatar"><MemoryMark /></span>
         <div class="message-body">
+          <span class="message-author">{{ msg.role === 'user' ? '你' : agentName }}</span>
           <div class="bubble">
             <span v-if="msg.hasImage" class="img-tag">📷 识屏</span>
-            {{ msg.content || (msg.role === 'assistant' && isLoading ? '...' : '') }}
+            <blockquote v-if="msg.quote" class="message-reference"><small>{{ msg.quote.role === 'user' ? '引用你的消息' : '引用回答' }}</small>{{ msg.quote.content }}</blockquote>
+            <MessageMarkdown :content="msg.content || (msg.status === 'failed' ? '请求失败，请点击重试。' : msg.status === 'stopped' ? '回复已停止。' : msg.role === 'assistant' && isLoading ? '…' : '')" :streaming="msg.role === 'assistant' && isLoading" @notice="notifyChat" />
           </div>
+          <div v-if="msg.content || msg.status" class="message-tools"><button title="复制消息或选中内容" aria-label="复制消息" :disabled="!msg.content" @mousedown.prevent @click="copyMessage(msg)"><AppIcon name="copy" />复制</button><button title="引用消息或选中内容" aria-label="引用消息" :disabled="!msg.content || isLoading || conversationSwitching" @mousedown.prevent @click="quoteMessage(msg)"><AppIcon name="quote" />引用</button><button :class="{ saved: savedKeys.has(bookmarkKey(activeConversationId, msg.id)) }" :disabled="!msg.content || bookmarkBusy || isLoading" :aria-label="savedKeys.has(bookmarkKey(activeConversationId, msg.id)) ? '取消收藏消息' : '收藏消息'" :aria-pressed="savedKeys.has(bookmarkKey(activeConversationId, msg.id))" @click="toggleBookmark(activeConversationId, msg.id, !savedKeys.has(bookmarkKey(activeConversationId, msg.id)))"><AppIcon name="bookmark" />{{ savedKeys.has(bookmarkKey(activeConversationId, msg.id)) ? '已收藏' : '收藏' }}</button><span v-if="msg.status" class="message-state" :class="{ failed: msg.status === 'failed' }">{{ msg.status === 'stopped' ? '已停止生成' : '请求失败' }}</span><button v-if="msg.role === 'assistant' && msg.status && msg.replyTo && msg.id === messages[messages.length - 1]?.id" :disabled="isLoading || conversationSwitching" aria-label="重试回复" @click="send(msg.replyTo)"><AppIcon name="reset" />重试</button></div>
           <details v-if="msg.memoryReview" class="v4-internal-review">
             <summary>
               V4 内部候选 · 不参与正式回答 ·
@@ -2558,6 +2918,8 @@ async function doReset() {
     </div>
 
     <!-- Pending image preview -->
+    <button v-if="!followLatest" class="latest-message-button" aria-label="回到最新消息" @click="scrollToBottom()"><AppIcon name="arrow-right" />{{ unreadReply ? '有新内容 · 回到最新' : '回到最新消息' }}</button>
+    </div>
     <div v-if="pendingImage" class="image-preview">
       <img :src="`data:${pendingImage.mimeType};base64,${pendingImage.data}`" alt="screenshot" />
       <button class="clear-img" @click="clearPendingImage">✕</button>
@@ -2585,32 +2947,21 @@ async function doReset() {
       </div>
       <button v-if="semanticFailures" class="secondary-btn" :disabled="clarificationBusy" @click="retrySemanticFailures">重试未完成的记忆整理（{{ semanticFailures }}）</button>
     </div>
-    <div class="skill-selection">
-      <label for="chat-skill">本轮 Skill</label>
-      <select id="chat-skill" v-model="selectedSkillId" :disabled="isLoading || conversationSwitching">
-        <option value="">按任务自动选择</option>
-        <option v-for="skill in enabledSkills" :key="skill.id" :value="skill.id">{{ skill.name }}</option>
-      </select>
-      <button class="secondary-btn" @click="openSkillManager">管理 Skill</button>
-      <button class="secondary-btn" :disabled="documentsBusy" @click="openDocumentManager">文档{{ documentItems.length ? `（${documentItems.length}）` : '' }}</button>
-      <span v-if="skillUseHistory.length">最近加载：{{ skillUseHistory.at(-1)?.name }}</span>
+    <div class="composer input-area">
+      <div class="composer-controls">
+        <button class="tool-btn" :disabled="documentsBusy || conversationSwitching" title="选择 PDF 或 Word 文档" aria-label="选择 PDF 或 Word 文档" @click="pickDocuments"><AppIcon name="attachment" /></button>
+        <button v-if="!compactComposer" class="tool-btn" :class="{ capturing: isCapturing }" :disabled="isCapturing || isLoading" title="识屏" aria-label="识屏" @click="captureScreen"><AppIcon name="capture" /></button>
+        <button v-if="!compactComposer" class="tool-btn" :class="{ listening: isListening }" :disabled="isLoading" title="语音输入" aria-label="语音输入" :aria-pressed="isListening" @click="toggleListening"><AppIcon name="mic" /></button>
+        <button class="tool-btn" :disabled="isLoading || conversationSwitching" title="展开输入框" aria-label="展开输入框" @click="expandComposer"><AppIcon name="expand" /></button>
+        <div v-if="compactComposer" class="input-more-wrap"><button class="tool-btn" title="更多输入方式" aria-label="更多输入方式" :aria-expanded="showInputMenu" @click="showInputMenu = !showInputMenu"><AppIcon name="more" /></button><div v-if="showInputMenu" class="input-more-menu"><button :disabled="isLoading || isCapturing" @click="captureScreen(); showInputMenu = false"><AppIcon name="capture" />识屏</button><button :disabled="isLoading" @click="toggleListening(); showInputMenu = false"><AppIcon name="mic" />语音输入</button></div></div>
+        <button class="tool-btn" :disabled="isLoading || conversationSwitching" title="快捷短语" aria-label="快捷短语" @click="showQuickPhrases = true"><AppIcon name="phrase" /></button>
+      </div>
+      <div class="composer-input"><blockquote v-if="quotedMessage" class="composer-reference"><span><strong>{{ quotedMessage.role === 'user' ? '引用你的消息' : '引用回答' }}</strong><small>{{ quotedMessage.content }}</small></span><button aria-label="取消引用" title="取消引用" @click="quotedMessage = undefined"><AppIcon name="close" /></button></blockquote><textarea ref="composerTextarea" v-model="input" maxlength="200000" placeholder="输入消息…" aria-label="聊天消息" :disabled="isLoading || conversationSwitching" @keydown="onKeydown" rows="1" /></div>
+      <SkillPicker class="skill-selection" v-model="selectedSkillId" :items="enabledSkills" :compact="compactComposer" :disabled="isLoading || conversationSwitching" />
+      <button v-if="isLoading" class="stop-generation-btn" :disabled="stoppingGeneration" :title="stoppingGeneration ? '正在停止…' : '停止生成'" aria-label="停止生成" @click="stopGeneration"><AppIcon name="stop" /></button>
+      <button v-else class="send-btn" title="发送消息" aria-label="发送消息" :disabled="isLoading || (!input.trim() && !pendingImage)" @click="send()"><SendArtwork :theme="currentTheme.id" /></button>
     </div>
-    <div class="input-area">
-      <button class="tool-btn" :disabled="documentsBusy || conversationSwitching" title="选择 PDF 或 Word 文档" @click="pickDocuments">📎</button>
-      <button class="tool-btn" :disabled="isCapturing || isLoading" title="识屏" @click="captureScreen">
-        {{ isCapturing ? '⏳' : '📷' }}
-      </button>
-      <button class="tool-btn" :class="{ listening: isListening }" :disabled="isLoading" title="语音输入" @click="toggleListening">
-        {{ isListening ? '🔴' : '🎤' }}
-      </button>
-      <textarea v-model="input" placeholder="输入消息..." aria-label="聊天消息" :disabled="isLoading || conversationSwitching" @keydown="onKeydown" rows="3" />
-      <button class="send-btn" :disabled="isLoading || (!input.trim() && !pendingImage)" @click="send">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M22 2L11 13" /><path d="M22 2L15 22L11 13L2 9L22 2Z" />
-        </svg>
-      </button>
-    </div>
-    <div class="input-help">Enter 发送 · Shift + Enter 换行 · 切换对话会保留文本和图片草稿</div>
+    <div class="input-help">{{ sendHint }}<span v-if="draftStatus" class="draft-indicator" :class="{ failed: draftError }" role="status">{{ draftStatus }}</span></div>
   </div>
 </template>
 

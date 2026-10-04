@@ -125,6 +125,10 @@ import type {
 import { createToolRegistry, webSearchTool, fileReadTool, httpFetchTool } from '@continuum-memory/tools'
 
 import { createPersistence } from './persist'
+import { buildMemoryActivity } from './memory-activity'
+import { setupChatUiIPC } from './chat-ui-ipc'
+import { validateMessageQuote } from '../shared/chat-content'
+import type { MessageQuote } from '../shared/chat-ui'
 import { withGraphSourceInvalidation } from './graph-source-invalidation'
 import { prepareGraphRecallInputs } from './graph-l1-recall-barrier'
 import { createSettingsManager } from './settings'
@@ -2336,6 +2340,9 @@ async function migrateOpenL1() {
   }
 
 let chatBusy = false
+let chatAbortController: AbortController | undefined
+let pendingChat: Promise<unknown> | undefined
+const retryImageCache = new Map<string, { type: 'image'; data: string; mimeType: string }[]>()
 function setupIPC() {
   partitionIpc.handle('documents:list', () => documents.list())
   partitionIpc.handle('documents:pick', async () => {
@@ -2350,37 +2357,84 @@ function setupIPC() {
   partitionIpc.handle('documents:location', (_event, id: string) => { shell.showItemInFolder(documents.path(id)); return { ok: true } })
   partitionIpc.handle('app:version', () => app.getVersion())
 
-  partitionIpc.handle('chat:send', async (_event, message: string, attachments?: { type: 'image'; data: string; mimeType: string }[], selection?: { skillId?: string }) => {
+  const sendChat = async (message: string, attachments?: { type: 'image'; data: string; mimeType: string }[], selection?: { skillId?: string; quote?: MessageQuote }, retryUserMessageId?: string) => {
     if (chatBusy) return { ok: false, error: '此对话正在生成回复，请稍候。' }
     if (!apiConfig.apiKey.trim())
       return { ok: false, error: '尚未配置 API Key，请点击右上角“API 设置”。' }
+    let quote: MessageQuote | undefined
+    try { quote = retryUserMessageId ? sessionStore.getSessionMessages(conversation.id).find(item => item.id === retryUserMessageId)?.quote : validateMessageQuote(selection?.quote, sessionStore.getSessionMessages(conversation.id)) }
+    catch (error) { return { ok: false, error: errorMessage(error) } }
     chatBusy = true
-    const internalReview = memoryV4InternalReview.begin(message)
+    const controller = new AbortController()
+    chatAbortController = controller
+    const previousUserId = sessionStore.getSessionMessages(conversation.id).filter(item => item.role === 'user').at(-1)?.id
+    let internalReview: ReturnType<typeof memoryV4InternalReview.begin>
+    const finishReview = async () => {
+      try { return await internalReview?.finish() }
+      catch (error) { writeBootLog(`Optional chat review failed: ${errorMessage(error)}`); return undefined }
+    }
     try {
+      internalReview = memoryV4InternalReview.begin(message)
       const selectedSkill = selection?.skillId ? skillService.load(selection.skillId, conversation.id) : undefined
       if (selectedSkill) sendPartitionEvent('skills:used', skillService.history(conversation.id))
       const result = await runtime.send(conversation.id, message, {
+        signal: controller.signal,
+        ...(retryUserMessageId ? { retryUserMessageId } : {}),
+        ...(quote ? { quote } : {}),
         ...(attachments?.length ? { attachments, input: { type: 'image' as const } } : {}),
         ...(selectedSkill ? { skill: { id: selectedSkill.id, payload: JSON.stringify(selectedSkill) } } : {}),
       })
-      const memoryReview = await internalReview?.finish()
+      if (attachments?.length && result.userMessageId) {
+        retryImageCache.set(result.userMessageId, attachments)
+        if (retryImageCache.size > 10) retryImageCache.delete(retryImageCache.keys().next().value!)
+      }
+      const memoryReview = result.stopped ? undefined : await finishReview()
+      if (result.stopped) void finishReview()
       return {
         ok: true,
         text: result.text,
+        stopped: !!result.stopped,
+        userMessageId: result.userMessageId,
+        assistantMessageId: result.assistantMessageId,
         toolCalls: result.toolCalls,
         history: sessionStore.getSessionMessages(conversation.id),
         ...(memoryReview ? { memoryReview } : {}),
       }
     }
     catch (error) {
-      await internalReview?.finish()
+      await finishReview()
       writeBootLog(`chat request failed: ${errorMessage(error)}`)
-      return { ok: false, error: errorMessage(error) }
+      const user = sessionStore.getSessionMessages(conversation.id).filter(item => item.role === 'user').at(-1)
+      let assistantMessageId: string | undefined
+      if (user && user.content === message && (user.id !== previousUserId || user.id === retryUserMessageId)) {
+        assistantMessageId = crypto.randomUUID()
+        sessionStore.appendSessionMessage(conversation.id, { id: assistantMessageId, role: 'assistant', content: '', status: 'failed', replyTo: user.id, createdAt: Date.now() })
+        if (attachments?.length) { retryImageCache.set(user.id, attachments); if (retryImageCache.size > 10) retryImageCache.delete(retryImageCache.keys().next().value!) }
+      }
+      return { ok: false, error: errorMessage(error), userMessageId: assistantMessageId ? user?.id : undefined, assistantMessageId, history: sessionStore.getSessionMessages(conversation.id) }
     }
     finally {
       chatBusy = false
+      if (chatAbortController === controller) chatAbortController = undefined
       saveSessions()
     }
+  }
+  const startChat: typeof sendChat = (...args) => {
+    if (chatBusy) return sendChat(...args)
+    const promise = sendChat(...args)
+    pendingChat = promise
+    void promise.finally(() => { if (pendingChat === promise) pendingChat = undefined }).catch(() => {})
+    return promise
+  }
+  partitionIpc.handle('chat:send', (_event, message: string, attachments?: { type: 'image'; data: string; mimeType: string }[], selection?: { skillId?: string; quote?: MessageQuote }) => startChat(message, attachments, selection))
+  partitionIpc.handle('chat:stop', () => { chatAbortController?.abort(); return { ok: true, stopping: chatBusy } })
+  partitionIpc.handle('chat:retry', (_event, id: string, selection?: { skillId?: string }) => {
+    const history = sessionStore.getSessionMessages(conversation.id)
+    const index = history.findIndex(item => item.id === id && item.role === 'user'), user = history[index]
+    if (!user || history.slice(index+1).some(item => item.role === 'user' || (item.role === 'assistant' && !['failed','stopped'].includes(item.status ?? ''))))
+      return { ok: false, error: '只能重试最近一次失败或停止的请求。' }
+    if (user.hasImage && !retryImageCache.has(user.id)) return { ok: false, error: '图片已不在本次运行的缓存中，请重新附上图片后发送。' }
+    return startChat(user.content, retryImageCache.get(user.id), selection, user.id)
   })
 
   partitionIpc.handle('memory:clarification-answer', async (_event, input: { id: string; candidateId: string; sourceRevision: string; text: string; contextSourceId?: string }) => {
@@ -2550,6 +2604,10 @@ function setupIPC() {
     }
   })
 
+  partitionIpc.handle('memory:activity', () => ({ ok: true, report: buildMemoryActivity({ enabled: !!memory,
+    scope: localMemoryScope, capture: graphCaptureRepository?.snapshot(), publication: graphL1Store?.tasks(), semantics: graphSemanticWorkflow?.list(),
+    activeFactIds: memoryV4Repository ? new Set(memoryV4Repository.snapshot().facts.filter(fact => fact.status === 'active' && fact.invalidatedAt === undefined).map(fact => fact.id)) : undefined,
+    awaitingProcessor: memory?.captureStatus()?.awaitingProcessor, error: memoryInitializationError || graphExtractionError || undefined }) }))
   partitionIpc.handle('memory:status', async () => ({
     graphClaimCount: graphL1Store?.claims().length ?? 0,
     capture: memory?.captureStatus(),
@@ -3349,6 +3407,8 @@ function setupIPC() {
     },
     activate() { rebuildRuntime() },
     async shutdown() {
+      chatAbortController?.abort()
+      await pendingChat?.catch(() => {})
   if (graphNliRetryTimer) clearTimeout(graphNliRetryTimer)
   graphNliJudge?.close()
   memoryV4ConsolidationRunner?.stop()
@@ -3494,6 +3554,9 @@ function setupConversationIPC() {
     const result = await dialog.showOpenDialog({ title: '选择包含 SKILL.md 的目录', properties: ['openDirectory'] })
     return result.canceled ? skillService.list() : skillService.addRoot(result.filePaths[0]!)
   })
+  setupChatUiIPC({ root: rootUserDataDir, registry: conversationRegistry,
+    getMessages: id => sessionStore.getSessionMessages(id), window: () => mainWindow,
+    assistantName: () => agentName, reportError: writeBootLog })
   setupVoiceIPC()
 }
 

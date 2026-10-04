@@ -57,6 +57,8 @@ async function fixture(customContext = context, publish = true) {
     withdraw: () => { retain = false }, deny: () => { readable = false } }
 }
 
+export { fixture as createAcceptedL1Fixture }
+
 export async function runAcceptedL1Regression(prepareGraphRecallInputs: (options: {
   flushCaptures: () => Promise<void>; flushV4: () => void; syncL1: () => Promise<void>; isCurrent: () => boolean
 }) => Promise<void>) {

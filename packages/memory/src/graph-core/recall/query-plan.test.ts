@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { GraphResult } from '@continuum-memory/contracts'
-import { planGraphQuery } from './query-plan'
+import { hasGraphRelationIntent, planGraphQuery } from './query-plan'
 import type { GraphQueryPlanInput } from './query-plan'
 
 const temporal = { valid: { kind: 'at' as const, at: 123 }, knownAt: 456 }
@@ -13,6 +13,12 @@ function value<T>(result: GraphResult<T>): T {
 }
 
 describe('unified graph question planning', () => {
+  it('separates historical fact qualifiers from event-order questions', () => {
+    for (const query of ['用户以前住在北京', '我以前做什么工作', '我以后想住哪里'])
+      expect(hasGraphRelationIntent(query)).toBe(false)
+    for (const query of ['比赛取消以前发生了什么', '停电以后有什么事情', '哪个事件在先', 'What happened before fever?'])
+      expect(hasGraphRelationIntent(query)).toBe(true)
+  })
   it.each([
     ['张三为什么没有上班？', 'cause', '张三 没有上班', 'in', ['causal', 'contributes-to'], 'cause'],
     ['什么导致了发烧？', 'cause', '发烧', 'in', ['causal', 'contributes-to'], 'cause'],

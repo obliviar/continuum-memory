@@ -1,10 +1,10 @@
 # 图关系开发：样例、校验、种子检索与受限多跳召回
 
-> 2026-09-28：实体 L1 已接入统一固定视图和直接召回，支持精确实体读取、名称/别名候选、
-> 检索许可撤回与未知语义标记。审核规则沿用上游、尚未定案。上游关系审核仓库与聊天 L2
-> 仓库仍独立，不能将界面采纳等同于已进入聊天。当前边界与后续步骤见
+> 2026-10-01：实体 L1 已接入统一固定视图和直接召回，桌面实验图入口支持实体向量定位、
+> 检索许可撤回与未知语义标记。审核规则沿用上游、尚未定案。桌面 L2 已读取原生权威
+> 关系仓库；关系仍须通过来源、权限、版本和查询约束检查才可进入回答。开放断言的本地
+> 导航或采纳不会自动发布正式 Claim 或 L2 关系。当前边界与后续步骤见
 > [实体 L1 接入说明](../../../../docs/l1-recall-integration.md)。
-
 > **更新后请先读本节。** 权威 L2 类型以 `domain/relation-types.ts` 为准，存储使用上游新增的独立 `GraphRelationRepository`。下文第 1–5 步中的 `causal / contributes-to / before`、组合 bundle、assertion/status/support 字段属于旧样例与内部召回投影，不是当前 L2 持久化格式；它们已隔离到 `domain/recall-types.ts`，不可直接发布为 L2 快照。
 
 ## 与更新后的 L2 分支对齐
@@ -549,8 +549,6 @@ maxEvidenceTokens 目前计量证据读取内容，不等于将整个 JSON 序�
 
 更新后的分支已提供权威 L2 持久化与 CAS 发布，本次新增了召回到该读取层的适配。后续仍需对接真实 V4/L1 与宿主来源、种子检索和生命周期事件，再将证据包接入 Agent Runtime 和使用反馈。
 
-
-
 ### V4 current-state staging input
 
 `collectV4RecallInputs` (`adapters/v4-recall-input.ts`) reads a pinned V4 repository snapshot.
@@ -570,8 +568,6 @@ This is a staging boundary only. Persisted semantic decisions (predicate roles, 
 context, review), L1 publication, source hashing, query-time lifecycle/authorization rechecks,
 V4 query seed wiring and runtime injection are still required. A successful collection is not a
 live read view and must never be served as an enduring authorization grant.
-
-
 
 ## Desktop V4 → L1 → Agent direct-fact route
 
@@ -634,7 +630,6 @@ in `l2-recall-adapter.ts` but is not automatically connected to this scoped scal
 There is no real-user-memory quality claim: tests use synthetic V4 records, a real repository,
 encrypted temporary files and a stub LLM. No user corpus or paid model API is accessed by tests.
 
-
 ## 接入诊断与回归测评（第二阶段起点）
 
 开发版长期记忆管理页面增加“检查图记忆接入”按钮。它调用本地只读诊断，显示当前宿主
@@ -646,7 +641,6 @@ encrypted temporary files and a stub LLM. No user corpus or paid model API is ac
 “可接入”只说明通过输入门槛，不意味着在具体问题的时间、词法和预算筛选后必然被选中。
 使用 `eval/run-direct-recall.mjs` 的固定问题进一步区分被排除、漏召回和多召回；
 测评范围、严格质量门禁及首轮 7/12 基线详见 `eval/README.md`。
-
 
 ### 直接事实入口的弱相关匹配修复
 

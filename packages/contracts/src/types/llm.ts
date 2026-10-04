@@ -17,7 +17,7 @@ import type { ToolDefinition } from './tool'
 
 /** Options passed to the LLM port for a single stream request. */
 export interface StreamOptions {
-  /** Abort the provider request and stop consuming the stream. */
+  /** Abort foreground generation or a bounded internal model operation. */
   signal?: AbortSignal
   /** Tool definitions exposed to the model. */
   tools?: ToolDefinition[]

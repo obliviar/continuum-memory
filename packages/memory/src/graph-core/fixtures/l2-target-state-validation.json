@@ -1,0 +1,34 @@
+{
+  "version": "l2-target-state-additional-v1",
+  "corpus": "synthetic-not-human-reviewed; frozen before first model run; bounded-state challenge, not an external benchmark",
+  "pairs": [
+    ["令牌过期","账号登录失败"],
+    ["数据库修复","订单保存成功"],
+    ["服务器维护","预约取消"],
+    ["道路施工","活动延期"],
+    ["线路修复","设备恢复正常"],
+    ["机房进水","设备故障"]
+  ],
+  "cases": [
+    {"id":"literal-0","category":"literal","query":"为什么账号登录失败","pair":0,"seed":1},
+    {"id":"paraphrase-0","category":"paraphrase","query":"为什么账号无法登录","pair":0,"seed":1},
+    {"id":"literal-1","category":"literal","query":"为什么订单保存成功","pair":1,"seed":3},
+    {"id":"paraphrase-1","category":"paraphrase","query":"为什么订单保存成功了","pair":1,"seed":3},
+    {"id":"literal-2","category":"literal","query":"为什么预约取消","pair":2,"seed":5},
+    {"id":"paraphrase-2","category":"paraphrase","query":"为什么预约被取消了","pair":2,"seed":5},
+    {"id":"literal-3","category":"literal","query":"为什么活动延期","pair":3,"seed":7},
+    {"id":"paraphrase-3","category":"paraphrase","query":"为什么活动推迟了","pair":3,"seed":7},
+    {"id":"literal-4","category":"literal","query":"为什么设备恢复正常","pair":4,"seed":9},
+    {"id":"paraphrase-4","category":"paraphrase","query":"为什么设备已经恢复正常","pair":4,"seed":9},
+    {"id":"literal-5","category":"literal","query":"为什么设备故障","pair":5,"seed":11},
+    {"id":"paraphrase-5","category":"paraphrase","query":"为什么设备出现故障","pair":5,"seed":11},
+    {"id":"no-answer-0","category":"no-answer","query":"为什么账号登录成功","pair":null,"seed":null},
+    {"id":"no-answer-1","category":"no-answer","query":"为什么订单保存失败","pair":null,"seed":null},
+    {"id":"no-answer-2","category":"no-answer","query":"为什么预约延期","pair":null,"seed":null},
+    {"id":"no-answer-3","category":"no-answer","query":"为什么活动取消","pair":null,"seed":null},
+    {"id":"no-answer-4","category":"no-answer","query":"为什么设备停用","pair":null,"seed":null},
+    {"id":"no-answer-5","category":"no-answer","query":"为什么账号没有登录失败","pair":null,"seed":null},
+    {"id":"no-answer-6","category":"no-answer","query":"为什么订单可能保存成功","pair":null,"seed":null},
+    {"id":"no-answer-7","category":"no-answer","query":"为什么设备无法恢复正常","pair":null,"seed":null}
+  ]
+}

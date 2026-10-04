@@ -5,6 +5,7 @@ import type { GraphAccessContext, GraphEvidenceReader, GraphReadPort, GraphReadV
 import type { V4GraphMemoryOptions } from '../adapters/v4-graph-memory'
 import { collectCurrentL1, claimMatchesTime } from '../adapters/accepted-l1-input'
 import { graphHash, V4_SCALAR_MAPPING_POLICY } from '../adapters/v4-semantic-adapter'
+import { parseTurnFactFence, isTurnFactVisible } from '../recall/turn-fact-fence'
 
 const SCHEMA = 'v4-l1-publication/v1'
 type Options = Pick<V4GraphMemoryOptions, 'repository' | 'persistence' | 'authorizeScope' | 'canRead' | 'countTokens' | 'now' | 'acceptedBundle' | 'includeOwnedSessions'> & {
@@ -100,6 +101,9 @@ export function createV4L1Store(options: Options): V4L1Store {
       try {
         const started = performance.now()
         const context = structuredClone(request)
+        const fence = parseTurnFactFence(context.visibleFacts)
+        if (!fence.ok) return fence
+        const visibleFacts = fence.value
         if (!context.access?.accessContextId || !context.access.authorizationVersion
           || context.policyVersion !== V4_SCALAR_MAPPING_POLICY || context.expectedHierarchyManifestId)
           return fail('unsupported-capability', 'Only current scalar L1 views are available')
@@ -110,7 +114,7 @@ export function createV4L1Store(options: Options): V4L1Store {
         const captured = capture(context.access.scope)
         if (!same(captured.projection, pinned)) return fail('stale-projection', 'Published L1 no longer matches current sources')
         const temporal = context.temporal
-        if (!Number.isSafeInteger(temporal?.knownAt) || temporal.knownAt < captured.source.updatedAt || temporal.knownAt > now())
+        if (!Number.isSafeInteger(temporal?.knownAt) || (visibleFacts === undefined && temporal.knownAt < captured.source.updatedAt) || temporal.knownAt > now())
           return fail('unsupported-capability', 'Historical transaction views are unavailable')
         if (!(temporal.valid?.kind === 'at' ? Number.isSafeInteger(temporal.valid.at)
           : temporal.valid?.kind === 'overlap' && Number.isSafeInteger(temporal.valid.from)
@@ -143,7 +147,8 @@ export function createV4L1Store(options: Options): V4L1Store {
         const valid = check(); if (!valid.ok) return valid
         const inputs = new Map(captured.inputs.map(i => [i.fact.id, i]))
         function eligible(claim: GraphProjectionSnapshot['semanticBundle']['claims'][number]) {
-          return context.access.sharePolicies.includes(claim.sharePolicy) && context.access.sensitivities.includes(claim.sensitivity)
+          return isTurnFactVisible(visibleFacts, claim.fact)
+            && context.access.sharePolicies.includes(claim.sharePolicy) && context.access.sensitivities.includes(claim.sensitivity)
             && claimMatchesTime(claim, temporal, context.includeUnknownValidTime === true)
         }
         function charge(values: unknown[]): GraphResult<void> {

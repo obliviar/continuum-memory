@@ -21,7 +21,9 @@ import type {
   ToolCall,
 } from '@continuum-memory/contracts'
 
-import { buildGraphEvidencePrompt } from '../prompt/graph-evidence-prompt'
+import { buildGraphEvidencePrompt, graphAnswerabilityGuidance } from '../prompt/graph-evidence-prompt'
+import { assessGraphAnswerability, graphAnswerabilityEvidenceKey, unavailableGraphAnswerability,
+  type GraphAnswerability, type GraphAnswerabilityOptions } from '../prompt/graph-answerability'
 import { buildSourceEvidencePrompt } from '../prompt/source-evidence-prompt'
 import { createChatHooks } from './hooks'
 import { buildSystemPrompt } from '../prompt/system-prompt'
@@ -56,6 +58,8 @@ export interface AgentRuntimeDeps {
     /** Prepare an already-published view; hosts must not flush background extraction here. */
     awaitCaptureWrites: () => Promise<void>
     beginTurn?: () => (query: string, scope: MemoryScope) => GraphRecallRequest
+    /** Separate evidence sufficiency review. Similarity is never used as answer probability. */
+    answerability?: GraphAnswerabilityOptions
   }
   /** Resolve a stable, isolated memory owner for a session. */
   resolveMemoryScope?: (sessionId: string) => MemoryScope
@@ -92,6 +96,7 @@ export interface AgentTurnResult {
   assistantMessageId?: string
   text: string
   toolCalls: ToolCall[]
+  graphAnswerability?: GraphAnswerability
 }
 
 /**
@@ -338,6 +343,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
         // Recollect immediately before every model round, including after tool-driven deletions.
         // Fixed visibility is combined with fresh liveness checks; extraction never blocks this loop.
         let graphResult: GraphRecallResult | undefined
+        let answerability: GraphAnswerability | undefined
         let memoryPrompt = systemPrompt
         if (!deps.graphRecall && memories && deps.memory?.validateRecall) {
           memories = await deps.memory.validateRecall(memories, memoryScope)
@@ -356,19 +362,60 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
             request = graphRequest!(userMessage, memoryScope)
             recalled = await deps.memory.graph.recall(request)
           }
-          if (!recalled.ok && ['not-ready', 'stale-projection'].includes(recalled.error.code)) {
-            memoryPrompt += '\nHistorical graph evidence is temporarily unavailable. Do not invent remembered facts.'
+          if (!recalled.ok && ['not-ready', 'stale-projection', 'budget-exhausted', 'unsupported-capability'].includes(recalled.error.code)) {
+            answerability = unavailableGraphAnswerability(
+              recalled.error.code === 'unsupported-capability' ? 'query-needs-supported-target-or-time' : `recall-${recalled.error.code}`,
+              recalled.error.code === 'unsupported-capability')
+            memoryPrompt += `\n${graphAnswerabilityGuidance(answerability)}`
           } else {
-          if (!recalled.ok) throw new Error(`Graph memory recall failed: ${recalled.error.code}`)
-          graphResult = recalled.value
-          if (graphResult.recallId !== request.recallId || graphResult.scope.ownerId !== request.scope.ownerId
-            || graphResult.scope.agentId !== request.scope.agentId || graphResult.scope.sessionId !== request.scope.sessionId)
-            throw new Error('Graph memory returned a mismatched scope or recall')
-          const graphPrompt = buildGraphEvidencePrompt(graphResult)
-          const promptCost = deps.graphRecall.countTokens(graphPrompt)
-          if (!Number.isSafeInteger(promptCost) || promptCost < 0 || promptCost > request.budget.maxEvidenceTokens)
-            throw new Error('Graph memory prompt exceeds the evidence budget')
-          memoryPrompt += `\n${graphPrompt}`
+            if (!recalled.ok) throw new Error(`Graph memory recall failed: ${recalled.error.code}`)
+            graphResult = recalled.value
+            const validateResult = (value: GraphRecallResult, requested: GraphRecallRequest) => {
+              if (value.recallId !== requested.recallId || value.scope.ownerId !== requested.scope.ownerId
+                || value.scope.agentId !== requested.scope.agentId || value.scope.sessionId !== requested.scope.sessionId)
+                throw new Error('Graph memory returned a mismatched scope or recall')
+              const cost = deps.graphRecall!.countTokens(buildGraphEvidencePrompt(value))
+              if (!Number.isSafeInteger(cost) || cost < 0 || cost > requested.budget.maxEvidenceTokens)
+                throw new Error('Graph memory prompt exceeds the evidence budget')
+            }
+            validateResult(graphResult, request)
+            if (deps.graphRecall.answerability) {
+              const binding = graphAnswerabilityEvidenceKey(userMessage, graphResult)
+              const judged = await assessGraphAnswerability({ query: userMessage, model, result: graphResult,
+                options: deps.graphRecall.answerability, countTokens: deps.graphRecall.countTokens, signal: options?.signal })
+              if (options?.signal?.aborted) { result = { ...result, stopped: true, toolCalls: [], graphAnswerability: judged.assessment }; break }
+              answerability = judged.assessment
+              if (judged.reviewed) {
+                // Model review is asynchronous: recollect with the SAME turn fence and fresh liveness checks.
+                // Never transfer an old sufficiency decision onto changed or reordered evidence.
+                await deps.graphRecall.awaitCaptureWrites()
+                request = { ...request, recallId: crypto.randomUUID() }
+                const refreshed = await deps.memory.graph.recall(request)
+                if (!refreshed.ok) {
+                  graphResult = undefined
+                  answerability = unavailableGraphAnswerability('evidence-revalidation-failed')
+                } else {
+                  validateResult(refreshed.value, request)
+                  if (binding !== graphAnswerabilityEvidenceKey(userMessage, refreshed.value)) {
+                    graphResult = undefined
+                    answerability = unavailableGraphAnswerability('evidence-changed-during-review')
+                  } else graphResult = refreshed.value
+                }
+              }
+            }
+            if (graphResult) {
+              const graphPrompt = buildGraphEvidencePrompt(graphResult, answerability)
+              const promptCost = deps.graphRecall.countTokens(graphPrompt)
+              if (!Number.isSafeInteger(promptCost) || promptCost < 0 || promptCost > request.budget.maxEvidenceTokens) {
+                if (!answerability) throw new Error('Graph memory prompt exceeds the evidence budget')
+                graphResult = undefined
+                answerability = unavailableGraphAnswerability('assessed-evidence-prompt-budget')
+                memoryPrompt += `\n${graphAnswerabilityGuidance(answerability)}`
+              } else memoryPrompt += `\n${graphPrompt}`
+            } else if (answerability) memoryPrompt += `\n${graphAnswerabilityGuidance(answerability)}`
+          }
+          if (answerability) {
+            try { deps.graphRecall.answerability?.onAssessment?.(structuredClone(answerability)) } catch { /* Observer cannot change policy. */ }
           }
         }
         if (deps.sourceRecall) {
@@ -392,6 +439,7 @@ export function createAgentRuntime(deps: AgentRuntimeDeps) {
         }
         currentMessages = [{ role: 'system', content: memoryPrompt }, ...currentMessages.slice(1)]
         result = await runLLMRound(currentMessages, model, ctx, options?.signal)
+        if (answerability) result.graphAnswerability = answerability
         if (result.stopped) break
         if (graphResult && deps.memory?.graph) {
           try {

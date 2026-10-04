@@ -4,6 +4,7 @@ import type { V4GraphMemoryOptions } from './v4-graph-memory'
 import { collectV4RecallInputs, type V4RecallInput } from './v4-recall-input'
 import { graphHash, projectV4ScalarInputs, sourceHash } from './v4-semantic-adapter'
 import { exactClaimAvailable } from '../repository/semantic-repository'
+import type { L2EntityBinding } from '../recall/l2-entity-target'
 
 /** Retrieval permission is separate from extraction, semantic acceptance and proactive use. */
 export function selectRetrievableGraphBundle(bundle: GraphSemanticBundle | undefined,
@@ -125,5 +126,19 @@ export function entityCandidateNames(claim: GraphClaimRecord, projection: GraphP
     const entity = projection.semanticBundle.entities.find(e => same(e.ref, term.ref))
     return entity && sharePolicies.includes(entity.sharePolicy) && sensitivities.includes(entity.sensitivity)
       ? [entity.canonicalName, ...entity.aliases] : []
+  })
+}
+
+/** Called only for authorized retained Claims; valid-time exclusion must not erase their known identity. */
+export function entityCandidateBindings(claim: GraphClaimRecord, projection: GraphProjectionSnapshot,
+  sharePolicies: readonly string[], sensitivities: readonly string[], knownAt: number): L2EntityBinding[] {
+  return Object.values(claim.atom.args).flatMap(term => {
+    if (term.kind !== 'entity') return []
+    const entity = projection.semanticBundle.entities.find(e => same(e.ref, term.ref))
+    if (!entity || !same(entity.scope, claim.scope) || !sharePolicies.includes(entity.sharePolicy)
+      || !sensitivities.includes(entity.sensitivity) || entity.review.status !== 'accepted'
+      || entity.review.reviewedAt > knownAt || entity.transactionTime.recordedAt > knownAt
+      || entity.transactionTime.closedAt !== null) return []
+    return [{ key: graphHash(entity.ref), names: [entity.canonicalName, ...entity.aliases] }]
   })
 }

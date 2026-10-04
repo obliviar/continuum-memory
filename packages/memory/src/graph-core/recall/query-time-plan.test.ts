@@ -12,6 +12,19 @@ const options: GraphQueryTimeOptions = { referenceTime: Date.parse('2026-09-21T0
 const stamp = (day: string) => Date.parse(`${day}T00:00:00+08:00`)
 
 describe('deterministic graph query time planning', () => {
+  it('keeps recurring schedules as searchable content without inventing calendar dates', () => {
+    for (const query of ['星河项目的例会安排在每周三下午', '每个星期一上午9点上课', '每周五的晚上20:00运动']) {
+      const plan = value(planGraphQueryTime(query, temporal, options))
+      expect(plan.temporal).toEqual(temporal)
+      expect(plan.lexicalQuery).toBe(query)
+      expect(plan.source).toBe('caller')
+    }
+    const plan = value(planGraphQueryTime('昨天提到每周三下午的会议', temporal, options))
+    expect(plan.temporal.valid).toEqual({ kind: 'overlap', from: stamp('2026-09-20'), to: stamp('2026-09-21') })
+    expect(plan.lexicalQuery).toBe('提到每周三下午的会议')
+    expect(planGraphQueryTime('周三下午的会议', temporal, options).ok).toBe(false)
+    expect(planGraphQueryTime('下周每周三下午的会议', temporal, options).ok).toBe(false)
+  })
   it.each([
     ['昨天', '2026-09-20', '2026-09-21'],
     ['今天', '2026-09-21', '2026-09-22'],

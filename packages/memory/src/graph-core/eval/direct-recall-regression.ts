@@ -58,12 +58,13 @@ export const DIRECT_RECALL_CASES: Case[] = [
   { id: 'policy', category: '分享权限', query: '绿茶', expected: [], sharePolicies: ['allow-remote'] },
   { id: 'unknown-time', category: '时间缺失', query: '绿茶', expected: [], mutate: s => { delete s.facts[0]!.validFrom } },
   { id: 'semantic-rewrite', category: '无共同关键词的改写', query: '偏爱的饮品是哪种', expected: ['tea'],
-    knownGap: '纯 BM25 缺少语义改写匹配；后续混合检索优化目标' },
+    knownGap: '纯 BM25 对照仍缺少无共同关键词的匹配；默认结构化入口补充饮品偏好槽位' },
 ]
 
-/** Default is the unchanged lexical baseline. Optional provider embeds synthetic facts only. */
+/** Default follows production; structuredRecall:false preserves the original keyword control. */
 export async function runDirectRecallRegression(options: {
   prepareSemantic?: (snapshot: MemoryV4Snapshot) => Promise<DirectSemanticOptions>
+  structuredRecall?: boolean
 } = {}) {
   const rows = []
   for (const c of DIRECT_RECALL_CASES) {
@@ -82,7 +83,7 @@ export async function runDirectRecallRegression(options: {
     let checkpoint: string | undefined
     const port = createV4GraphMemory({ repository, persistence: { load: () => checkpoint, save: payload => { checkpoint = payload } },
       authorizeScope: s => s.ownerId === scope.ownerId && s.agentId === scope.agentId,
-      canRead, countTokens: s => Buffer.byteLength(s), now: () => 200, semantic })
+      canRead, countTokens: s => Buffer.byteLength(s), now: () => 200, semantic, structuredRecall: options.structuredRecall })
     const recallStart = performance.now()
     const result = await port.recall(request)
     const elapsedMs = performance.now() - recallStart
@@ -95,7 +96,7 @@ export async function runDirectRecallRegression(options: {
       && claim.fact.version === Math.max(...repository.snapshot().factVersions.filter(v => v.factId === claim.fact.id).map(v => v.version))) : expectedDenial
     const qualityPassed = boundaryPassed && evidencePassed && JSON.stringify(actual) === JSON.stringify([...c.expected].sort())
     rows.push({ id: c.id, category: c.category, query: c.query, expected: c.expected, actual, qualityPassed,
-      boundaryPassed, evidencePassed, knownGap: c.knownGap ?? null,
+      boundaryPassed, evidencePassed, knownGap: options.structuredRecall === false ? c.knownGap ?? null : null,
       missing: c.expected.filter(id => !actual.includes(id)), unexpected: actual.filter(id => !c.expected.includes(id)),
       eligible: report.eligible, excluded: report.excluded, reasons: report.reasons,
       preparationMs, elapsedMs, searchScope: result.ok ? result.value.trace.searchScope : [],
@@ -103,6 +104,7 @@ export async function runDirectRecallRegression(options: {
       outcome: result.ok ? result.value.trace.stopReason : result.error.code })
   }
   return { schema: 'direct-recall-regression/v1', corpus: 'synthetic-not-human-reviewed',
+    structuredRecall: options.structuredRecall !== false,
     tests: rows.length, qualityPassed: rows.filter(row => row.qualityPassed).length,
     knownGaps: rows.filter(row => row.knownGap && !row.qualityPassed).length, cases: rows,
     lexicalChecks: runDirectLexicalRegression() }

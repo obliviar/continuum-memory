@@ -10,7 +10,7 @@ describe('direct recall evidence regression v1', () => {
     for (const row of report.cases) {
       expect(row.boundaryPassed, row.id).toBe(true)
       expect(row.evidencePassed, row.id).toBe(true)
-      if (!row.knownGap) expect(row.qualityPassed, row.id).toBe(true)
+      expect(row.qualityPassed, row.id).toBe(true)
     }
     console.info(JSON.stringify({ cases: report.tests, exactEvidenceMatches: report.qualityPassed,
       failures: report.cases.filter(row => !row.qualityPassed).map(row => ({ id: row.id, missing: row.missing, unexpected: row.unexpected })) }))

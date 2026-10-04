@@ -7,3 +7,4 @@ export type {
   OnnxEmbedderProgress,
 } from './onnx-embedder'
 export * from './constants'
+export { createOnnxReranker } from './onnx-reranker'

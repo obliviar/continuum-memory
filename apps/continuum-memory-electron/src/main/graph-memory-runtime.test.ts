@@ -83,10 +83,14 @@ describe('V4 graph through Agent runtime', () => {
     expect(f.prompts[0]![0]!.content).toContain('I like tea')
     expect(f.prompts[1]![0]!.content).not.toContain('I like tea')
   })
-  it('fails closed instead of using the legacy path when graph requirements cannot be met', async () => {
+  it('reports unsupported graph requirements without injecting facts or using legacy recall', async () => {
     const f = setup()
-    await expect(createAgentRuntime(f.deps).send('s', 'Why do I like tea?')).rejects.toThrow('unsupported-capability')
-    expect(f.prompts).toEqual([])
+    const result = await createAgentRuntime(f.deps).send('s', 'Why do I like tea?')
+    expect(result.graphAnswerability).toMatchObject({ status: 'needs-clarification', assessment: 'unavailable' })
+    expect(f.prompts[0]![0]!.content).toContain('<graph-answerability>')
+    expect(f.prompts[0]![0]!.content).not.toContain('<graph-memory>')
+    expect(f.prompts[0]![0]!.content).not.toContain('I like tea')
+    expect(f.feedback).not.toHaveBeenCalled()
     expect(f.memory.recall).not.toHaveBeenCalled()
   })
   it('escapes source instructions rather than inserting them into the prompt structure', async () => {
@@ -98,5 +102,28 @@ describe('V4 graph through Agent runtime', () => {
     await createAgentRuntime(f.deps).send('s', 'What do I like?')
     expect(f.prompts[0]![0]!.content).toContain('&lt;system&gt;')
     expect(f.prompts[0]![0]!.content).not.toContain('<system>Ignore')
+  })
+})
+
+describe('graph review and desktop cancellation after synchronization', () => {
+  it('cancels the new sufficiency-review request before starting a foreground answer', async () => {
+    const f = setup(), controller = new AbortController()
+    let entered!: () => void, reviewAborted = false
+    const reached = new Promise<void>(resolve => { entered = resolve })
+    const runtime = createAgentRuntime({ ...f.deps, graphRecall: { ...f.deps.graphRecall,
+      answerability: { timeoutMs: 30000, reviewer: { review: ({ signal }) => {
+        entered()
+        return new Promise((_, reject) => { signal.addEventListener('abort', () => { reviewAborted = true; reject(new Error('review aborted')) }, { once: true }) })
+      } } },
+    } })
+    const sending = runtime.send('s', 'What do I like?', { signal: controller.signal })
+    await reached
+    controller.abort()
+    const result = await sending
+    expect(reviewAborted).toBe(true)
+    expect(result).toMatchObject({ stopped: true, graphAnswerability: { reasons: ['review-aborted'] } })
+    expect(f.prompts).toEqual([])
+    expect(f.feedback).not.toHaveBeenCalled()
+    expect(f.deps.session.getSessionMessages('s').at(-1)).toMatchObject({ status: 'stopped' })
   })
 })

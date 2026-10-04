@@ -83,6 +83,8 @@ async function fixture(label: 'ENTAILMENT' | 'CONTRADICTION' = 'ENTAILMENT') {
     unavailable: () => { available = false }, reload: () => { relations = makeRelations() }, legacyReads: () => legacyReads }
 }
 
+export { fixture as createNativeL2Fixture }
+
 export async function runNativeL2Regression(validatePrompt: (result: GraphRecallResult) => string) {
   const checks: { id: string; passed: boolean; error?: string }[] = []
   async function test(id: string, run: () => Promise<void>) { try { await run(); checks.push({ id, passed: true }) }

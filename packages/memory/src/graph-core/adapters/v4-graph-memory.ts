@@ -10,13 +10,19 @@ export { selectRetrievableGraphBundle } from './accepted-l1-input'
 import type { GraphSemanticBundle } from '../domain/types'
 import { graphHash, V4_SCALAR_MAPPING_POLICY } from './v4-semantic-adapter'
 import { planGraphQueryTime } from '../recall/query-time-plan'
+import { hasGraphRelationIntent } from '../recall/query-plan'
 import { randomUUID } from 'node:crypto'
 import { searchEntityVectorSeeds } from '../recall/entity-vector-seeds'
+import type { EntityRetrievalTextMode } from '../projection/entity-retrieval-projection'
+import type { EntityCandidateSelectionOptions } from '../recall/entity-candidate-selection'
 import { createV4RelationSourceReader } from './v4-relation-sources'
 import { createV4L1Store, type V4L1Store } from '../repository/v4-l1-store'
 import type { GraphAccessContext } from '../ports/graph-ports'
-import { selectRecallCandidates, type CandidateSelectionOptions } from '../recall/candidate-selection'
+import { type CandidateSelectionOptions } from '../recall/candidate-selection'
+import { selectWithSupplementaryRecall } from '../recall/supplementary-recall'
+import { createEvidenceSelectionText, evidenceSelectionGroup } from '../recall/evidence-selection-text'
 import { emitRecallDiagnostic, type RecallDiagnostics } from '../recall/recall-diagnostics'
+import { parseTurnFactFence, isTurnFactVisible } from '../recall/turn-fact-fence'
 
 export interface V4GraphPersistence { storagePath?: string; load: () => string | undefined; save: (payload: string) => void }
 export const V4_GRAPH_BUDGET: GraphRecallBudget = { maxSeeds: 8, maxNodes: 64, maxEdges: 0, maxHops: 0,
@@ -38,7 +44,13 @@ export interface V4GraphMemoryOptions {
   entitySemantic?: DirectSemanticOptions
   /** Candidate pool and final evidence/seed limits are separate. Default has no reranker. */
   candidateSelection?: CandidateSelectionOptions
+  /** One bounded extra pass for empty or truncated candidate coverage. */
+  supplementaryRecall?: boolean
   entityCandidateLimit?: number
+  /** Name-only remains the library control; desktop can enable derived Claim fragments explicitly. */
+  entityRetrievalTextMode?: EntityRetrievalTextMode
+  /** Entity navigation pool/reranker. Does not change Claim evidence selection policy. */
+  entityCandidateSelection?: EntityCandidateSelectionOptions
   /** Wide local candidates + separate evidence gate; threshold preserves the old control route. */
   entityClaimCandidates?: 'wide' | 'threshold'
   diagnostics?: RecallDiagnostics
@@ -75,6 +87,9 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
     async recall(request) {
       const start = performance.now()
       try {
+        request = structuredClone(request)
+        const fence = parseTurnFactFence(request.visibleFacts)
+        if (!fence.ok) return fence
         const retrievalMode = options.retrievalMode ?? 'hybrid'
         const vectorMode = retrievalMode === 'vector' || retrievalMode === 'entity-vector'
         if (!['entity-vector', 'vector', 'hybrid', 'lexical'].includes(retrievalMode)) return fail('invalid-request', 'Unknown retrieval mode')
@@ -93,22 +108,25 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         const timestamp = now()
         const snapshot = options.repository.snapshot()
         if (snapshot.facts.length > 10000) return fail('budget-exhausted', 'V4 import scan ceiling exceeded')
-        if (!request.temporal || request.temporal.knownAt < snapshot.updatedAt || request.temporal.knownAt > timestamp)
+        if (!Number.isSafeInteger(request.temporal?.knownAt)
+          || (fence.value === undefined && request.temporal.knownAt < snapshot.updatedAt) || request.temporal.knownAt > timestamp)
           return fail('unsupported-capability', 'Historical transaction views are not available in this adapter')
         const timePlan = planGraphQueryTime(request.query, request.temporal, {
           referenceTime: timestamp, utcOffsetMinutes: options.utcOffsetMinutes ?? 0,
         })
         if (!timePlan.ok) return timePlan
         // Do not answer a relation question with unrelated scalar facts as though an edge had been found.
-        if (/为什么|为何|原因|导致|先后|先.*后|\b(why|cause|caused|before|after)\b/i.test(request.query))
+        if (hasGraphRelationIntent(request.query))
           return fail('unsupported-capability', 'This host route has no L2 traversal; use the bounded relation service')
-        const gathered = collectCurrentL1(options, request.scope, timestamp, request.visibleFacts)
+        // Publication stays turn independent; apply visibility to candidates and the read view.
+        const gathered = collectCurrentL1(options, request.scope, timestamp)
         const projection = gathered.projection
         const claimByFact = new Map(projection.semanticBundle.claims.map(claim => [claim.fact.id, claim]))
         const includeUnknown = timePlan.value.source === 'caller' && request.temporal.valid.kind === 'at'
           && request.temporal.valid.at === request.temporal.knownAt
-        const inputs = gathered.inputs.filter(({ fact, sources }) => {
-          if (!allowed(fact, request) || sources.some(s => !allowed(s.episode, request))) return false
+        const inputs = gathered.inputs.filter(({ fact, version, sources }) => {
+          if (!isTurnFactVisible(fence.value, { id: fact.id, version: version.version })
+            || !allowed(fact, request) || sources.some(s => !allowed(s.episode, request))) return false
           const claim = claimByFact.get(fact.id)!
           return request.sharePolicies.includes(claim.sharePolicy) && request.sensitivities.includes(claim.sensitivity)
             && claimMatchesTime(claim, timePlan.value.temporal, includeUnknown)
@@ -126,19 +144,30 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         const lexicalHits = index.search(timePlan.value.lexicalQuery, { scope: request.scope, limit: 10000, minScore: 0.2 })
         const structured = searchDirectStructured(timePlan.value.lexicalQuery, inputs.map(input => input.fact),
           request.scope, retrievalMode === 'hybrid' && options.structuredRecall !== false)
-        const semantic = retrievalMode === 'entity-vector' ? await searchEntityVectorSeeds({
+        const protectedQueryTerms = [...projection.semanticBundle.entities.flatMap(e => [e.canonicalName, ...e.aliases]),
+          ...inputs.flatMap(({ fact }) => typeof fact.object === 'string' ? [fact.object] : [])]
+        const semanticOptions = options.semantic && { ...options.semantic, protectedQueryTerms }
+        const entityOptions = options.entitySemantic && { ...options.entitySemantic, protectedQueryTerms }
+        const baseEntityLimit = request.budget.maxSeeds === 0 ? 0 : Math.min(options.entityCandidateLimit ?? 4, request.budget.maxNodes)
+        const searchSemantic = async (entityLimit: number) => retrievalMode === 'entity-vector' ? await searchEntityVectorSeeds({
           query: timePlan.value.lexicalQuery, projection, entries: inputs.map(({ fact }) => ({ fact, claim: claimByFact.get(fact.id)! })),
           scope: request.scope, temporal: timePlan.value.temporal, sharePolicies: request.sharePolicies, sensitivities: request.sensitivities,
-          entitySemantic: options.entitySemantic, claimSemantic: options.semantic,
+          entitySemantic: entityOptions, claimSemantic: semanticOptions,
           claimCandidateMode: options.entityClaimCandidates ?? 'wide',
-          entityLimit: request.budget.maxSeeds === 0 ? 0 : Math.min(options.entityCandidateLimit ?? 4, request.budget.maxNodes),
+          textMode: options.entityRetrievalTextMode,
+          entitySelection: options.entityCandidateSelection,
+          entityLimit,
           onLocalCandidates: ids => diagnostic('entity-entry', [...ids]),
           remainingMs: request.budget.maxElapsedMs - (performance.now() - start),
           canReadEntity: entity => createV4RelationSourceReader(options).read(entity.provenance.sources, {
             accessContextId: 'entity-seed', authorizationVersion: 'current', scope: request.scope,
             sharePolicies: request.sharePolicies, sensitivities: request.sensitivities }).ok,
+          canReadClaim: claim => createV4RelationSourceReader(options).read(claim.provenance.sources, {
+            accessContextId: 'entity-fragment', authorizationVersion: 'current', scope: request.scope,
+            sharePolicies: request.sharePolicies, sensitivities: request.sensitivities }).ok,
         }) : await searchDirectSemantic(timePlan.value.lexicalQuery, inputs.map(input => input.fact),
-          retrievalMode === 'lexical' ? undefined : options.semantic, request.budget.maxElapsedMs - (performance.now() - start))
+          retrievalMode === 'lexical' ? undefined : semanticOptions, request.budget.maxElapsedMs - (performance.now() - start))
+        const semantic = await searchSemantic(baseEntityLimit)
         if (vectorMode && semantic.incomplete && !semantic.hits.length)
           return fail('not-ready', 'Vector candidate search unavailable or incomplete; no lexical fallback was used')
         if (!options.authorizeScope(request.scope) || graphHash(options.repository.snapshot()) !== graphHash(snapshot))
@@ -148,10 +177,31 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
           .filter(hit => !structured.constrain || structuredIds.has(hit.id))
         const byId = new Map(inputs.map(input => [input.fact.id, { input, claim: claimByFact.get(input.fact.id)! }]))
         diagnostic('retrieval', hits.map(hit => hit.id), semantic.scope)
-        const selection = await selectRecallCandidates({ query: timePlan.value.lexicalQuery, hits,
+        const selectionPredicates = new Map(projection.semanticBundle.predicates.map(p => [p.name, p]))
+        const selectionText = createEvidenceSelectionText({ query: timePlan.value.lexicalQuery,
+          entities: projection.semanticBundle.entities, knownAt: timePlan.value.temporal.knownAt,
+          sharePolicies: request.sharePolicies, sensitivities: request.sensitivities,
+          canReadEntity: entity => createV4RelationSourceReader(options).read(entity.provenance.sources, {
+            accessContextId: 'evidence-selection', authorizationVersion: 'current', scope: request.scope,
+            sharePolicies: request.sharePolicies, sensitivities: request.sensitivities }).ok })
+        const selection = await selectWithSupplementaryRecall({ query: timePlan.value.lexicalQuery, hits,
+          enabled: options.supplementaryRecall, protectedQueryTerms, searchScope: semantic.scope,
+          searchAgain: async (_limit, signal) => {
+            const extra = await searchSemantic(Math.min(32, request.budget.maxNodes, baseEntityLimit * 2))
+            signal.throwIfAborted()
+            semantic.incomplete ||= extra.incomplete
+            const combined = mergeDirectCandidates(hits, extra.hits)
+              .filter(hit => !structured.constrain || structuredIds.has(hit.id))
+            diagnostic('retrieval', combined.map(hit => hit.id), ['supplementary-search', ...extra.scope])
+            return { hits: combined, scope: extra.scope,
+              admissibleIds: retrievalMode === 'entity-vector' && options.entityClaimCandidates !== 'threshold'
+                ? new Set([...semantic.hits, ...extra.hits].filter(h => h.score >= (options.semantic?.minCosine ?? DIRECT_SEMANTIC_MIN_COSINE)).map(h => h.id)) : undefined }
+          },
           admissibleIds: retrievalMode === 'entity-vector' && options.entityClaimCandidates !== 'threshold'
             ? new Set(semantic.hits.filter(h => h.score >= (options.semantic?.minCosine ?? DIRECT_SEMANTIC_MIN_COSINE)).map(h => h.id)) : undefined,
-          text: id => byId.get(id)!.input.fact.canonicalText, options: options.candidateSelection,
+          text: id => { const entry = byId.get(id)!; return selectionText(entry.claim, entry.input.fact.canonicalText) }, options: options.candidateSelection,
+          literal: id => byId.get(id)!.input.fact.object,
+          group: id => { const claim = byId.get(id)!.claim; return evidenceSelectionGroup(claim, selectionPredicates.get(claim.atom.predicate)) },
           finalLimit: Math.min(request.budget.maxSeeds, request.budget.maxNodes),
           remainingMs: request.budget.maxElapsedMs - (performance.now() - start) })
         diagnostic('candidate-pool', selection.candidates.map(hit => hit.id), selection.scope)
@@ -189,7 +239,7 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
         const elapsed = performance.now() - start
         if (elapsed >= request.budget.maxElapsedMs) return fail('budget-exhausted', 'Direct recall elapsed-time budget exhausted')
         // Re-read CURRENT tombstones, policy and exact contents even when an encrypted projection exists.
-        const finalInputs = collectCurrentL1(options, request.scope, now(), request.visibleFacts)
+        const finalInputs = collectCurrentL1(options, request.scope, now())
         const fresh = new Map(finalInputs.inputs.map(input => [input.fact.id, graphHash(input)]))
         if (!options.authorizeScope(request.scope) || graphHash(finalInputs.projection) !== graphHash(projection)
           || inputs.some(input => fresh.get(input.fact.id) !== graphHash(input)))
@@ -207,7 +257,8 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
           scope: request.scope, sharePolicies: request.sharePolicies, sensitivities: request.sensitivities }
         grants.set(access.accessContextId, access)
         const opened = await l1.openView({ access, temporal: timePlan.value.temporal, budget: request.budget,
-          expectedManifestId: manifestId, policyVersion: V4_SCALAR_MAPPING_POLICY, includeUnknownValidTime: includeUnknown })
+          expectedManifestId: manifestId, policyVersion: V4_SCALAR_MAPPING_POLICY, includeUnknownValidTime: includeUnknown,
+          visibleFacts: request.visibleFacts })
         try {
           if (!opened.ok) return opened
           const resolved = await opened.value.resolveClaims(claims.flatMap(c => c.kind === 'direct' ? [c.ref] : []))
@@ -230,6 +281,7 @@ export function createV4GraphMemory(options: V4GraphMemoryOptions): AgentGraphMe
           trace: { recallId: request.recallId, manifestId, policyVersion: V4_SCALAR_MAPPING_POLICY,
             temporal: timePlan.value.temporal, completeness: incomplete ? 'incomplete' : 'complete-within-declared-scope',
             searchScope: ['current-verified-scalar-L1', `retrieval-mode:${retrievalMode}`,
+              ...(fence.value !== undefined ? ['turn-fact-fence:exact-current-versions'] : []),
               ...(vectorMode ? ['seed-selection:vector', 'no-lexical-fallback'] : ['BM25', DIRECT_LEXICAL_POLICY, DIRECT_HYBRID_POLICY]),
               ...semantic.scope, ...structured.scope, ...selection.scope, 'accepted-entity-L1', 'entity-name-alias-candidates',
               options.includeOwnedSessions && request.scope.sessionId === undefined ? 'trusted-owner-wide-sessions' : 'exact-owner-agent-session',

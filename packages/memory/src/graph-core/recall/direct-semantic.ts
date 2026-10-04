@@ -1,5 +1,6 @@
 import type { MemoryEmbeddingIndex } from '../../long-term/embedding-index'
 import { createDenseVectorCandidateIndex } from '../../long-term/dense-vector-candidate-index'
+import { recallQueryVariants } from './query-expansion'
 
 export const DIRECT_HYBRID_POLICY = 'direct-hybrid-rrf-v1'
 /** Provisional admission threshold; not a calibrated probability of relevance. */
@@ -15,6 +16,9 @@ export interface DirectSemanticOptions {
   timeoutMs?: number
   /** Candidate navigation only. Never interpret the top-ranked item as sufficient answer evidence. */
   rankOnly?: boolean
+  /** Trusted host opt-in. Original + at most one conservative offline normalization. */
+  queryExpansion?: boolean
+  protectedQueryTerms?: readonly string[]
 }
 interface Hit { id: string; score: number }
 export interface SemanticResult {
@@ -59,25 +63,42 @@ export async function searchDirectSemantic(
     if (!index.size()) return result('empty-index', [], true, scope)
     const wait = Math.min(500, maxWait, (remainingMs - (performance.now() - started)) / 2)
     if (wait < 1) return result('budget-skipped', [], true, scope)
-    let timer: ReturnType<typeof setTimeout> | undefined
-    // A late embedding may finish in its local provider, but cannot publish late recall results.
-    // The race also observes late rejection; always clear the timer on success/failure.
-    const timeout = Symbol('timeout')
-    let embedded
-    try {
-      embedded = await Promise.race([
-        Promise.resolve().then(() => options.embedQuery(query)),
-        new Promise<typeof timeout>(resolve => { timer = setTimeout(() => resolve(timeout), wait) }),
-      ])
-    } finally { if (timer !== undefined) clearTimeout(timer) }
-    if (embedded === timeout) return result('query-timeout', [], true, scope)
-    if (!embedded || embedded.model !== options.model || !validVector(embedded.vector, options.dimensions))
-      return result('query-unavailable', [], true, scope)
-    const ranked = index.search(embedded.vector, { limit: facts.length, minScore: -1 })
-    scope.push(`semantic-vectors-scored:${index.size()}`)
+    const queries = options.queryExpansion ? recallQueryVariants(query, options.protectedQueryTerms) : [query]
+    const rankings: Hit[][] = []
+    let queryIncomplete = false
+    let failure = 'query-unavailable'
+    const deadline = performance.now() + wait
+    for (const wording of queries) {
+      if (performance.now() >= deadline) { queryIncomplete = true; failure = 'query-timeout'; break }
+      let timer: ReturnType<typeof setTimeout> | undefined
+      // Observe late rejection, but never publish late embeddings. A failed extra wording
+      // does not erase the successful original route or certify complete coverage.
+      const timeout = Symbol('timeout')
+      let embedded
+      try {
+        embedded = await Promise.race([
+          Promise.resolve().then(() => options.embedQuery(wording)),
+          new Promise<typeof timeout>(resolve => { timer = setTimeout(() => resolve(timeout), Math.max(0, deadline - performance.now())) }),
+        ])
+      } catch { queryIncomplete = true; failure = 'query-or-index-failed'; break }
+      finally { if (timer !== undefined) clearTimeout(timer) }
+      if (embedded === timeout || performance.now() >= deadline) { queryIncomplete = true; failure = 'query-timeout'; break }
+      if (!embedded || embedded.model !== options.model || !validVector(embedded.vector, options.dimensions))
+        { queryIncomplete = true; break }
+      rankings.push(index.search(embedded.vector, { limit: facts.length, minScore: -1 }))
+    }
+    if (!rankings.length) return result(failure, [], true, scope)
+    const maxCosine = new Map<string, number>()
+    for (const hits of rankings) for (const hit of hits) maxCosine.set(hit.id, Math.max(maxCosine.get(hit.id) ?? -Infinity, hit.score))
+    // Fuse rank for candidate order, but retain actual cosine for existing admission checks.
+    const ranked = rankings.length === 1 ? rankings[0]! : mergeDirectCandidates(rankings[0]!, rankings[1]!)
+      .map(hit => ({ id: hit.id, score: maxCosine.get(hit.id)! }))
+    scope.push(`semantic-vectors-scored:${index.size() * rankings.length}`)
+    if (options.queryExpansion) scope.push('query-expansion:offline-conservative-v1', `query-variants:${queries.length}`,
+      `query-variants-completed:${rankings.length}`, ...(rankings.length > 1 ? ['query-fusion:rrf-max-cosine-gate'] : []))
     scope.push(`semantic-selection:${options.rankOnly ? 'rank-only' : 'threshold'}`)
     const hits = options.rankOnly ? ranked : ranked.filter(hit => hit.score >= threshold)
-    const partial = index.size() !== facts.length
+    const partial = index.size() !== facts.length || queryIncomplete
     return result(partial ? 'partial' : 'ready', hits, partial, scope, ranked.slice(0, 2))
   } catch { return result('query-or-index-failed', [], true, scope) }
 }

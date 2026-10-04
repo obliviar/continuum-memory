@@ -78,7 +78,8 @@ export async function runL2AnswerStatusRegression(prompt: (result: GraphRecallRe
     const r = ok(await f.port.recall(f.request())), a = assessment(r)
     assert.equal(r.trace.stopReason, 'exhausted-within-scope'); assert.ok(!a.limitations.includes('hop-limit'))
     assert.ok(a.limitations.includes('incomplete-coverage')); assert.ok(prompt(r).includes('do not call the returned causes or paths exhaustive'))
-    assert.ok(Buffer.byteLength(prompt(r)) <= r.trace.usage.evidenceTokens + 2048)
+    // Evidence accounting excludes runtime guidance; enforce the actual host prompt budget.
+    assert.ok(Buffer.byteLength(prompt(r)) <= f.request().budget.maxEvidenceTokens)
   })
   await test('outgoing-and-temporal-evidence-keep-their-actual-direction-and-kind', async () => {
     const f = createL2HostFixture(); await f.publish()

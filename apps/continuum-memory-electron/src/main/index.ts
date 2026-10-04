@@ -7,15 +7,16 @@ import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { runBackgroundTaskBatch } from './background-task-batch'
 import { createConversationRegistry, type DesktopConversation } from './conversation-registry'
+import { createLocalGraphEvidenceSelection } from './graph-evidence-selection'
 import { isGraphExtractionEnabled, shouldPersistGraphExtraction } from './graph-extraction-policy'
 
-import { createAgentRuntime, createSessionManager, createChatHooks } from '@continuum-memory/core'
+import { createAgentRuntime, createSessionManager, createChatHooks, createLLMGraphAnswerabilityReviewer } from '@continuum-memory/core'
 import { createOpenAILlm } from '@continuum-memory/llm-openai'
 import {
   createEncryptedFilePersistence,
   createEncryptedGraphL1Persistence,
   createV4L2Memory,
-  prepareEntityVectors,
+  prepareV4EntityVectors,
   createEncryptedGraphRelationPersistence,
   diagnoseV4GraphInputs,
   V4_L2_BUDGET,
@@ -458,6 +459,11 @@ const sharedLocalUie = createLocalUieExtractor({
 // Model runtimes contain no memory catalog; request IDs keep concurrent partitions separate.
 // A partition reload must not dispose a model being used by another partition.
 const sharedNliModels = new Map<string, ReturnType<typeof createLocalErlangshenNli>>()
+const graphLocalSelection = createLocalGraphEvidenceSelection(
+  process.env.CONTINUUM_GRAPH_RERANKER_DIR ? [process.env.CONTINUUM_GRAPH_RERANKER_DIR]
+    : [join(rootUserDataDir, 'models', 'reranker-base'), ...localModelWorkDirectories().map(work => join(dirname(work), 'models', 'reranker-base'))],
+  () => writeBootLog('Local graph relevance model unavailable; keeping the conservative cosine gate'),
+)
 function getSharedNliModel(options: Parameters<typeof createLocalErlangshenNli>[0]) {
   const key = JSON.stringify(options)
   let model = sharedNliModels.get(key)
@@ -1933,6 +1939,8 @@ function invalidateMemoryV4ShadowComparisons(): void {
 
 async function prepareDesktopGraphRecall(flushCaptures: () => Promise<void>): Promise<void> {
   await graphSourceUpgradePromise
+  // Load and integrity-check outside the per-query retrieval budget; reuse across partitions.
+  if (memorySemanticActive && graphLocalSelectionEnabled()) await graphLocalSelection.prepare()
   const repository = memoryV4Repository, semantic = graphSemanticRepository, projection = graphL1ProjectionRepository
   const store = graphL1Store, shadow = memoryV4Shadow
   await prepareGraphRecallInputs({ flushCaptures, flushV4: () => { shadow?.flush() },
@@ -1948,10 +1956,24 @@ async function prepareDesktopGraphRecall(flushCaptures: () => Promise<void>): Pr
       await queueGraphL2Sync()
       if (memorySemanticActive) {
         const entityProjection = projection.snapshot(), entityIndex = graphEntityEmbeddingIndex
-        if (entityProjection?.manifest.state === 'ready') await prepareEntityVectors({
-          bundle: entityProjection.semanticBundle, index: entityIndex, model: SEMANTIC_MEMORY_FINGERPRINT,
+        const remotePolicy = memorySettings.remotePolicy
+        const l1Persistence = graphL1Persistence
+        if (entityProjection?.manifest.state === 'ready' && l1Persistence) await prepareV4EntityVectors({
+          memory: {
+            repository, persistence: l1Persistence, includeOwnedSessions: true,
+            acceptedBundle: () => selectRetrievableGraphBundle(projection.snapshot()?.semanticBundle, store.tasks()),
+            authorizeScope: scope => scope.ownerId === localMemoryScope.ownerId && scope.agentId === localMemoryScope.agentId
+              && scope.sessionId === undefined && memoryV4Repository === repository,
+            canRead: canReadGraphRecord, countTokens: countGraphTokens,
+          },
+          scope: localMemoryScope, index: entityIndex, model: SEMANTIC_MEMORY_FINGERPRINT,
+          sharePolicies: remotePolicy === 'disabled' ? [] : ['allow-remote'],
+          sensitivities: remotePolicy === 'allow-private' ? ['normal', 'private'] : ['normal'],
+          textMode: graphEntityRetrievalTextMode(),
           embed: text => semanticMemory.embed(text),
           isCurrent: () => memorySemanticActive && graphEntityEmbeddingIndex === entityIndex
+            && memoryV4Repository === repository && graphL1Store === store && graphL1Persistence === l1Persistence
+            && memorySettings.remotePolicy === remotePolicy
             && graphL1ProjectionRepository === projection
             && projection.snapshot()?.manifest.manifestId === entityProjection.manifest.manifestId,
         })
@@ -1959,11 +1981,30 @@ async function prepareDesktopGraphRecall(flushCaptures: () => Promise<void>): Pr
     } })
 }
 
+function graphEntityRetrievalTextMode(): 'name-only' | 'claim-fragments' {
+  return process.env.CONTINUUM_GRAPH_ENTITY_TEXT === 'name-only' ? 'name-only' : 'claim-fragments'
+}
+
+function graphLocalSelectionEnabled(): boolean {
+  return process.env.CONTINUUM_GRAPH_EVIDENCE_SELECTION !== 'cosine'
+    && !['lexical', 'hybrid', 'vector'].includes(process.env.CONTINUUM_GRAPH_RETRIEVAL ?? '')
+}
+
+function canReadGraphRecord(record: { sharePolicy: string; sensitivity: string }): boolean {
+  return memorySettings.remotePolicy !== 'disabled' && record.sharePolicy === 'allow-remote'
+    && (record.sensitivity === 'normal'
+      || (record.sensitivity === 'private' && memorySettings.remotePolicy === 'allow-private'))
+}
+
 function createDesktopGraphMemory() {
   const repository = memoryV4Repository, l1Persistence = graphL1Persistence
   return repository && l1Persistence
     ? createV4L2Memory({
         repository, persistence: l1Persistence,
+        entityRetrievalTextMode: graphEntityRetrievalTextMode(),
+        supplementaryRecall: process.env.CONTINUUM_GRAPH_QUERY_EXPANSION !== 'off',
+        ...(graphLocalSelectionEnabled()
+          ? { candidateSelection: graphLocalSelection.selection() } : {}),
         // Trusted launch-time controls for comparison; ordinary requests cannot switch retrieval policies.
         retrievalMode: process.env.CONTINUUM_GRAPH_RETRIEVAL === 'hybrid' ? 'hybrid'
           : process.env.CONTINUUM_GRAPH_RETRIEVAL === 'lexical' ? 'lexical'
@@ -1975,19 +2016,21 @@ function createDesktopGraphMemory() {
           && graphL1Persistence === l1Persistence
           && scope.ownerId === localMemoryScope.ownerId
           && scope.agentId === localMemoryScope.agentId && scope.sessionId === undefined,
-        canRead: record => memorySettings.remotePolicy !== 'disabled' && record.sharePolicy === 'allow-remote'
-          && (record.sensitivity === 'normal'
-            || (record.sensitivity === 'private' && memorySettings.remotePolicy === 'allow-private')),
+        canRead: canReadGraphRecord,
         countTokens: countGraphTokens,
         utcOffsetMinutes: -new Date().getTimezoneOffset(),
         ...(memorySemanticActive && memoryV4EmbeddingIndex ? {
+          // Relation ranking is a separate comparison switch from L1 retrieval (lexical stays unranked).
+          relationPriority: process.env.CONTINUUM_GRAPH_RELATION_ORDER === 'source' ? undefined : { windowSize: 4, timeoutMs: 200 },
           entitySemantic: {
+            queryExpansion: process.env.CONTINUUM_GRAPH_QUERY_EXPANSION !== 'off',
             model: SEMANTIC_MEMORY_FINGERPRINT, dimensions: SEMANTIC_MEMORY_EXPECTED_DIMENSION,
             index: { get: (id: string, model: string, content: string) =>
               memorySemanticActive ? graphEntityEmbeddingIndex.get(id, model, content) : undefined },
             embedQuery: prepareMemoryV4SemanticQuery,
           },
           semantic: {
+            queryExpansion: process.env.CONTINUUM_GRAPH_QUERY_EXPANSION !== 'off',
             model: SEMANTIC_MEMORY_FINGERPRINT,
             dimensions: SEMANTIC_MEMORY_EXPECTED_DIMENSION,
             // Exact canonical text lookup rejects cached vectors for old fact contents.
@@ -2147,12 +2190,23 @@ function rebuildRuntime() {
     resolveMemoryScope: () => localMemoryScope,
     ...(graphMemoryEnabled && remoteMemory?.graph && !memorySettings.openSourceRecallEnabled ? { graphRecall: {
       countTokens: countGraphTokens,
+      answerability: { reviewer: createLLMGraphAnswerabilityReviewer(llm), timeoutMs: 12000, maxInputTokens: 16000 },
       awaitCaptureWrites: () => prepareDesktopGraphRecall(async () => {}),
       beginTurn: () => {
         const snapshot = memoryV4Repository?.snapshot();
-        const published = new Set(graphL1Store?.tasks().filter(t => t.state === 'published').map(t => t.id) ?? []);
-        const visibleFacts = (snapshot?.facts ?? []).filter(f => !f.metadata?.graphTaskId || published.has(String(f.metadata.graphTaskId)))
-          .map(f => ({ kind: 'v4-fact' as const, id: f.id, version: Math.max(...snapshot!.factVersions.filter(v => v.factId === f.id).map(v => v.version)) }));
+        const ready = graphL1ProjectionRepository?.snapshot();
+        const published = ready?.manifest.state === 'ready'
+          ? selectRetrievableGraphBundle(ready.semanticBundle, graphL1Store?.tasks() ?? [])?.claims ?? [] : [];
+        const factKey = (id: string, version: number) => JSON.stringify([id, version]);
+        const publishedFacts = new Set(published.map(claim => factKey(claim.fact.id, claim.fact.version)));
+        const versions = new Map<string, number>();
+        for (const version of snapshot?.factVersions ?? [])
+          versions.set(version.factId, Math.max(versions.get(version.factId) ?? 0, version.version));
+        const visibleFacts = (snapshot?.facts ?? []).flatMap(f => {
+          const version = versions.get(f.id);
+          return version && (!f.metadata?.graphTaskId || publishedFacts.has(factKey(f.id, version)))
+            ? [{ kind: 'v4-fact' as const, id: f.id, version }] : [];
+        });
         const knownAt = Date.now();
         return (query, scope) => ({ protocolVersion: 'memory-graph/v1' as const, recallId: crypto.randomUUID(), query, scope: { ...localMemoryScope, ...(scope.sessionId ? { sessionId: scope.sessionId } : {}) },
           temporal: { knownAt, valid: { kind: 'at' as const, at: knownAt } }, visibleFacts,
@@ -3616,5 +3670,6 @@ app.on('before-quit', event => {
     rootPersist.saveAllImmediately()
     sharedLocalUie.dispose()
     for (const model of sharedNliModels.values()) model.close()
+    await graphLocalSelection.dispose()
   })().finally(() => { partitionShutdownComplete = true; app.quit() })
 })

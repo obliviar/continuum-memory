@@ -4,6 +4,7 @@ import type { GraphRecallRelationRecord, GraphRecallRelationEdge } from '../doma
 import type { GraphReadPort, GraphReadView, GraphEvidenceReader, GraphSourceContent, GraphPage } from '../ports/graph-ports'
 import type { GraphRelationReadPort, GraphRelationReadView } from '../ports/graph-relation-ports'
 import type { GraphRecallReadView, GraphRecallReadPort, GraphRecallEvidenceReader, GraphRecallSeedPort, GraphSeedSearchRequest, GraphSeedCandidate } from '../ports/graph-recall-ports'
+import { parseTurnFactFence, isTurnFactVisible } from './turn-fact-fence'
 
 export interface L2RecallAdapterOptions {
   readonly coreReadPort: GraphReadPort
@@ -30,6 +31,9 @@ export function createL2GraphRecallAdapter(options: L2RecallAdapterOptions): {
   }>()
   const readPort: GraphRecallReadPort = { async openView(request) {
     const context = structuredClone(request)
+    const fence = parseTurnFactFence(context.visibleFacts)
+    if (!fence.ok) return fence
+    const visibleFacts = fence.value
     if (!context.expectedRelationManifestId) return failure('invalid-request', 'L2 recall requires an exact relation manifest ID')
     const coreResult = await options.coreReadPort.openView(context)
     if (!coreResult.ok) return coreResult
@@ -75,7 +79,8 @@ export function createL2GraphRecallAdapter(options: L2RecallAdapterOptions): {
         if (read.value.length !== refs.length || read.value.some((claim, i) => key(claim.ref) !== key(refs[i]!)))
           return failure('source-unavailable', 'L1 did not return exact requested claims')
         const knownAt = context.temporal.knownAt
-        if (read.value.some(claim => claim.review.status !== 'accepted' || claim.review.reviewedAt > knownAt
+        if (read.value.some(claim => !isTurnFactVisible(visibleFacts, claim.fact)
+          || claim.review.status !== 'accepted' || claim.review.reviewedAt > knownAt
           || claim.modality !== 'asserted' || claim.condition.kind !== 'none' || claim.polarity === 'unknown'
           || claim.transactionTime.recordedAt > knownAt || (claim.transactionTime.closedAt !== null && knownAt >= claim.transactionTime.closedAt)
           || claim.validTime.kind === 'unknown'

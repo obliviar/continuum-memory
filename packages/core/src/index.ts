@@ -6,3 +6,5 @@ export { createSessionManager } from './session/session-manager'
 
 export { buildSystemPrompt } from './prompt/system-prompt'
 export type { SystemPromptInput } from './prompt/system-prompt'
+export { createLLMGraphAnswerabilityReviewer, assessGraphAnswerability } from './prompt/graph-answerability'
+export type { GraphAnswerability, GraphAnswerRequirement, GraphAnswerabilityOptions, GraphAnswerabilityReviewer } from './prompt/graph-answerability'

@@ -22,6 +22,9 @@ export function assessGraphRetrieval(result: GraphRecallResult) {
   if (['node-budget', 'edge-budget', 'binding-budget', 'proof-budget', 'time-budget', 'evidence-budget'].includes(trace.stopReason))
     limitations.push('resource-limit')
   if (scope.has('seed-top-k-truncated')) limitations.push('seed-limit')
+  if (scope.has('entity-top-k-truncated')) limitations.push('entity-limit')
+  if (scope.has('entity-navigation-candidate-pool-truncated')) limitations.push('entity-candidate-pool-limit')
+  if (scope.has('entity-fragments-truncated')) limitations.push('entity-text-coverage-limit')
   if (scope.has('semantic-incomplete')) limitations.push('semantic-incomplete')
   if (scope.has('seed-entity-target:ambiguous-identity')) limitations.push('ambiguous-identity')
   // Only fixed diagnostic names reach this summary. Source text cannot add instructions or labels.

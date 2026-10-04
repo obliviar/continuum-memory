@@ -73,13 +73,20 @@ export async function runOpenRecallCompatibilityRegression() {
     assert.equal(result.value.evidence.claims.length, 0); assert.equal(result.value.evidence.relations?.length, 0)
     assert.equal(JSON.stringify(relations.snapshot()), before)
   })
-  await test('qualified-open-records-remain-opt-in-source-candidates', async () => {
+  await test('qualified-open-navigation-preserves-condition-without-claim-publication', async () => {
     const f = fixture(); f.append('如果设备修好，样品S7存放在恒温箱B2。', 'qualified'); const view = await f.sync()
-    assert.equal(searchOpenAssertions(view.semanticBundle, '样品S7', { scope }).length, 0)
+    const hits = searchOpenAssertions(view.semanticBundle, '样品S7', { scope })
+    assert.equal(hits.length, 1)
+    assert.equal(hits[0]!.verification, 'automatic-navigation')
+    assert(hits[0]!.assertion.admission?.reasons.includes('qualified-or-reported-context'))
     const result = await searchOpenAssertionsWithContext(view.semanticBundle, '样品S7', { scope, includeCandidates: true })
-    assert.equal(result.items.length, 1); assert.equal(result.items[0]!.verification, 'unverified-candidate')
+    assert.equal(result.items.length, 1); assert.equal(result.items[0]!.verification, 'automatic-navigation')
     assert.equal(result.items[0]!.assertion.context.condition.resolution, 'unresolved')
     assert.equal(view.semanticBundle.claims.length, 0)
+    assert.equal(result.items[0]!.assertion.inferenceAllowed, false)
+    assert.equal(result.items[0]!.assertion.admission?.claimPublication, false)
+    const recalled = await createV4GraphMemory(f.options).recall(f.request('样品S7'))
+    assert(recalled.ok); assert.equal(recalled.value.evidence.claims.length, 0)
   })
   await test('source-change-and-rejection-invalidate-open-projections', async () => {
     const f = fixture(); f.append('样品S7存放在恒温箱B2。', 'sample'); const view = await f.sync(), record = view.semanticBundle.openAssertions![0]!

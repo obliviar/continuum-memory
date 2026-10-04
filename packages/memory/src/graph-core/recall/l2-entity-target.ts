@@ -5,19 +5,23 @@ export interface L2EntityBinding {
 }
 const normalize = (s: string) => s.normalize('NFKC').trim().toLowerCase()
 
-/** Match explicit known names only. No unknown-name extraction, pronoun resolution or role inference. */
+/** Match authorized names/aliases only. Never invent a current-user binding from a name. */
 export function planL2EntityTarget(query: string, catalog: readonly L2EntityBinding[]) {
   const text = normalize(query), names = new Map<string, Set<string>>()
   for (const entity of catalog) for (const raw of entity.names) {
     const name = normalize(raw)
     // Single characters inside prose are too ambiguous; exact whole-name queries remain supported.
-    if (!name || (name.length < 2 && text !== name)) continue
+    // A reviewed literal "我" alias can identify a clause-initial first-person query.
+    // It must actually exist in the supplied catalog; no implicit 用户/owner merge.
+    const firstPersonAlias = name === '我' && /^我(?!们)/.test(text)
+    if (!name || (name.length < 2 && text !== name && !firstPersonAlias)) continue
     const keys = names.get(name) ?? new Set<string>(); keys.add(entity.key); names.set(name, keys)
   }
   const spans: { start: number; end: number; keys: Set<string> }[] = []
   for (const [name, keys] of names) {
     for (let at = text.indexOf(name); at >= 0; at = text.indexOf(name, at + 1)) {
       const end = at + name.length
+      if (name === '我' && text !== name && at !== 0) continue
       if ((/^[a-z0-9_]/.test(name) && /[a-z0-9_]/.test(text[at - 1] ?? ''))
         || (/[a-z0-9_]$/.test(name) && /[a-z0-9_]/.test(text[end] ?? ''))) continue
       spans.push({ start: at, end, keys })

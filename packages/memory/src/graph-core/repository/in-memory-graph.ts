@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { isDeepStrictEqual } from 'node:util'
+import { parseTurnFactFence, isTurnFactVisible } from '../recall/turn-fact-fence'
 import { MEMORY_GRAPH_PROTOCOL_VERSION } from '@continuum-memory/contracts'
 import type {
   GraphClaimRef, GraphProtocolErrorCode, GraphResult, GraphScope,
@@ -137,6 +138,9 @@ export function createInMemoryGraph(options: InMemoryGraphOptions): InMemoryGrap
 
   function open(request: GraphOpenViewRequest): GraphResult<GraphReadView> {
     const context = structuredClone(request)
+    const fence = parseTurnFactFence(context.visibleFacts)
+    if (!fence.ok) return fence
+    const visibleFacts = fence.value
     if (!validRequest(context))
       return failure('invalid-request', 'Invalid scope, temporal query, policy or budget')
     if (context.expectedManifestId !== manifest.manifestId)
@@ -215,7 +219,7 @@ export function createInMemoryGraph(options: InMemoryGraphOptions): InMemoryGrap
     }
 
     function claimAllowed(claim: GraphClaimRecord, grant: GraphAccessContext): boolean {
-      return recordAllowed(claim, grant) && contextAllowed(claim, grant)
+      return isTurnFactVisible(visibleFacts, claim.fact) && recordAllowed(claim, grant) && contextAllowed(claim, grant)
         && timeMatches(claim.validTime, context.temporal)
         && claim.modality === 'asserted' && claim.condition.kind === 'none'
         && (claim.polarity === 'positive' || claim.polarity === 'negative')

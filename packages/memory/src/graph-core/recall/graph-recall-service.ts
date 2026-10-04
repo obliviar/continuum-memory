@@ -16,6 +16,7 @@ import type { GraphRelationManifest } from '../domain/relation-types'
 import type { GraphAnswerEvidencePack } from './answer-evidence'
 import { planGraphQuery } from './query-plan'
 import type { GraphQueryConstraints, GraphQueryPlan } from './query-plan'
+import { orderRelationWindow, relationPriorityWindow, type RelationPriorityOptions, type RelationPriorityDecision } from './relation-priority'
 import type {
   GraphRecallEvidenceReader as GraphEvidenceReader, GraphRecallNeighborQuery as GraphNeighborQuery, GraphRecallOpenViewRequest as GraphOpenViewRequest,
   GraphRecallReadPort as GraphReadPort, GraphRecallReadView as GraphReadView, GraphSourceContent, GraphRecallSeedPort as GraphSeedPort, GraphPage,
@@ -109,6 +110,12 @@ export interface GraphTraversalRecallData<Depth extends number = number> {
     readonly action: 'discovered' | 'cycle-skipped' | 'revisit-skipped'
   }[]
   readonly seedProgress: readonly { readonly seed: GraphClaimRef; readonly completion: 'complete' | 'incomplete' | 'not-started' }[]
+  /** Local page ordering only; no claim that unscanned neighbors have lower scores. */
+  readonly relationOrdering?: {
+    readonly scope: 'per-node-window'
+    readonly windowSize: number
+    readonly windows: readonly (RelationPriorityDecision & { readonly root: GraphClaimRef; readonly node: GraphClaimRef; readonly depth: number })[]
+  }
 }
 
 export interface GraphTraversalPath {
@@ -124,6 +131,7 @@ export interface GraphRecallPorts {
   readonly readPort: GraphReadPort
   readonly evidenceReader: GraphEvidenceReader
   readonly seedPort?: GraphSeedPort
+  readonly relationPriority?: RelationPriorityOptions
 }
 
 /** Shared orchestration. Public wrappers choose one hop or the caller's bounded depth. */
@@ -155,10 +163,12 @@ export function createGraphRecallService<Mode extends 'one-hop' | 'bounded'>(por
     }
     return result!
   }, async recallQuery(input: QueryGraphTraversalRecallRequest): Promise<GraphResult<QueryGraphTraversalRecallResult<Depth>>> {
+    const started = performance.now()
     let view: GraphReadView | undefined
     let result: GraphResult<QueryGraphTraversalRecallResult<Depth>>
     try {
       const request = structuredClone(input)
+      const originalQuery = request.query
       if (!ports.seedPort) fail('unsupported-capability', 'A seed search adapter is required')
       if (!request.recallId.trim() || !request.query.trim() || request.query.length > 2000)
         fail('invalid-request', 'Query recall needs an ID and 1 to 2000 query characters')
@@ -183,6 +193,7 @@ export function createGraphRecallService<Mode extends 'one-hop' | 'bounded'>(por
         sharePolicies: request.view.access.sharePolicies, sensitivities: request.view.access.sensitivities,
         expectedManifestId: request.view.expectedManifestId,
         entities: queryPlan.target.entities,
+        visibleFacts: request.view.visibleFacts,
         entries: request.seedEntries,
         traversal: queryPlan.traversal,
       }, view))
@@ -204,7 +215,7 @@ export function createGraphRecallService<Mode extends 'one-hop' | 'bounded'>(por
         const recall = await collect(view, {
           recallId: request.recallId, view: request.view, seed: first.ref,
           direction, kinds,
-        }, seeds.items.map(item => item.ref))
+        }, seeds.items.map(item => item.ref), originalQuery, started + request.view.budget.maxElapsedMs)
         result = { ok: true, value: { recallId: request.recallId, timePlan, queryPlan, status: 'recalled', selection: 'top-k', seeds, recall } }
       }
     }
@@ -218,7 +229,8 @@ export function createGraphRecallService<Mode extends 'one-hop' | 'bounded'>(por
     return result!
   } }
 
-  async function collect(view: GraphReadView, request: GraphTraversalRecallRequest, roots: readonly GraphClaimRef[] = [request.seed]): Promise<GraphTraversalRecallResult<Depth>> {
+  async function collect(view: GraphReadView, request: GraphTraversalRecallRequest, roots: readonly GraphClaimRef[] = [request.seed],
+    priorityQuery?: string, deadline = performance.now() + request.view.budget.maxElapsedMs): Promise<GraphTraversalRecallResult<Depth>> {
     const claims = new Map<string, { record: GraphClaimRecord; canonicalText: string }>()
     const facts = new Map<string, string>()
     const sources = new Map<string, GraphSourceContent>()
@@ -233,6 +245,9 @@ export function createGraphRecallService<Mode extends 'one-hop' | 'bounded'>(por
     let scannedEdges = 0
     let stopReason: GraphTraversalRecallResult['stopReason'] = 'neighbors-exhausted'
     const seedProgress = roots.map(seed => ({ seed, completion: 'not-started' as 'complete' | 'incomplete' | 'not-started' }))
+    const priority = priorityQuery ? ports.relationPriority : undefined
+    const windowSize = priority ? relationPriorityWindow(priority) : 1
+    const orderingWindows: Array<NonNullable<GraphTraversalRecallData['relationOrdering']>['windows'][number]> = []
 
     // Stage a whole group before publishing it. Failed hydration must not leave
     // an orphan endpoint or a relation without its evidence in the result.
@@ -245,6 +260,7 @@ export function createGraphRecallService<Mode extends 'one-hop' | 'bounded'>(por
       const stagedFacts = new Map(loadedFacts.map(item => [refKey(item.ref), item.canonicalText]))
       const sourceRefs = unique([
         ...records.flatMap(record => record.evidence.map(item => item.source)),
+        ...records.flatMap(record => record.provenance.sources),
         ...relation?.evidence.map(item => item.source) ?? [],
       ], sourceKey).filter(ref => !sources.has(sourceKey(ref)))
       const loadedSources = sourceRefs.length === 0 ? [] : exact(sourceRefs,
@@ -289,17 +305,18 @@ export function createGraphRecallService<Mode extends 'one-hop' | 'bounded'>(por
         while (true) {
           const read = await view.neighbors({
             node: current.target, layer: 'semantic', direction: request.direction, kinds,
-            limit: 1, maxScanned: 64, ...(cursor === undefined ? {} : { cursor }),
+            limit: windowSize, maxScanned: 64, ...(cursor === undefined ? {} : { cursor }),
           })
           if (!read.ok && read.error.code === 'budget-exhausted') { stopReason = 'budget-exhausted'; break }
           const page = take(read)
           if (!Number.isSafeInteger(page.scanned) || page.scanned < 0 || page.scanned > 64
-            || page.items.length > 1 || page.items.length > page.scanned)
+            || page.items.length > windowSize || page.items.length > page.scanned)
             fail('invalid-request', 'Neighbor reader returned an invalid page')
           scannedEdges += page.scanned
           if (scannedEdges > request.view.budget.maxEdges)
             fail('budget-exhausted', 'Neighbor reader exceeded the shared edge budget')
           let hydrationStopped = false
+          const hydrated: GraphRelationRecord[] = []
           for (const edge of page.items) {
             if (edge.layer !== 'semantic' || !('relationRef' in edge) || !kinds.includes(edge.kind)
               || !incident(edge.from, edge.to, current.target, edge.kind === 'contradicts' ? 'both' : request.direction))
@@ -312,27 +329,7 @@ export function createGraphRecallService<Mode extends 'one-hop' | 'bounded'>(por
                 || refKey(relation.to) !== refKey(edge.to))
                 fail('version-mismatch', 'Relation record does not match its projection edge')
               if (!relations.has(refKey(relation.ref))) await hydrate([relation.from, relation.to], relation)
-              const next = refKey(current.target) === refKey(relation.from) ? relation.to : relation.from
-              let action: GraphTraversalRecallResult['traversalTrace'][number]['action'] = 'discovered'
-              if (visited.has(refKey(next))) {
-                action = 'revisit-skipped'
-                let ancestor: GraphTraversalPath | undefined = current
-                while (ancestor) {
-                  if (refKey(ancestor.target) === refKey(next)) { action = 'cycle-skipped'; break }
-                  ancestor = ancestor.parent ? visited.get(refKey(ancestor.parent)) : undefined
-                }
-              }
-              else {
-                const path: GraphTraversalPath = { root: seed, target: next, depth: current.depth + 1,
-                  parent: current.target, via: relation.ref }
-                visited.set(refKey(next), path)
-                queue.push(path)
-                paths.push(path)
-                if (path.depth === maxHops) depthFrontier.push({ root: seed, node: next })
-              }
-              // Traversal orientation is separate from the stored relation's original from/to.
-              traversalTrace.push({ root: seed, from: current.target, to: next, relation: relation.ref,
-                depth: current.depth + 1, action })
+              hydrated.push(relation)
             }
             catch (error) {
               if (!(error instanceof ReadFailure) || error.detail.code !== 'budget-exhausted') throw error
@@ -340,6 +337,44 @@ export function createGraphRecallService<Mode extends 'one-hop' | 'bounded'>(por
               hydrationStopped = true
               break
             }
+          }
+          let ordered = hydrated
+          if (priority && hydrated.length && !hydrationStopped) {
+            const decision = await orderRelationWindow({ query: priorityQuery!, remainingMs: deadline - performance.now(), options: priority,
+              candidates: hydrated.map(relation => {
+                const from = claims.get(refKey(relation.from))!, to = claims.get(refKey(relation.to))!
+                return { ref: relation.ref, kind: relation.kind,
+                  from: { ref: from.record.ref, fact: from.record.fact, text: from.canonicalText },
+                  to: { ref: to.record.ref, fact: to.record.fact, text: to.canonicalText } }
+              }) })
+            orderingWindows.push({ ...decision, root: seed, node: current.target, depth: current.depth + 1 })
+            const byRef = new Map(hydrated.map(relation => [refKey(relation.ref), relation]))
+            ordered = decision.refs.map(ref => byRef.get(refKey(ref))!)
+          }
+          // Hydration always precedes scoring. Cursor advancement retains the reader's original order;
+          // only this window's traversal/queue order changes, with every qualified edge retained.
+          for (const relation of ordered) {
+            const next = refKey(current.target) === refKey(relation.from) ? relation.to : relation.from
+            let action: GraphTraversalRecallResult['traversalTrace'][number]['action'] = 'discovered'
+            if (visited.has(refKey(next))) {
+              action = 'revisit-skipped'
+              let ancestor: GraphTraversalPath | undefined = current
+              while (ancestor) {
+                if (refKey(ancestor.target) === refKey(next)) { action = 'cycle-skipped'; break }
+                ancestor = ancestor.parent ? visited.get(refKey(ancestor.parent)) : undefined
+              }
+            }
+            else {
+              const path: GraphTraversalPath = { root: seed, target: next, depth: current.depth + 1,
+                parent: current.target, via: relation.ref }
+              visited.set(refKey(next), path)
+              queue.push(path)
+              paths.push(path)
+              if (path.depth === maxHops) depthFrontier.push({ root: seed, node: next })
+            }
+            // Traversal orientation is separate from the stored relation's original from/to.
+            traversalTrace.push({ root: seed, from: current.target, to: next, relation: relation.ref,
+              depth: current.depth + 1, action })
           }
           if (hydrationStopped) break
           if (page.completion === 'budget-exhausted') { stopReason = 'budget-exhausted'; break }
@@ -379,6 +414,7 @@ export function createGraphRecallService<Mode extends 'one-hop' | 'bounded'>(por
       claims: [...claims.values()], relations: [...relations.values()], sources: [...sources.values()],
       groups: [...relations.values()].map(relation => ({ relation: relation.ref, from: relation.from, to: relation.to })),
       scannedEdges, seedProgress, pathPolicy: 'one-shortest-path-per-root-and-claim', paths, depthFrontier, traversalTrace,
+      ...(priority ? { relationOrdering: { scope: 'per-node-window' as const, windowSize, windows: orderingWindows } } : {}),
     })
     const evidencePack = take(buildGraphAnswerEvidence(raw))
     // Cached text is returned only after rechecking current authorization,

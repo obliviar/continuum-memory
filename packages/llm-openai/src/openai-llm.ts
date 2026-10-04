@@ -25,7 +25,7 @@ export function createOpenAILlm(config: ProviderConfig): AgentLLMPort {
           max_tokens: options.maxTokens,
           stream: true,
           ...options.providerOptions,
-        })
+        }, { signal: options.signal })
 
         const pendingToolCalls = new Map<number, { id: string; name: string; arguments: string }>()
 

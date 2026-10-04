@@ -3,6 +3,7 @@ import { CROSS_TOPIC_CASES, createCrossTopicFixture } from '../fixtures/cross-to
 import { createV4GraphMemory } from '../adapters/v4-graph-memory'
 import { createMemoryEmbeddingIndex } from '../../long-term/embedding-index'
 import { prepareEntityVectors } from '../recall/entity-vector-preparation'
+import { prepareV4EntityVectors } from '../adapters/v4-entity-vector-preparation'
 import type { RecallStageDiagnostic } from '../recall/recall-diagnostics'
 import { measureRetrievalIndexScaling } from './retrieval-index-scaling'
 import { createCrossEncoderSelection, type LocalCrossEncoder } from '../recall/cross-encoder-selection'
@@ -10,6 +11,7 @@ import { createCrossEncoderSelection, type LocalCrossEncoder } from '../recall/c
 interface ComparisonRoute {
   id: string; retrievalMode: 'lexical' | 'vector' | 'hybrid' | 'entity-vector'; structuredRecall: boolean
   entityClaimCandidates?: 'threshold' | 'wide'; pairMode?: 'rank' | 'select'
+  entityRetrievalTextMode?: 'name-only' | 'claim-fragments'
 }
 
 interface CaseResult {
@@ -29,6 +31,7 @@ export const COMPARISON_ROUTES = [
   { id: 'D-RRF-structured', retrievalMode: 'hybrid', structuredRecall: true },
   { id: 'E-entity-local', retrievalMode: 'entity-vector', structuredRecall: false, entityClaimCandidates: 'threshold' },
   { id: 'F-entity-wide-gated', retrievalMode: 'entity-vector', structuredRecall: false, entityClaimCandidates: 'wide' },
+  { id: 'I-entity-fragments', retrievalMode: 'entity-vector', structuredRecall: false, entityClaimCandidates: 'wide', entityRetrievalTextMode: 'claim-fragments' },
 ] as const
 
 /** First observed loss of gold evidence, not a guessed explanation from the final answer. */
@@ -40,7 +43,7 @@ export function evidenceGap(id: string, events: readonly RecallStageDiagnostic[]
   return 'unobserved-or-error'
 }
 
-/** Fixed labels; A-F unchanged controls, optional G/H add actual pair inference within the recall budget. */
+/** Fixed A-F controls, I uses source-checked entity fragments; optional G/H add pair inference. */
 export async function compareCrossTopicModel(embedder: Embedder, pairModel?: { model: LocalCrossEncoder; drain: () => Promise<void>; minLogit: number }) {
   const allRoutes: readonly ComparisonRoute[] = [...COMPARISON_ROUTES, ...(pairModel ? [
     { id: 'G-pair-rank-gated', retrievalMode: 'entity-vector' as const, structuredRecall: false, entityClaimCandidates: 'wide' as const, pairMode: 'rank' as const },
@@ -64,11 +67,14 @@ export async function compareCrossTopicModel(embedder: Embedder, pairModel?: { m
     for (const fact of f.repository.snapshot().facts) facts.putBatch([{ memoryId: fact.id, content: fact.canonicalText,
       model: embedder.model, vector: await embed(fact.canonicalText) }])
     await prepareEntityVectors({ bundle: f.bundle, index: entities, model: embedder.model, embed, isCurrent: () => true })
-    prepared.push({ c, facts, entities })
+    const fragments = createMemoryEmbeddingIndex()
+    await prepareV4EntityVectors({ memory: f.options, scope: f.bundle.scope, sharePolicies: ['allow-remote'], sensitivities: ['normal'],
+      index: fragments, model: embedder.model, embed, isCurrent: () => true })
+    prepared.push({ c, facts, entities, fragments })
   }
   const preparationMs = performance.now() - preparationStart
   try {
-    for (const { c, facts, entities } of prepared) {
+    for (const { c, facts, entities, fragments } of prepared) {
       // Rotate route order to avoid always measuring one route first.
       const offset = CROSS_TOPIC_CASES.indexOf(c) % allRoutes.length
       const routes = [...allRoutes.slice(offset), ...allRoutes.slice(0, offset)]
@@ -87,7 +93,8 @@ export async function compareCrossTopicModel(embedder: Embedder, pairModel?: { m
           ...(pair ? { reranker: pair.reranker, ...(route.pairMode === 'select' ? { evidenceSelector: pair.evidenceSelector } : {}) } : {}) }, entityCandidateLimit: 4,
           diagnostics: e => events.push(e),
           semantic: { model: embedder.model, dimensions: embedder.dimensions, index: facts, embedQuery },
-          entitySemantic: { model: embedder.model, dimensions: embedder.dimensions, index: entities, embedQuery } })
+          entitySemantic: { model: embedder.model, dimensions: embedder.dimensions,
+            index: route.entityRetrievalTextMode === 'claim-fragments' ? fragments : entities, embedQuery } })
         const start = performance.now(), result = await port.recall(f.request), elapsedMs = performance.now() - start
         await pairModel?.drain()
         pair?.clear()
@@ -123,7 +130,7 @@ export async function compareCrossTopicModel(embedder: Embedder, pairModel?: { m
   } finally { await Promise.allSettled([...pending]); await pairModel?.drain() }
   const scalingQuery = '我喜欢喝什么', scalingVector = await embedder.embed(scalingQuery)
   const indexScaling = measureRetrievalIndexScaling([...vectors].map(([text, vector]) => ({ text, vector })), scalingQuery, scalingVector)
-  return { schema: 'cross-topic-recall/v3', model: embedder.model, dimensions: embedder.dimensions, preparationMs, indexScaling,
+  return { schema: 'cross-topic-recall/v4', model: embedder.model, dimensions: embedder.dimensions, preparationMs, indexScaling,
     corpus: 'synthetic-explicit-native-claims-not-human-reviewed', candidateLimit: 64, entityCandidateLimit: 4,
     pairModel: pairModel ? { id: pairModel.model.id, minLogit: pairModel.minLogit, calibrated: false, timeoutMs: 300 } : null,
     routes: allRoutes.map(route => { const rows = cases.filter(c => c.route === route.id), quality = rows.filter(c => c.qualityApplicable)

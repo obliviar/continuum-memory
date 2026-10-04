@@ -7,6 +7,13 @@ const VAGUE = /前几天|最近|近期|近来|过去|上次|那天|当时|\b(?:r
 const UNSUPPORTED = /下周|下个月|下月|后天|星期|周[一二三四五六日天1-7]|早上|上午|下午|晚上|凌晨|中午|\d{1,2}(?:点|时|:\d{2})|\b(?:morning|afternoon|evening|night|next\s+(?:week|month|year))\b/i
 const PARTIAL = /\d{1,4}\s*(?:年|月|日|号)|\b\d{4}[-/]\d{1,2}\b/
 
+// A recurring schedule is fact content, not a request to select one calendar day.
+// Keep offsets stable for any separate calendar constraint elsewhere in the question.
+const withoutRecurringSchedules = (text: string) => text.replace(
+  /每(?:个)?(?:周|星期)[一二三四五六日天1-7](?:的?(?:早上|上午|下午|晚上|凌晨|中午))?(?:\s*\d{1,2}(?:点|时|:\d{2})(?:\d{1,2}分)?)?/g,
+  match => ' '.repeat(match.length),
+)
+
 export interface GraphQueryTimeOptions {
   /** Resolved once by the host; never derived from knownAt or Date.now(). */
   readonly referenceTime: number
@@ -27,7 +34,7 @@ export interface GraphQueryTimePlan {
 
 /** Recognized relative/vague cues must not quietly pass through lexical search. */
 export function hasUnresolvedGraphTime(query: string): boolean {
-  const normalized = query.normalize('NFKC')
+  const normalized = withoutRecurringSchedules(query.normalize('NFKC'))
   return [...normalized.matchAll(RELATIVE)].length > 0 || VAGUE.test(normalized) || UNSUPPORTED.test(normalized)
 }
 
@@ -52,9 +59,10 @@ export function planGraphQueryTime(
   let dates: ReturnType<typeof graphCalendarDates>
   try { dates = graphCalendarDates(normalized) }
   catch { return invalid('Invalid calendar date in query') }
-  const relative = [...normalized.matchAll(RELATIVE)]
-  const withoutDates = normalized.replace(GRAPH_CALENDAR_DATE, ' ')
-  if (VAGUE.test(normalized) || UNSUPPORTED.test(normalized) || PARTIAL.test(withoutDates)
+  const calendarQuery = withoutRecurringSchedules(normalized)
+  const relative = [...calendarQuery.matchAll(RELATIVE)]
+  const withoutDates = calendarQuery.replace(GRAPH_CALENDAR_DATE, ' ')
+  if (VAGUE.test(calendarQuery) || UNSUPPORTED.test(calendarQuery) || PARTIAL.test(withoutDates)
     || relative.length > 1 || dates.length > 2 || (dates.length > 0 && relative.length > 0))
     return invalid('Time expression is incomplete, ambiguous or unsupported; provide a resolved time range')
   if ((dates.length > 0 || relative.length > 0) && /之前|以前|之后|以后|截至|以来|\b(?:before|after|since|until)\b/i.test(normalized))

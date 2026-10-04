@@ -27,16 +27,18 @@ export function rankL2Seeds(query: string, scope: GraphScope, documents: readonl
     const state = readL2TargetState(query)
     const byFact = new Map<string, L2SeedDocument[]>()
     for (const doc of documents) { const list = byFact.get(doc.factId) ?? []; list.push(doc); byFact.set(doc.factId, list) }
-    const candidates = new Map<string, { id: string; score: number }>()
+    const candidates = new Map<string, { id: string; score: number; order: number }>()
+    const denseOrder = new Map(dense.map((hit, index) => [hit.id, index]))
     let rejected = 0
     for (const hit of dense) for (const doc of byFact.get(hit.id) ?? []) {
       // Exact identity/state constraints remain; lexical overlap is not required for paraphrases.
       if (!entityTarget.matches(doc.entityBindings ?? [])
         || (normalize(doc.text) !== normalize(query) && !targetStateCompatible(state, readL2TargetState(doc.text)))) { rejected++; continue }
       const previous = candidates.get(doc.id)
-      if (!previous || hit.score > previous.score) candidates.set(doc.id, { id: doc.id, score: hit.score })
+      if (!previous || hit.score > previous.score) candidates.set(doc.id, { id: doc.id, score: hit.score, order: denseOrder.get(hit.id)! })
     }
-    const ranked = [...candidates.values()].sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+    // Preserve upstream local-vector tie order (including navigation hints) without altering scores.
+    const ranked = [...candidates.values()].sort((a, b) => b.score - a.score || a.order - b.order || a.id.localeCompare(b.id))
     const items = ranked.slice(0, limit).map(hit => ({ id: hit.id, relevance: hit.score, route: 'dense' as const }))
     return { items, scope: ['l2-vector-seeds-v1', 'seed-selection:vector', 'no-lexical-fallback',
       ...entityTarget.scope, `seed-constraint-rejected:${rejected}`, `seed-matches:${ranked.length}`, `seed-selected:${items.length}`,

@@ -2,7 +2,7 @@
 export interface RecallStageDiagnostic {
   recallId: string
   route: 'L1' | 'L2'
-  stage: 'eligibility' | 'entity-entry' | 'retrieval' | 'candidate-pool' | 'selection' | 'delivery'
+  stage: 'eligibility' | 'entity-entry' | 'retrieval' | 'candidate-pool' | 'selection' | 'relation-ordering' | 'delivery'
   elapsedMs: number
   /** Authorized fact IDs, never source text or IDs of denied records. */
   factIds: readonly string[]

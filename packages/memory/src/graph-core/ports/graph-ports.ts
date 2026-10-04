@@ -46,6 +46,8 @@ export interface GraphOpenViewRequest {
   readonly policyVersion: string
   /** Source material only: never certifies a time match; default false for L2 and dated queries. */
   readonly includeUnknownValidTime?: boolean
+  /** Turn-start fact versions, intersected with live permissions and exact current records. */
+  readonly visibleFacts?: readonly GraphFactRef[]
 }
 
 /** Opaque cursors must bind the view ID, query fingerprint and scan position. */

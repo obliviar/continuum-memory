@@ -83,10 +83,14 @@ describe('V4 graph through Agent runtime', () => {
     expect(f.prompts[0]![0]!.content).toContain('I like tea')
     expect(f.prompts[1]![0]!.content).not.toContain('I like tea')
   })
-  it('fails closed instead of using the legacy path when graph requirements cannot be met', async () => {
+  it('reports unsupported graph requirements without injecting facts or using legacy recall', async () => {
     const f = setup()
-    await expect(createAgentRuntime(f.deps).send('s', 'Why do I like tea?')).rejects.toThrow('unsupported-capability')
-    expect(f.prompts).toEqual([])
+    const result = await createAgentRuntime(f.deps).send('s', 'Why do I like tea?')
+    expect(result.graphAnswerability).toMatchObject({ status: 'needs-clarification', assessment: 'unavailable' })
+    expect(f.prompts[0]![0]!.content).toContain('<graph-answerability>')
+    expect(f.prompts[0]![0]!.content).not.toContain('<graph-memory>')
+    expect(f.prompts[0]![0]!.content).not.toContain('I like tea')
+    expect(f.feedback).not.toHaveBeenCalled()
     expect(f.memory.recall).not.toHaveBeenCalled()
   })
   it('escapes source instructions rather than inserting them into the prompt structure', async () => {

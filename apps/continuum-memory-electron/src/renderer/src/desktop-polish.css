@@ -1,0 +1,139 @@
+/* Shared visual system for the six desktop palettes. Layout lives in chat-ux.css. */
+.app {
+  --font-ui: 'Microsoft YaHei UI', 'Microsoft YaHei', 'Segoe UI Variable Text', 'Segoe UI', sans-serif;
+  --font-display: 'Space Grotesk', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
+  --tech-type: var(--font-ui);
+  --reading-size: clamp(15px, calc(12px + .3vw), 19px);
+  --panel-shadow: 0 8px 28px color-mix(in srgb, var(--text) 5%, transparent);
+  --focus-ring: color-mix(in srgb, var(--accent-ink) 24%, transparent);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  background: var(--bg);
+}
+.app[data-scheme='dark'] { --panel-shadow: 0 8px 28px rgb(0 0 0 / .16); }
+
+/* A quiet color wash separates the workspace from its navigation and surfaces. */
+.app[data-family] { background-image: none; }
+.app[data-family]::before {
+  inset: 0 0 0 var(--rail-width);
+  opacity: 1;
+  background: radial-gradient(ellipse at 92% 5%, color-mix(in srgb, var(--accent-ink) 8%, transparent), transparent 58%),
+    radial-gradient(ellipse at 5% 100%, color-mix(in srgb, var(--marker) 5%, transparent), transparent 52%);
+}
+.app[data-family]::after {
+  inset: 0 0 0 var(--rail-width);
+  opacity: .3;
+  background: radial-gradient(circle, color-mix(in srgb, var(--text-muted) 20%, transparent) .6px, transparent .8px);
+  background-size: 24px 24px;
+  mask-image: linear-gradient(to bottom, #000, transparent 72%);
+  mask-size: 100% 100%;
+}
+.app[data-family='warm']::after { opacity: .16; background-size: 7px 7px; }
+.conversation-bar { background: var(--sidebar); border-right-color: color-mix(in srgb, var(--border) 75%, transparent); }
+.header { background: color-mix(in srgb, var(--bg) 88%, var(--surface)); border-bottom-color: color-mix(in srgb, var(--border) 70%, transparent); }
+.header::after { display: none; }
+.header-eyebrow { border: 0; background: var(--accent-soft); color: var(--text-muted); border-radius: 6px; font-size: 11px; }
+.composer.input-area, .app[data-family='tech'] .composer.input-area {
+  background: var(--surface);
+  border-color: color-mix(in srgb, var(--border) 90%, var(--accent-ink));
+  border-radius: 16px;
+  box-shadow: var(--panel-shadow);
+}
+.app[data-family] .composer.input-area:focus-within { border-color: var(--accent-ink); box-shadow: 0 0 0 3px var(--focus-ring), var(--panel-shadow); }
+.app[data-family] .message.assistant .bubble { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 2px 7px color-mix(in srgb, var(--text) 3%, transparent); }
+.app[data-family] .message.user .bubble { background: var(--user-bubble); border-radius: 14px 14px 5px 14px; box-shadow: none; }
+.markdown-code { background: color-mix(in srgb, var(--bg) 65%, var(--surface)); border-radius: 10px; }
+.chat-feature-dialog, .api-dialog, .memory-dialog, .skill-dialog { border-color: var(--border); box-shadow: 0 20px 65px rgb(0 0 0 / .2); }
+.theme-menu, .app-menu, .input-more-menu { border-radius: 12px; box-shadow: 0 12px 32px rgb(0 0 0 / .14); }
+
+/* One reading face across Chinese and Latin content; display faces stay in headings. */
+.app[data-family], .app button, .app input, .app textarea, .app select { font-family: var(--font-ui); }
+.app[data-family] .header .name { font-family: var(--font-display); font-weight: 600; letter-spacing: -.02em; font-size: clamp(20px, 1.5vw, 27px); }
+.app[data-family] .sidebar-brand strong { font-family: var(--font-display); font-weight: 600; letter-spacing: -.025em; }
+.sidebar-brand strong span { font-size: 12px; letter-spacing: .07em; color: var(--text-muted); }
+.app[data-family] .bubble, .app[data-family] .composer textarea, .app[data-family] .reading-sample { font-family: var(--font-ui); font-weight: 400; letter-spacing: 0; }
+.app[data-family] .composer textarea { font-size: clamp(14px, calc(11px + .3vw), 18px); }
+.app[data-family] .new-conversation, .app[data-family] .conversation-item,
+.app[data-family] .sidebar-tools button, .app[data-family] .sidebar-footer button,
+.app[data-family] .conversation-copy small { font-family: var(--font-ui); }
+.app[data-family] .new-conversation { font-size: 14px; font-weight: 600; }
+.app[data-family] .conversation-item, .app[data-family] .sidebar-tools button, .app[data-family] .sidebar-footer button { font-size: 14px; }
+.conversation-copy small { font-size: 11px; }
+.sidebar-search-button { font-size: 13px; }
+.sidebar-search-button kbd { font-family: var(--font-ui); font-size: 10px; letter-spacing: .015em; white-space: nowrap; }
+.sidebar-history-heading { font-size: 11px; font-weight: 600; letter-spacing: .06em; }
+.app[data-family] .message-author { font-family: var(--font-ui); font-size: 12px; font-weight: 500; letter-spacing: 0; }
+.app[data-family] .input-help { font-family: var(--font-ui); font-size: 11px; letter-spacing: 0; }
+.message-tools button { font-size: 12px; }
+.markdown-code-heading { font-family: var(--font-ui); font-size: 11px; }
+.markdown-code pre { font-size: .88em; }
+.app[data-family] .skill-trigger { font-family: var(--font-ui) !important; font-size: 12px !important; }
+.empty h1 { font-family: var(--font-display); font-weight: 600; letter-spacing: -.025em; }
+.app[data-family='warm'] .empty h1 { font-family: 'LXGW WenKai Lite', var(--font-display); font-weight: 400; }
+.empty-eyebrow { font-family: var(--font-display); font-size: 10px; letter-spacing: .18em; }
+.empty p { font-size: 14px; line-height: 1.8; }
+.empty-features > span { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: color-mix(in srgb, var(--surface) 70%, transparent); }
+
+/* Stable colors during palette changes; interaction uses elevation and press feedback. */
+.app button { transition: box-shadow .14s ease, transform .12s ease, opacity .12s ease; }
+.app button:disabled { opacity: .42; cursor: not-allowed; }
+.app button:focus-visible, .app summary:focus-visible, .app select:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: 3px; }
+.app :is(.icon-btn, .tool-btn, .dialog-close, .message-tools button, .sidebar-history-action) { border: 1px solid transparent; border-radius: 8px; }
+.app :is(.icon-btn, .tool-btn, .dialog-close, .message-tools button, .sidebar-history-action):hover:not(:disabled) { color: var(--text); background: var(--surface-hover); border-color: var(--border); }
+.app :is(.icon-btn, .tool-btn, .dialog-close, .message-tools button, .sidebar-history-action):active:not(:disabled) { transform: scale(.95); }
+.app[data-theme] .new-conversation {
+  color: var(--on-accent);
+  background: linear-gradient(160deg, var(--accent), var(--accent-hover));
+  border: 1px solid color-mix(in srgb, var(--accent) 78%, var(--text));
+  border-radius: 10px;
+  box-shadow: 0 3px 8px color-mix(in srgb, var(--accent) 13%, transparent), inset 0 1px 0 rgb(255 255 255 / .1);
+}
+.app[data-theme] .new-conversation:hover:not(:disabled) { background: var(--accent-hover); box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 22%, transparent); }
+.app[data-theme] .new-conversation:active:not(:disabled) { transform: translateY(1px); box-shadow: none; }
+.sidebar-search-button { background: color-mix(in srgb, var(--surface) 68%, var(--sidebar)); border-radius: 10px; }
+.sidebar-tools button, .sidebar-footer button { border-radius: 8px; }
+.app[data-family] .conversation-item.selected { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent-ink) 20%, var(--border)); box-shadow: none; }
+.conversation-item.selected::after { display: none; }
+.conversation-item.selected::before { top: 12px; bottom: 12px; border-radius: 2px; }
+.conversation-item.selected .conversation-title { font-weight: 600; }
+.header .api-btn, .header .memory-activity-pill { min-height: 32px; border-radius: 8px; background: var(--surface); font-size: 12px; }
+.header :is(.api-btn, .memory-activity-pill):hover:not(:disabled) { color: var(--text); border-color: var(--accent-ink); background: var(--surface-hover); }
+.primary-btn { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+.primary-btn:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+.primary-btn, .secondary-btn, .confirm-conversation-delete { border-radius: 8px; min-height: 34px; }
+.primary-btn:active:not(:disabled), .secondary-btn:active:not(:disabled), .confirm-conversation-delete:active:not(:disabled) { transform: translateY(1px); }
+.secondary-btn { background: var(--surface); }
+.secondary-btn.selected { color: var(--accent-ink); }
+.composer .skill-selection { background: var(--bg); border-radius: 9px; }
+.composer .skill-selection:has(.skill-trigger:hover:not(:disabled)) { border-color: var(--accent-ink); }
+.skill-trigger { border-radius: 8px; }
+.composer .send-btn { border-radius: 12px; filter: drop-shadow(0 2px 3px rgb(0 0 0 / .1)); }
+.composer .send-btn:disabled { opacity: .38; filter: saturate(.55); }
+.composer .send-btn:hover:not(:disabled) { transform: translateY(-1px); filter: drop-shadow(0 4px 5px rgb(0 0 0 / .16)); }
+.composer .send-btn:active:not(:disabled) { transform: translateY(1px) scale(.97); }
+.composer .stop-generation-btn { border-radius: 12px; }
+.composer .stop-generation-btn:hover:not(:disabled) { background: var(--surface-hover); box-shadow: 0 0 0 3px var(--focus-ring); }
+.composer .tool-btn.listening { color: #c95952; background: rgb(201 89 82 / .12); }
+.theme-item { min-height: 38px; font-size: 12px; }
+.theme-item.active { background: var(--accent-soft); font-weight: 600; }
+.app-menu button, .input-more-menu button { font-size: 13px; }
+
+@media(max-width:960px) {
+  .app[data-family] .header .name { font-size: 19px; }
+  .header .api-btn, .header .memory-activity-pill { font-size: 11px; }
+}
+@media(max-width:640px) {
+  .app[data-family] .header .name { font-size: 17px; }
+  .app[data-family] .composer textarea { font-size: 14px; }
+  .header .api-btn, .header .memory-activity-pill { min-height: 28px; background: transparent; }
+  .empty-features { gap: 6px; }
+  .empty-features > span { padding: 5px 7px; font-size: 10px; }
+  .empty p { font-size: 12px; }
+  .primary-btn, .secondary-btn, .confirm-conversation-delete { min-height: 30px; }
+  .app[data-family] .input-help { font-size: 10px; }
+}
+@media(max-width:420px) { .app[data-family] .skill-trigger { font-size: 11px !important; } .message-tools { gap: 2px; } .message-tools button { padding-inline: 5px; font-size: 11px; } }
+@media(prefers-reduced-motion:reduce) {
+  .app button { transition: none; }
+  .app[data-theme] :is(.icon-btn, .tool-btn, .dialog-close, .message-tools button, .sidebar-history-action, .new-conversation, .primary-btn, .secondary-btn, .confirm-conversation-delete, .send-btn):is(:hover,:active):not(:disabled) { transform: none; }
+}

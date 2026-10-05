@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, desktopCapturer, powerMonitor, safeStorage, shell, dialog } from 'electron'
+import { createAppIconService } from './app-icons'
 import { createDesktopSkillService } from './skills'
 import { createDocumentService, probeDocumentRuntime, type DocumentRuntime } from './documents'
 import { basename, dirname, join } from 'node:path'
@@ -6,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs'
 import { runBackgroundTaskBatch } from './background-task-batch'
+import { deleteStoredConversation } from './conversation-deletion'
 import { createConversationRegistry, type DesktopConversation } from './conversation-registry'
 import { createLocalGraphEvidenceSelection } from './graph-evidence-selection'
 import { isGraphExtractionEnabled, shouldPersistGraphExtraction } from './graph-extraction-policy'
@@ -200,6 +202,8 @@ process.on('uncaughtException', error => writeBootLog(`uncaughtException: ${erro
 process.on('unhandledRejection', error => writeBootLog(`unhandledRejection: ${String(error)}`))
 writeBootLog('main module loaded')
 const moduleDir = dirname(fileURLToPath(import.meta.url))
+const appIcons = createAppIconService({ appRoot: app.getAppPath(), moduleDirectory: moduleDir, packaged: app.isPackaged })
+if (process.platform === 'win32') app.setAppUserModelId('com.continuum.memory')
 
 // ── Config ────────────────────────────────────────────
 function loadFileConfig() {
@@ -448,6 +452,7 @@ interface ConversationPartition {
 }
 let conversationRegistry: ReturnType<typeof createConversationRegistry>
 const partitions = new Map<string, Promise<ConversationPartition>>()
+const deletingConversations = new Set<string>()
 let activePartition: ConversationPartition
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error) }
 
@@ -2611,6 +2616,7 @@ function setupIPC() {
 
   partitionIpc.handle('settings:set-theme', async (_event, theme: string) => {
     settingsMgr.setTheme(theme)
+    appIcons.update(mainWindow, theme)
     return { ok: true }
   })
 
@@ -3573,6 +3579,7 @@ function setupIPC() {
 }
 
 async function getPartition(id: string): Promise<ConversationPartition> {
+  if (deletingConversations.has(id)) throw new Error('此对话正在删除。')
   const conversation = conversationRegistry.get(id)
   sessionStore.ensureSession(id)
   sessionsCache[id] = sessionStore.getSessionMessages(id)
@@ -3594,6 +3601,8 @@ function setupConversationIPC() {
     const id = envelope && typeof envelope === 'object' && typeof envelope.conversationId === 'string'
       ? (args.pop(), envelope.conversationId) : conversationRegistry.active().id
     const partition = await getPartition(id)
+    conversationRegistry.get(id)
+    if (deletingConversations.has(id)) throw new Error('此对话正在删除。')
     return partition.handlers.get(channel)!(event, ...args)
   })
   const snapshot = () => ({ activeId: conversationRegistry.active().id, conversations: conversationRegistry.list() })
@@ -3632,7 +3641,40 @@ function setupConversationIPC() {
     const result = await dialog.showOpenDialog({ title: '选择包含 SKILL.md 的目录', properties: ['openDirectory'] })
     return result.canceled ? skillService.list() : skillService.addRoot(result.filePaths[0]!)
   })
-  setupChatUiIPC({ root: rootUserDataDir, registry: conversationRegistry,
+  const deleteConversation = async (id: string) => {
+    if (switching) throw new Error('正在切换或删除对话，请稍候。')
+    conversationRegistry.get(id)
+    switching = true
+    deletingConversations.add(id)
+    try {
+      return await deleteStoredConversation({ id, registry: conversationRegistry,
+        close: async target => {
+          const pending = partitions.get(target)
+          if (pending) { const partition = await pending; await partition.shutdown() }
+          partitions.delete(target)
+        },
+        clearHistory: target => {
+          sessionStore.bumpSessionGeneration(target)
+          sessionStore.getSessionMessages(target).splice(0)
+          delete sessionsCache[target]
+          saveSessions()
+        },
+        activate: async target => { activePartition = await getPartition(target); activePartition.activate() },
+        history: target => sessionStore.getSessionMessages(target), reportError: writeBootLog,
+      })
+    } catch (error) {
+      // A failed registry write leaves the entry live. Recreate its closed runtime when needed.
+      deletingConversations.delete(id)
+      if (conversationRegistry.active().id === id) {
+        try { activePartition = await getPartition(id); activePartition.activate() } catch { /* The UI reports the original failure. */ }
+      }
+      throw error
+    } finally {
+      deletingConversations.delete(id)
+      switching = false
+    }
+  }
+  setupChatUiIPC({ root: rootUserDataDir, registry: conversationRegistry, deleteConversation,
     getMessages: id => sessionStore.getSessionMessages(id), window: () => mainWindow,
     assistantName: () => agentName, reportError: writeBootLog })
   setupVoiceIPC()
@@ -3646,6 +3688,7 @@ function createWindow() {
     minWidth: 600,
     minHeight: 400,
     title: agentName,
+    icon: appIcons.image(settingsMgr.get().theme),
     backgroundColor: '#0f1117',
     webPreferences: {
       nodeIntegration: true,
@@ -3705,6 +3748,11 @@ app.whenReady().then(async () => {
     unprotectKey: key => Buffer.from(safeStorage.decryptString(key), 'base64'),
   }) : { load: () => undefined, save: (_payload: string) => {} }
   conversationRegistry = createConversationRegistry({ persistence: registryPersistence, legacySessionIds: Object.keys(sessionsCache) })
+  for (const entry of conversationRegistry.deleted()) {
+    sessionStore.getSessionMessages(entry.id).splice(0)
+    delete sessionsCache[entry.id]
+  }
+  saveSessions()
   activePartition = await getPartition(conversationRegistry.active().id)
   setupConversationIPC()
   createWindow()

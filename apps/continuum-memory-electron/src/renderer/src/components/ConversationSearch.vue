@@ -6,7 +6,7 @@ import { dialogFocus as vDialogFocus } from '../dialog-focus'
 import AppIcon from './AppIcon.vue'
 
 const props = defineProps<{ conversations: ConversationListItem[]; disabled?: boolean; archivedOnly?: boolean }>()
-const emit = defineEmits<{ close: []; select: [result: ConversationSearchResult]; pin: [id: string, pinned: boolean]; archive: [id: string, archived: boolean] }>()
+const emit = defineEmits<{ close: []; select: [result: ConversationSearchResult]; pin: [id: string, pinned: boolean]; archive: [id: string, archived: boolean]; delete: [conversation: ConversationListItem] }>()
 const query = ref(''), results = ref<ConversationSearchResult[]>([]), error = ref(''), loading = ref(false)
 const visible = computed<ConversationSearchResult[]>(() => {
   const all = query.value.trim() ? results.value : props.conversations
@@ -31,7 +31,7 @@ watch(query, () => {
   }, 180)
 })
 watch(() => props.conversations, conversations => {
-  results.value = results.value.map(result => ({ ...result, pinned: conversations.find(c => c.id === result.id)?.pinned, archived: conversations.find(c => c.id === result.id)?.archived }))
+  results.value = results.value.filter(result => conversations.some(item => item.id === result.id)).map(result => ({ ...result, pinned: conversations.find(c => c.id === result.id)?.pinned, archived: conversations.find(c => c.id === result.id)?.archived }))
     .sort((a,b) => Number(!!b.pinned)-Number(!!a.pinned))
 })
 onUnmounted(() => { revision++; clearTimeout(timer) })
@@ -46,6 +46,7 @@ onUnmounted(() => { revision++; clearTimeout(timer) })
         <div v-for="result in visible" :key="result.id" class="conversation-search-result">
           <button class="search-result-open" :disabled="disabled" @click="emit('select', result)"><AppIcon name="chat" /><span><strong>{{ result.title }}</strong><small v-if="result.archived">已归档</small><small v-if="result.snippet">{{ result.snippet }}</small><small v-else>{{ result.pinned ? '已置顶' : '独立记忆空间' }}</small></span><AppIcon name="arrow-right" /></button>
           <button v-if="result.archived" class="search-result-restore" aria-label="恢复归档对话" @click="emit('archive', result.id, false)">恢复</button>
+          <button class="search-result-delete" :disabled="disabled" :aria-label="`删除对话：${result.title}`" title="删除对话" @click="emit('delete', result)"><AppIcon name="trash" /></button>
           <button class="search-result-pin" :class="{ pinned: result.pinned }" :aria-label="result.pinned ? '取消置顶' : '置顶对话'" :aria-pressed="!!result.pinned" @click="emit('pin', result.id, !result.pinned)"><AppIcon name="pin" /></button>
         </div>
         <p v-if="!loading && !error && !visible.length" class="chat-feature-empty">没有找到匹配的对话，试试更短的关键词。</p>

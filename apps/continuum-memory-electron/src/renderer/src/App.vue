@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { ref, nextTick, onMounted, onUnmounted, computed, watch } from 'vue'
+import { ref, nextTick, onMounted, onUnmounted, computed, watch, provide } from 'vue'
 import { graphReviewIpcFields, graphReviewTimeError } from '../../shared/graph-review-ipc'
 import type { GraphOpenAssertionRecord } from '@continuum-memory/memory'
 import GraphOpenAssertions from './components/GraphOpenAssertions.vue'
 import MemoryRecallNotice from './components/MemoryRecallNotice.vue'
 import MemoryMark from './components/MemoryMark.vue'
+import { APP_ICON_THEME } from './app-icon'
 import AppIcon from './components/AppIcon.vue'
 import SkillPicker from './components/SkillPicker.vue'
 import SendArtwork from './components/SendArtwork.vue'
 import MessageMarkdown from './components/MessageMarkdown.vue'
 import ConversationSearch from './components/ConversationSearch.vue'
+import ConversationDelete from './components/ConversationDelete.vue'
 import QuickPhrases from './components/QuickPhrases.vue'
 import GeneralSettings from './components/GeneralSettings.vue'
 import ComposerEditor from './components/ComposerEditor.vue'
@@ -302,6 +304,8 @@ watch(composerTextarea, textarea => {
 const isLoading = ref(false)
 const chatEl = ref<HTMLElement | null>(null)
 const currentTheme = ref<Theme>(themes[0]!)
+const windowVisible = ref(!document.hidden)
+provide(APP_ICON_THEME, computed(() => currentTheme.value.id))
 watch(currentTheme, resizeComposer)
 const showThemeMenu = ref(false)
 const showAppMenu = ref(false)
@@ -703,6 +707,37 @@ async function archiveConversation(id: string, archived: boolean) {
     notifyChat(archived ? '对话已归档，可在归档列表恢复' : '对话已恢复到侧栏')
   } catch (error) { notifyChat(error instanceof Error ? error.message : '归档操作失败。') }
 }
+const pendingConversationDelete = ref<ConversationListItem | null>(null)
+const conversationDeleteBusy = ref(false)
+const conversationDeleteError = ref('')
+function requestConversationDelete(conversation: ConversationListItem) {
+  if (!canSwitchConversation.value) return
+  pendingConversationDelete.value = { ...conversation }
+  conversationDeleteError.value = ''
+  showAppMenu.value = false
+}
+async function confirmConversationDelete() {
+  const target = pendingConversationDelete.value
+  if (!target || conversationDeleteBusy.value) return
+  conversationDeleteBusy.value = true
+  conversationSwitching.value = true
+  conversationDeleteError.value = ''
+  try {
+    await draftStorage.flush()
+    const result = await ipcRenderer.invoke('conversations:delete', target.id, { confirmed: true })
+    if (!result.ok) throw new Error(result.error)
+    draftStorage.forget(target.id)
+    conversationMessages.delete(target.id); conversationImages.delete(target.id); memoryDrafts.delete(target.id)
+    pendingConversations.delete(target.id); stoppingConversations.value.delete(target.id)
+    bookmarks.value = result.bookmarks
+    conversations.value = result.conversations
+    if (activeConversationId.value === target.id) await applyConversationState(result)
+    pendingConversationDelete.value = null
+    notifyChat(result.warning || '对话已删除')
+  } catch (error) { conversationDeleteError.value = error instanceof Error ? error.message : '删除失败，请重试。' }
+  finally { conversationSwitching.value = false; conversationDeleteBusy.value = false; void refreshMemoryActivity().catch(() => {}) }
+}
+
 function expandComposer() {
   const t = composerTextarea.value
   if (!t || isLoading.value) return
@@ -738,7 +773,10 @@ async function refreshMemoryActivity() {
   catch { if (id === activeConversationId.value) memoryActivity.value = { ...memoryActivity.value, error: '状态更新失败，请稍后刷新。' } }
   finally { memoryActivityLoading.value = false }
 }
-function onVisibilityChange() { if (!document.hidden) void refreshMemoryActivity().catch(() => {}) }
+function onVisibilityChange() {
+  windowVisible.value = !document.hidden
+  if (windowVisible.value) void refreshMemoryActivity().catch(() => {})
+}
 
 function notifyChat(message: string) {
   chatNotice.value = message
@@ -1048,54 +1086,59 @@ async function selectConversation(id?: string) {
     const result = id ? await ipcRenderer.invoke('conversations:select', id)
       : await ipcRenderer.invoke('conversations:create', `新对话 ${conversations.value.length}`)
     if (!result.ok) throw new Error(result.error)
-    conversations.value = result.conversations
-    activeConversationId.value = result.activeId
-    selectedConversationId.value = result.activeId
-    const draft = draftStorage.get(result.activeId)
-    selectedSkillId.value = draft.skillId ?? ''
-    quotedMessage.value = draft.quote
-    skillUseHistory.value = []
-    documentItems.value = []
-    documentPreview.value = null
-    documentMessage.value = ''
-    showDocumentManager.value = false
-    messages.value = pendingConversations.has(result.activeId)
-      ? conversationMessages.get(result.activeId) ?? displayHistory(result.history)
-      : displayHistory(result.history)
-    conversationMessages.set(result.activeId, messages.value)
-    input.value = draft.text
-    pendingImage.value = conversationImages.get(result.activeId) ?? null
-    isLoading.value = pendingConversations.has(result.activeId)
-    showMemoryManager.value = false
-    showAllFormalClaims.value = false
-    clarificationItems.value = []
-    clarificationContexts.value = []
-    const memoryDraft = memoryDrafts.get(result.activeId)
-    manualMemoryInput.value = memoryDraft?.manual ?? ''
-    uiePreviewText.value = memoryDraft?.preview ?? ''
-    uiePreviewResult.value = ''
-    editingMemoryId.value = memoryDraft?.editingId ?? null
-    editingMemoryContent.value = memoryDraft?.editingContent ?? ''
-    clarificationReplies.value = memoryDraft?.replies ?? {}
-    cancelPurgeMemory()
-    pendingDeleteMemoryId.value = null
-    confirmClearMemories.value = false
-    renamingConversation.value = false
-    memoryItems.value = []
-    graphClaimItems.value = []
-    graphInformationItems.value = []
-    graphOpenAssertionItems.value = []
-    memoryStatusMessage.value = ''
-    memoryCount.value = 0
-    memoryL1Count.value = null
-    await refreshMemoryStatus()
-    await refreshSkills()
-    await refreshDocuments()
-    scrollToBottom()
+    await applyConversationState(result)
   } catch (error) {
     conversationError.value = error instanceof Error ? error.message : String(error)
   } finally { conversationSwitching.value = false; void refreshMemoryActivity().catch(() => {}) }
 }
+async function applyConversationState(result: { conversations: ConversationListItem[]; activeId: string; history: Parameters<typeof displayHistory>[0] }) {
+  conversations.value = result.conversations
+  activeConversationId.value = result.activeId
+  selectedConversationId.value = result.activeId
+  const draft = draftStorage.get(result.activeId)
+  selectedSkillId.value = draft.skillId ?? ''
+  quotedMessage.value = draft.quote
+  skillUseHistory.value = []
+  documentItems.value = []
+  documentPreview.value = null
+  documentMessage.value = ''
+  showDocumentManager.value = false
+  messages.value = pendingConversations.has(result.activeId)
+    ? conversationMessages.get(result.activeId) ?? displayHistory(result.history)
+    : displayHistory(result.history)
+  conversationMessages.set(result.activeId, messages.value)
+  input.value = draft.text
+  pendingImage.value = conversationImages.get(result.activeId) ?? null
+  isLoading.value = pendingConversations.has(result.activeId)
+  showMemoryManager.value = false
+  showAllFormalClaims.value = false
+  clarificationItems.value = []
+  clarificationContexts.value = []
+  const memoryDraft = memoryDrafts.get(result.activeId)
+  manualMemoryInput.value = memoryDraft?.manual ?? ''
+  uiePreviewText.value = memoryDraft?.preview ?? ''
+  uiePreviewResult.value = ''
+  editingMemoryId.value = memoryDraft?.editingId ?? null
+  editingMemoryContent.value = memoryDraft?.editingContent ?? ''
+  clarificationReplies.value = memoryDraft?.replies ?? {}
+  cancelPurgeMemory()
+  pendingDeleteMemoryId.value = null
+  confirmClearMemories.value = false
+  renamingConversation.value = false
+  memoryItems.value = []
+  graphClaimItems.value = []
+  graphInformationItems.value = []
+  graphOpenAssertionItems.value = []
+  memoryStatusMessage.value = ''
+  memoryCount.value = 0
+  memoryL1Count.value = null
+  await refreshMemoryStatus()
+  await refreshSkills()
+  await refreshDocuments()
+  scrollToBottom()
+  memoryActivity.value = { enabled: false, items: [], totals: { pending: 0, processing: 0, clarifying: 0, failed: 0, published: 0 }, awaitingProcessor: 0 }
+}
+
 async function renameConversation(event?: KeyboardEvent | MouseEvent) {
   if (event instanceof KeyboardEvent && (event.isComposing || event.keyCode === 229)) return
   const title = conversationRenameInput.value.trim()
@@ -2172,6 +2215,7 @@ async function doReset() {
   <!-- First-run naming screen -->
   <div v-else-if="isFirstRun" class="setup" :style="themeVars">
     <div class="setup-card">
+      <MemoryMark class="setup-brand-icon" />
       <h1>欢迎使用 Continuum Memory</h1>
       <span v-if="appVersion" class="setup-version">v{{ appVersion }}</span>
       <p>给你的 AI 智能体取个名字吧</p>
@@ -2181,7 +2225,7 @@ async function doReset() {
   </div>
 
   <!-- Chat screen -->
-  <div v-else class="app" :style="{ ...themeVars, ...readerStyle }" :data-theme="currentTheme.id" :data-family="currentTheme.family ?? 'warm'" :data-scheme="currentTheme.scheme ?? 'light'">
+  <div v-else class="app" :data-window-visible="windowVisible" :style="{ ...themeVars, ...readerStyle }" :data-theme="currentTheme.id" :data-family="currentTheme.family ?? 'warm'" :data-scheme="currentTheme.scheme ?? 'light'">
     <header class="header">
       <div class="header-heading"><span class="name">{{ currentConversationTitle }}</span><span v-if="currentArchived" class="archive-label">已归档</span><span class="header-eyebrow"><span class="space-node" />独立记忆空间</span></div>
       <div class="header-actions">
@@ -2194,7 +2238,7 @@ async function doReset() {
             <template v-for="family in ['warm', 'tech']" :key="family">
               <div class="theme-group-label">{{ family === 'warm' ? '记忆织线 · 温暖质感' : '记忆网络 · 科技感' }}</div>
               <button v-for="t in themes.filter(theme => theme.family === family)" :key="t.id" :data-theme-option="t.id" :class="['theme-item', { active: t.id === currentTheme.id }]" :aria-pressed="t.id === currentTheme.id" @click="selectTheme(t)">
-                <span class="theme-swatch" :style="{ background: t.bg, border: `1px solid ${t.border}` }"><span :style="{ background: t.accent }" /></span><span>{{ t.name }}</span><span v-if="t.id === currentTheme.id" class="theme-check">✓</span>
+                <MemoryMark :theme="t.id" class="theme-option-icon" /><span>{{ t.name }}</span><span v-if="t.id === currentTheme.id" class="theme-check">✓</span>
               </button>
             </template>
             <div :class="['theme-custom', { active: currentTheme.id === 'custom' }]">
@@ -2215,6 +2259,7 @@ async function doReset() {
             <button :disabled="isLoading || exportingConversation" @click="exportConversation('txt')"><AppIcon name="export" />导出 TXT</button>
             <button @click="archiveConversation(activeConversationId, !currentArchived); showAppMenu = false"><AppIcon name="archive" />{{ currentArchived ? '恢复当前对话' : '归档当前对话' }}</button>
             <button @click="showArchiveLibrary = true; showAppMenu = false"><AppIcon name="archive" />归档对话</button>
+            <button :disabled="!canSwitchConversation" class="menu-delete-conversation" @click="requestConversationDelete(conversations.find(c => c.id === activeConversationId)!)"><AppIcon name="trash" />删除当前对话…</button>
             <button @click="openGeneralSettings"><AppIcon name="settings" />通用设置</button>
             <button @click="doReset"><AppIcon name="reset" />{{ confirmReset ? '再次点击确认重置' : '重新开始' }}</button>
           </div>
@@ -2222,12 +2267,13 @@ async function doReset() {
       </div>
     </header>
 
+    <ConversationDelete v-if="pendingConversationDelete" :title="pendingConversationDelete.title" :busy="conversationDeleteBusy" :error="conversationDeleteError" @close="pendingConversationDelete = null" @confirm="confirmConversationDelete" />
     <GeneralSettings v-if="showGeneralSettings" :preferences="preferences" :busy="generalSettingsBusy" :error="generalSettingsError" @close="closeGeneralSettings" @preview="readerPreview = $event" @save="saveGeneralSettings" />
     <ComposerEditor v-if="showComposerEditor" v-model="input" :selection="editorSelection" :disabled="isLoading || conversationSwitching" @close="closeComposerEditor" @send="closeComposerEditor($event, true)" />
     <SavedMessages v-if="showSavedMessages" :items="bookmarks" :disabled="!canSwitchConversation" @close="showSavedMessages = false" @open="openSavedMessage" @remove="toggleBookmark($event.conversationId, $event.messageId, false)" @notice="notifyChat" />
     <MemoryActivity v-if="showMemoryActivity" :report="memoryActivity" :loading="memoryActivityLoading" @close="showMemoryActivity = false" @refresh="refreshMemoryActivity" @review="showMemoryActivity = false; openMemoryManager()" />
-    <ConversationSearch v-if="showArchiveLibrary" :conversations="conversations" :archived-only="true" :disabled="!canSwitchConversation" @close="showArchiveLibrary = false" @select="openSearchResult($event); showArchiveLibrary = false" @pin="pinConversation" @archive="archiveConversation" />
-    <ConversationSearch v-if="showConversationSearch" :conversations="conversations" :disabled="!canSwitchConversation" @close="showConversationSearch = false" @select="openSearchResult" @pin="pinConversation" @archive="archiveConversation" />
+    <ConversationSearch v-if="showArchiveLibrary" :conversations="conversations" :archived-only="true" :disabled="!canSwitchConversation" @close="showArchiveLibrary = false" @select="openSearchResult($event); showArchiveLibrary = false" @pin="pinConversation" @archive="archiveConversation" @delete="requestConversationDelete" />
+    <ConversationSearch v-if="showConversationSearch" :conversations="conversations" :disabled="!canSwitchConversation" @close="showConversationSearch = false" @select="openSearchResult" @pin="pinConversation" @archive="archiveConversation" @delete="requestConversationDelete" />
     <QuickPhrases v-if="showQuickPhrases" :phrases="quickPhrases" :disabled="isLoading || conversationSwitching" @close="showQuickPhrases = false" @insert="insertPhrase" @updated="quickPhrases = $event" />
     <div v-if="chatNotice" class="chat-toast" role="status">{{ chatNotice }}</div>
     <aside class="conversation-bar" aria-label="对话与工具">
@@ -2247,8 +2293,9 @@ async function doReset() {
           <button class="conversation-item"
             :class="{ selected: conversation.id === activeConversationId }" :aria-current="conversation.id === activeConversationId ? 'page' : undefined"
             :title="conversation.title" :aria-label="conversation.title" :disabled="!canSwitchConversation" @click="conversation.id !== activeConversationId && selectConversation(conversation.id)">
-            <AppIcon name="chat" class="conversation-icon" /><span class="conversation-copy"><span class="conversation-title">{{ conversation.title }}</span><small v-if="conversation.id === activeConversationId">当前对话 · 独立记忆</small></span>
+            <AppIcon name="chat" class="conversation-icon" /><span class="conversation-copy"><span class="conversation-title">{{ conversation.title }}</span><small v-if="conversation.id === activeConversationId" title="当前对话拥有独立记忆空间">独立记忆空间</small></span>
           </button>
+          <button class="conversation-delete-action" :disabled="!canSwitchConversation" :aria-label="`删除对话：${conversation.title}`" title="删除对话" @click="requestConversationDelete(conversation)"><AppIcon name="trash" /></button>
           <button class="conversation-pin" :class="{ pinned: conversation.pinned }" :disabled="!!pinningConversation" :aria-label="`${conversation.pinned ? '取消置顶' : '置顶'}：${conversation.title}`" :title="conversation.pinned ? '取消置顶' : '置顶对话'" :aria-pressed="!!conversation.pinned" @click="pinConversation(conversation.id, !conversation.pinned)"><AppIcon name="pin" /></button>
           </div>
         </nav>
@@ -2847,7 +2894,7 @@ async function doReset() {
         <span class="empty-eyebrow">CONTINUUM MEMORY</span>
         <h1>从一段对话开始</h1>
         <p>聊聊你的想法，让重要的信息留在记忆里。</p>
-        <div class="empty-features"><span>◈ 独立记忆</span><span>✧ Skill 协作</span><span>▤ PDF 与 Word</span></div>
+        <div class="empty-features"><span><AppIcon name="memory" />独立记忆</span><span><AppIcon name="skill" />Skill 协作</span><span><AppIcon name="document" />PDF 与 Word</span></div>
       </div>
       <div v-for="msg in messages" :key="msg.id" :data-message-id="msg.id" :class="['message', msg.role, { 'search-highlight': highlightedMessageId === msg.id }]">
         <span v-if="msg.role === 'assistant'" class="assistant-avatar"><MemoryMark /></span>

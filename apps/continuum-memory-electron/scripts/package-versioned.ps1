@@ -23,7 +23,11 @@ if (-not $rceditPath -or -not (Test-Path -LiteralPath $rceditPath)) {
   throw 'rcedit-x64.exe was not found. Set CONTINUUM_MEMORY_RCEDIT_PATH (or legacy DESKPET_RCEDIT_PATH) to a local copy before packaging.'
 }
 
+$applicationIcon = Join-Path $appDirectory 'src\renderer\public\brand\icons\continuum-memory-v1.ico'
+if (-not (Test-Path -LiteralPath $applicationIcon)) { throw "Application icon is missing: $applicationIcon" }
+
 & $rceditPath $executablePath `
+  --set-icon $applicationIcon `
   --set-file-version $version `
   --set-product-version $version `
   --set-version-string ProductName 'Continuum Memory' `

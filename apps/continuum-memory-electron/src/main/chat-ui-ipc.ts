@@ -4,7 +4,7 @@ import { writeFile } from 'node:fs/promises'
 import { createEncryptedFilePersistence } from '@continuum-memory/memory'
 import { createChatUiStore, type DraftUpdate } from './chat-ui-store'
 import { searchConversations } from './conversation-search'
-import type { createConversationRegistry } from './conversation-registry'
+import type { createConversationRegistry, DesktopConversation } from './conversation-registry'
 import { buildConversationExport, exportFilename, type ExportMessage } from '../shared/chat-content'
 
 export function setupChatUiIPC(options: {
@@ -14,6 +14,7 @@ export function setupChatUiIPC(options: {
   window(): BrowserWindow | null
   assistantName(): string
   reportError(message: string): void
+  deleteConversation?(id: string): Promise<{ activeId: string; conversations: DesktopConversation[]; history: ExportMessage[]; warning?: string }>
   copyText?(text: string): void
   openLink?(url: string): Promise<void>
   saveExport?(config: Electron.SaveDialogOptions): Promise<{ canceled: boolean; filePath?: string }>
@@ -46,15 +47,26 @@ export function setupChatUiIPC(options: {
       return { ok: true as const }
     } catch (error) { return failure(error) }
   }
-  ipcMain.handle('chat-ui:get', () => ({ ...store.uiState(), storageError }))
+  const liveIds = () => new Set(options.registry.list().map(item => item.id))
+  // Clean remnants of an interrupted deletion; inaccessible registry entries stay hidden if I/O fails.
+  for (const entry of options.registry.deleted()) {
+    try { store.removeConversation(entry.id) } catch (error) { options.reportError(`Deleted conversation UI cleanup deferred: ${String(error)}`) }
+  }
+  ipcMain.handle('chat-ui:get', () => {
+    const state = store.uiState(), ids = liveIds()
+    return { ...state, drafts: Object.fromEntries(Object.entries(state.drafts).filter(([id]) => ids.has(id))), storageError }
+  })
   ipcMain.handle('chat-ui:drafts-save', (_event, updates: DraftUpdate[]) => saveDrafts(updates))
   // A final synchronous flush prevents window close from losing a debounced draft.
   ipcMain.on('chat-ui:drafts-flush', (event, updates: DraftUpdate[]) => { event.returnValue = saveDrafts(updates) })
-  const bookmarks = () => store.snapshot().bookmarks.map(item => {
+  const bookmarks = () => {
+    const ids = liveIds()
+    return store.snapshot().bookmarks.filter(item => ids.has(item.conversationId)).map(item => {
     const conversation = options.registry.get(item.conversationId)
     return { ...item, conversationTitle: conversation.title, archived: conversation.archived,
       sourceAvailable: options.getMessages(item.conversationId).some(message => message.id === item.messageId) }
-  })
+    })
+  }
   ipcMain.handle('chat-ui:preferences-save', (_event, value: unknown) => {
     try { return { ok: true, preferences: store.savePreferences(value) } } catch (error) { return failure(error) }
   })
@@ -71,6 +83,17 @@ export function setupChatUiIPC(options: {
       const item = source ? { conversationId: id, messageId, role: source.role as 'user' | 'assistant', content: source.content, savedAt: Date.now(), ...(source.quote ? { quote: source.quote } : {}) } : existing
       if (item) store.saveBookmark(item, saved)
       return { ok: true, items: bookmarks() }
+    } catch (error) { return failure(error) }
+  })
+  ipcMain.handle('conversations:delete', async (_event, id: string, input?: { confirmed?: unknown }) => {
+    try {
+      if (input?.confirmed !== true) throw new Error('请先确认删除对话。')
+      options.registry.get(id)
+      if (!options.deleteConversation) throw new Error('删除服务暂不可用，请重新启动程序。')
+      const result = await options.deleteConversation(id)
+      let warning: string | undefined
+      try { store.removeConversation(id) } catch (error) { warning = '对话已删除，部分本地缓存将在下次启动时继续清理。'; options.reportError(`Conversation UI cleanup deferred: ${String(error)}`) }
+      return { ok: true, ...result, bookmarks: bookmarks(), ...(warning ? { warning } : {}) }
     } catch (error) { return failure(error) }
   })
   ipcMain.handle('conversations:archive', (_event, id: string, archived: boolean) => {
@@ -111,6 +134,7 @@ export function setupChatUiIPC(options: {
       const window = options.window()
       const result = options.saveExport ? await options.saveExport(config) : window ? await dialog.showSaveDialog(window, config) : await dialog.showSaveDialog(config)
       if (result.canceled || !result.filePath) return { ok: true, canceled: true }
+      options.registry.get(id)
       await writeFile(result.filePath, buildConversationExport(conversation.title, snapshot, format, options.assistantName()), 'utf-8')
       return { ok: true, filename: basename(result.filePath) }
     } catch (error) { return failure(error) }

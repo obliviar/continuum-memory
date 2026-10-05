@@ -1,0 +1,127 @@
+/* Button type follows both the palette and the importance of the action. */
+.app {
+  --button-display-font: var(--font-ui);
+  --button-nav-font: var(--font-ui);
+  --button-utility-font: var(--font-ui);
+  --button-primary-size: 15px;
+  --button-primary-weight: 600;
+  --button-primary-spacing: .02em;
+  --button-confirm-size: 13px;
+  --button-nav-size: 14px;
+  --button-nav-weight: 400;
+  --button-nav-spacing: .01em;
+  --button-active-weight: 600;
+  --button-utility-weight: 400;
+  --button-utility-spacing: 0;
+}
+.app[data-theme='thread-teal'] {
+  --button-display-font: 'LXGW WenKai Lite', 'Microsoft YaHei UI', sans-serif;
+  --button-nav-font: 'LXGW WenKai Lite', 'Microsoft YaHei UI', sans-serif;
+  --button-primary-size: 17px;
+  --button-primary-weight: 400;
+  --button-primary-spacing: .045em;
+  --button-confirm-size: 15px;
+  --button-nav-size: 16px;
+  --button-nav-spacing: .02em;
+  --button-active-weight: 400;
+}
+.app[data-theme='thread-copper'] {
+  --button-display-font: 'Microsoft YaHei', 'Microsoft YaHei UI', sans-serif;
+  --button-nav-font: 'Microsoft YaHei', 'Microsoft YaHei UI', sans-serif;
+  --button-primary-weight: 600;
+  --button-primary-spacing: .085em;
+  --button-nav-spacing: .035em;
+  --button-utility-spacing: .01em;
+}
+.app[data-theme='thread-ink'] {
+  --button-display-font: 'LXGW WenKai Lite', 'Microsoft YaHei UI', sans-serif;
+  --button-primary-size: 16px;
+  --button-primary-weight: 400;
+  --button-primary-spacing: .1em;
+  --button-confirm-size: 15px;
+  --button-nav-spacing: .025em;
+}
+.app[data-theme='network-ice'] {
+  --button-display-font: 'Space Grotesk', 'Microsoft YaHei UI', sans-serif;
+  --button-utility-font: 'Space Grotesk', 'Microsoft YaHei UI', sans-serif;
+  --button-primary-weight: 600;
+  --button-primary-spacing: .04em;
+  --button-nav-weight: 500;
+  --button-nav-spacing: .025em;
+  --button-utility-weight: 500;
+  --button-utility-spacing: .015em;
+}
+.app[data-theme='network-violet'] {
+  --button-display-font: 'Space Grotesk', 'Microsoft YaHei UI', sans-serif;
+  --button-nav-font: 'Space Grotesk', 'Microsoft YaHei UI', sans-serif;
+  --button-utility-font: 'Space Grotesk', 'Microsoft YaHei UI', sans-serif;
+  --button-primary-weight: 700;
+  --button-primary-spacing: .065em;
+  --button-nav-weight: 500;
+  --button-nav-spacing: .015em;
+  --button-active-weight: 700;
+  --button-utility-weight: 500;
+  --button-utility-spacing: .015em;
+}
+.app[data-theme='network-polar'] {
+  --button-primary-weight: 600;
+  --button-primary-spacing: .025em;
+  --button-nav-spacing: .035em;
+  --button-utility-font: 'Space Grotesk', 'Microsoft YaHei UI', sans-serif;
+  --button-utility-spacing: .01em;
+}
+
+.app button { font-kerning: normal; }
+.app[data-theme] .new-conversation {
+  font-family: var(--button-display-font);
+  font-size: var(--button-primary-size);
+  font-weight: var(--button-primary-weight);
+  letter-spacing: var(--button-primary-spacing);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.app[data-theme] .primary-btn {
+  font-family: var(--button-display-font);
+  font-size: var(--button-confirm-size);
+  font-weight: var(--button-primary-weight);
+  letter-spacing: var(--button-primary-spacing);
+  line-height: 1.4;
+}
+.app[data-theme] .conversation-item,
+.app[data-theme] .sidebar-tools button,
+.app[data-theme] .sidebar-footer button {
+  font-family: var(--button-nav-font);
+  font-size: var(--button-nav-size);
+  font-weight: var(--button-nav-weight);
+  letter-spacing: var(--button-nav-spacing);
+  line-height: 1.5;
+}
+.app[data-theme] .conversation-item.selected .conversation-title { font-weight: var(--button-active-weight); }
+.app[data-theme] .conversation-copy small { font-family: var(--button-utility-font); font-size: 11px; font-weight: 400; letter-spacing: 0; }
+
+.app[data-theme] :is(.secondary-btn, .confirm-conversation-delete, .sidebar-search-button,
+  .api-btn, .memory-activity-pill, .message-tools button, .app-menu button,
+  .input-more-menu button, .theme-item, .shortcut-row button, .send-key-options button,
+  .search-result-open, .search-result-restore, .phrase-insert, .saved-message-card footer button,
+  .skill-option, .markdown-code-heading button) {
+  font-family: var(--button-utility-font);
+  font-weight: var(--button-utility-weight);
+  letter-spacing: var(--button-utility-spacing);
+  line-height: 1.5;
+}
+.app[data-theme] :is(.secondary-btn, .confirm-conversation-delete, .app-menu button, .input-more-menu button) { font-size: 13px; }
+.app[data-theme] :is(.message-tools button, .theme-item, .markdown-code-heading button) { font-size: 12px; }
+.app[data-theme] .confirm-conversation-delete { font-weight: 600; }
+.app[data-theme] .theme-item.active { font-weight: 600; }
+.app[data-theme] .sidebar-search-button { font-size: 13px; }
+.app[data-theme] .sidebar-search-button kbd { font-family: 'Space Grotesk', 'Microsoft YaHei UI', sans-serif; font-size: 10px; font-weight: 400; letter-spacing: .015em; }
+.app[data-theme] .skill-trigger { font-family: var(--button-utility-font) !important; font-size: 12px !important; font-weight: var(--button-utility-weight); letter-spacing: var(--button-utility-spacing); line-height: 1.5; }
+
+@media(max-width:640px) {
+  .app[data-theme] :is(.secondary-btn, .confirm-conversation-delete, .app-menu button, .input-more-menu button) { font-size: 12px; }
+  .app[data-theme] .primary-btn { font-size: 13px; letter-spacing: .025em; }
+}
+@media(max-width:420px) {
+  .app[data-theme] .skill-trigger { font-size: 11px !important; letter-spacing: 0; }
+  .app[data-theme] .message-tools button { font-size: 11px; letter-spacing: 0; }
+}

@@ -51,6 +51,7 @@ export function useChatDrafts() {
   onUnmounted(() => { beforeUnload(); window.removeEventListener('beforeunload', beforeUnload); clearTimeout(timer) })
   return {
     status, error, queue, flush,
+    forget(id: string) { drafts.delete(id); pending.delete(id); if (!pending.size) clearTimeout(timer) },
     get: (id: string) => copyDraft(drafts.get(id) ?? { text: '' }),
     async load() {
       const state = await ipcRenderer.invoke('chat-ui:get')

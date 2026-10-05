@@ -1,0 +1,44 @@
+/* Only the light overlay moves; the artwork and interface stay anchored. */
+.app {
+  --light-drift-duration: 24s;
+  --light-breathe-duration: 12s;
+  --light-from-x: -1.5%;
+  --light-from-y: 1%;
+  --light-to-x: 2%;
+  --light-to-y: -1.5%;
+  --light-opacity-low: .45;
+  --light-opacity-high: 1;
+}
+.app[data-theme='thread-teal'] { --light-drift-duration: 28s; --light-breathe-duration: 14s; --light-opacity-low: .5; }
+.app[data-theme='thread-copper'] { --light-drift-duration: 24s; --light-breathe-duration: 12s; --light-from-x: -2%; --light-from-y: 1.5%; --light-to-x: 2.5%; --light-to-y: -2%; }
+.app[data-theme='thread-ink'] { --light-drift-duration: 32s; --light-breathe-duration: 16s; --light-from-x: -3%; --light-from-y: 1.5%; --light-to-x: 3%; --light-to-y: -1.5%; --light-opacity-low: .5; }
+.app[data-theme='network-ice'] { --light-drift-duration: 22s; --light-breathe-duration: 11s; --light-from-x: -.8%; --light-from-y: -2.5%; --light-to-x: 1.5%; --light-to-y: 2%; }
+.app[data-theme='network-violet'] { --light-drift-duration: 26s; --light-breathe-duration: 13s; --light-from-x: 2%; --light-from-y: -1.5%; --light-to-x: -2%; --light-to-y: 2%; --light-opacity-low: .38; }
+.app[data-theme='network-polar'] { --light-drift-duration: 20s; --light-breathe-duration: 10s; --light-from-x: -2%; --light-from-y: 2%; --light-to-x: 2%; --light-to-y: -2%; }
+
+.app:is([data-theme='thread-teal'], [data-theme='thread-copper'], [data-theme='thread-ink'], [data-theme='network-ice'], [data-theme='network-violet'], [data-theme='network-polar'])::after {
+  inset: -32px -32px -32px calc(var(--rail-width) - 32px);
+  transform-origin: center;
+  animation: theme-ambient-drift var(--light-drift-duration) ease-in-out infinite alternate,
+    theme-ambient-breathe var(--light-breathe-duration) ease-in-out infinite;
+  animation-delay: -7s, -3s;
+  will-change: transform, opacity;
+}
+@keyframes theme-ambient-drift {
+  from { transform: translate3d(var(--light-from-x), var(--light-from-y), 0) scale(1.06); }
+  to { transform: translate3d(var(--light-to-x), var(--light-to-y), 0) scale(1.06); }
+}
+@keyframes theme-ambient-breathe {
+  0%, 100% { opacity: var(--light-opacity-low); }
+  50% { opacity: var(--light-opacity-high); }
+}
+.app[data-window-visible='false']::after { animation-play-state: paused; will-change: auto; }
+@media(max-width:640px) {
+  .app { --light-opacity-high: .72; --light-opacity-low: .32; }
+  .app[data-theme] { --light-opacity-low: .32; }
+}
+@media(prefers-reduced-motion:reduce) {
+  .app[data-theme]::after { animation: none; transform: none; will-change: auto; }
+}
+@media(forced-colors:active) { .app[data-theme]::after { display: none; animation: none; will-change: auto; } }
+

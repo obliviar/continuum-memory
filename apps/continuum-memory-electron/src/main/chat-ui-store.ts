@@ -66,6 +66,15 @@ export function createChatUiStore(persistence: { load(): string | undefined; sav
       }
       commit({ ...state, drafts })
     },
+    removeConversation(id: string) {
+      if (!Object.hasOwn(state.drafts, id) && !state.bookmarks.some(item => item.conversationId === id)) return
+      const drafts = { ...state.drafts }
+      delete drafts[id]
+      const bookmarks = state.bookmarks.filter(item => item.conversationId !== id)
+      if (bookmarkPersistence && bookmarks.length !== state.bookmarks.length)
+        bookmarkPersistence.save(JSON.stringify({ version: 1, items: bookmarks }))
+      commit({ ...state, drafts, bookmarks })
+    },
     savePreferences(value: unknown) { commit({ ...state, preferences: validateChatPreferences(value) }); return structuredClone(state.preferences) },
     saveBookmark(item: MessageBookmark, saved: boolean) {
       const key = bookmarkKey(item.conversationId, item.messageId)

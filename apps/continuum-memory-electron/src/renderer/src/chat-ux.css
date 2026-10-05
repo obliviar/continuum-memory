@@ -94,3 +94,89 @@
 .settings-sections::-webkit-scrollbar-track, .saved-message-list::-webkit-scrollbar-track, .activity-list::-webkit-scrollbar-track, .conversation-search-results::-webkit-scrollbar-track, .phrase-list::-webkit-scrollbar-track, .phrase-editor::-webkit-scrollbar-track, .expanded-message-input::-webkit-scrollbar-track { background: transparent; }
 .settings-sections::-webkit-scrollbar-button, .saved-message-list::-webkit-scrollbar-button, .activity-list::-webkit-scrollbar-button, .conversation-search-results::-webkit-scrollbar-button, .phrase-list::-webkit-scrollbar-button, .phrase-editor::-webkit-scrollbar-button, .expanded-message-input::-webkit-scrollbar-button { display: none; height: 0; width: 0; }
 .chat:focus-visible { outline: none; }
+
+.conversation-entry .conversation-item { padding-right: 61px; }
+.conversation-entry .conversation-pin { right: 32px; }
+.conversation-delete-action { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); display: grid; place-items: center; width: 26px; height: 28px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); opacity: 0; cursor: pointer; }
+.conversation-delete-action svg { width: 15px; height: 15px; }
+.conversation-entry:hover .conversation-delete-action, .conversation-entry:focus-within .conversation-delete-action { opacity: 1; }
+.conversation-delete-action:hover { background: color-mix(in srgb,#c86456 12%,transparent); color: #c86456; }
+.search-result-delete { display: grid; place-items: center; flex-shrink: 0; width: 28px; height: 32px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; }
+.search-result-delete svg { width: 15px; height: 15px; }
+.search-result-delete:hover { color: #c86456; background: color-mix(in srgb,#c86456 10%,transparent); }
+.app-menu .menu-delete-conversation { color: #c86456; }
+.conversation-delete-dialog { width: min(450px,100%); }
+.delete-conversation-name { display: flex; align-items: center; gap: 10px; padding: 13px; background: var(--bg); border: 1px solid var(--border); border-radius: 9px; }
+.delete-conversation-name strong { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+.delete-conversation-name svg { flex-shrink: 0; }
+.delete-conversation-description { margin-top: 14px; font-size: 12px; line-height: 1.8; }
+.delete-conversation-audit { color: var(--text-muted); font-size: 10px; line-height: 1.7; margin-top: 9px; }
+.confirm-conversation-delete { border: 1px solid #b85246; border-radius: 8px; padding: 8px 13px; background: #b85246; color: #fff; font: inherit; font-size: 12px; cursor: pointer; }
+.confirm-conversation-delete:hover:not(:disabled) { background: #a6453a; }
+@media(max-width:960px) { .conversation-delete-action { display: none; } .conversation-entry .conversation-item { padding-right: 0; } }
+@media(max-width:400px) { .conversation-search-result { gap: 2px; } .search-result-open { padding: 10px 8px; gap: 6px; } .search-result-open > svg:last-child { display: none; } .search-result-pin { width: 24px; margin-right: 4px; } .search-result-restore { padding-inline: 4px; font-size: 10px; } }
+@media(hover:none) and (min-width:961px) { .conversation-delete-action { opacity: 1; } }
+
+.conversation-delete-backdrop { z-index: 500; }
+.conversation-delete-body { min-height: 0; overflow-y: auto; }
+.conversation-delete-body::-webkit-scrollbar { width: 5px; }
+.conversation-delete-body::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 6px; }
+.conversation-delete-body::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+
+
+/* Desktop refinement: readable status, full-width writing, and consistent actions. */
+.header .api-btn, .header .memory-activity-pill { min-height: 30px; font-size: 11px; border-radius: 8px; }
+.header .memory-activity-pill { gap: 6px; padding: 6px 10px; }
+.header .api-dot { flex-shrink: 0; }
+.conversation-copy small { font-size: 11px; line-height: 1.5; }
+.message-tools { gap: 4px; margin-top: 0; }
+.message-tools button { min-height: 28px; gap: 5px; padding: 4px 8px; font-size: 11px; }
+.message-tools button svg { width: 14px; height: 14px; flex-shrink: 0; }
+.message-tools button:focus-visible { background: var(--surface-hover); color: var(--text); }
+.message-state { font-size: 11px; }
+.empty { flex: 1; height: auto; min-height: min-content; padding: 28px 12px; gap: 14px; }
+.empty-mark { width: 72px; height: 72px; margin-bottom: 4px; }
+.empty-mark .memory-mark { width: 68px; height: 68px; }
+.empty-eyebrow { font-size: 10px; letter-spacing: 2px; }
+.empty h1 { font-size: clamp(23px, 2vw, 30px); line-height: 1.4; }
+.empty p { max-width: 400px; font-size: 14px; line-height: 1.8; }
+.empty-features { gap: 10px 18px; margin-top: 10px; font-size: 11px; }
+.empty-features > span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.empty-features svg { width: 15px; height: 15px; flex-shrink: 0; }
+.composer.input-area { grid-template-columns: auto minmax(0,1fr) 44px; gap: 8px 12px; padding: 10px 14px; }
+.composer .composer-input { grid-column: 1 / -1; grid-row: 1; }
+.composer textarea { min-height: 52px; padding: 8px 2px; }
+.composer-controls { grid-column: 1; grid-row: 2; gap: 4px; }
+.composer .skill-selection { grid-column: 2; grid-row: 2; width: min(180px,100%); max-width: 180px; }
+.composer .send-btn, .composer .stop-generation-btn { grid-column: 3; grid-row: 2; width: 44px; height: 44px; }
+.composer .tool-btn { width: 32px; height: 32px; border-radius: 8px; }
+.input-help { font-size: 10px; line-height: 1.5; padding: 8px 16px 11px; }
+@media(max-width:640px) {
+  .header .api-btn, .header .memory-activity-pill { width: 28px; height: 28px; min-height: 28px; padding: 0; }
+  .composer.input-area { grid-template-columns: auto minmax(0,1fr) 38px; gap: 5px 8px; padding: 8px 10px; }
+  .composer textarea { min-height: 42px; padding: 6px 2px; }
+  .composer .skill-selection { width: min(140px,100%); padding-inline: 4px; }
+  .composer .send-btn, .composer .stop-generation-btn { width: 38px; height: 38px; }
+  .composer-controls { gap: 2px; }
+  .composer .composer-controls .tool-btn { width: 28px; height: 30px; }
+  .empty { padding: 16px 6px; gap: 10px; }
+  .empty p { font-size: 12px; }
+  .empty-features { gap: 8px 12px; }
+}
+@media(max-width:420px) {
+  .composer.input-area { grid-template-columns: auto minmax(0,1fr) 34px; gap: 4px 5px; padding-inline: 7px; }
+  .composer-controls { gap: 0; }
+  .composer .composer-controls .tool-btn { width: 23px; height: 28px; }
+  .composer .send-btn, .composer .stop-generation-btn { width: 34px; height: 34px; }
+  .composer .skill-selection { padding-inline: 2px; }
+}
+@media(max-height:480px) {
+  .composer.input-area { padding-block: 5px; row-gap: 0; }
+  .composer textarea { min-height: 32px; padding-block: 4px; }
+  .composer .send-btn, .composer .stop-generation-btn { width: 34px; height: 34px; }
+  .empty { padding-block: 8px; gap: 8px; }
+  .empty-mark, .empty-mark .memory-mark { width: 42px; height: 42px; margin: 0; }
+  .empty-eyebrow, .empty-features { display: none; }
+  .empty h1 { font-size: 21px; }
+}
+@media(max-height:360px) { .empty-mark, .empty p { display: none; } .empty { padding: 4px; } }

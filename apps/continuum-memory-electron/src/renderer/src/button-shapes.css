@@ -1,0 +1,70 @@
+/* A shared shape hierarchy with a distinct silhouette for each theme. */
+.app {
+  --button-radius-primary: 12px;
+  --button-radius-nav: 9px;
+  --button-radius-secondary: 9px;
+  --button-radius-icon: 9px;
+  --button-radius-chip: 12px;
+}
+.app[data-theme='thread-teal'] {
+  --button-radius-primary: 999px;
+  --button-radius-nav: 14px;
+  --button-radius-secondary: 12px;
+  --button-radius-icon: 50%;
+  --button-radius-chip: 999px;
+}
+.app[data-theme='thread-copper'] {
+  --button-radius-primary: 16px 16px 9px 16px;
+  --button-radius-nav: 11px;
+  --button-radius-secondary: 11px 11px 6px 11px;
+  --button-radius-icon: 10px;
+  --button-radius-chip: 10px;
+}
+.app[data-theme='thread-ink'] {
+  --button-radius-primary: 5px 17px 5px 17px;
+  --button-radius-nav: 5px 12px 5px 12px;
+  --button-radius-secondary: 4px 11px 4px 11px;
+  --button-radius-icon: 7px;
+  --button-radius-chip: 5px 10px 5px 10px;
+}
+.app[data-theme='network-ice'] {
+  --button-radius-primary: 6px;
+  --button-radius-nav: 6px;
+  --button-radius-secondary: 5px;
+  --button-radius-icon: 6px;
+  --button-radius-chip: 5px;
+}
+.app[data-theme='network-violet'] {
+  --button-radius-primary: 17px 5px 17px 5px;
+  --button-radius-nav: 11px 4px 11px 4px;
+  --button-radius-secondary: 11px 4px 11px 4px;
+  --button-radius-icon: 10px;
+  --button-radius-chip: 10px 4px 10px 4px;
+}
+.app[data-theme='network-polar'] {
+  --button-radius-primary: 16px;
+  --button-radius-nav: 12px;
+  --button-radius-secondary: 12px;
+  --button-radius-icon: 50%;
+  --button-radius-chip: 999px;
+}
+
+/* Border radii preserve the existing rectangular hit targets and focus outlines. */
+.app[data-theme] :is(.new-conversation, .primary-btn) { border-radius: var(--button-radius-primary); }
+.app[data-theme] :is(.conversation-item, .sidebar-tools button, .sidebar-footer button, .theme-item) { border-radius: var(--button-radius-nav); }
+.app[data-theme] :is(.secondary-btn, .confirm-conversation-delete, .sidebar-search-button,
+  .shortcut-row button, .send-key-options button, .app-menu button,
+  .input-more-menu button, .skill-option, .message-tools button, .phrase-insert,
+  .saved-message-card footer button, .markdown-code-heading button) { border-radius: var(--button-radius-secondary); }
+.app[data-theme] :is(.icon-btn, .tool-btn, .dialog-close, .sidebar-history-action,
+  .conversation-pin, .conversation-delete-action, .search-result-delete,
+  .composer-reference button, .stop-generation-btn) { border-radius: var(--button-radius-icon); }
+.app[data-theme] :is(.api-btn, .memory-activity-pill, .composer .skill-selection, .empty-features > span) { border-radius: var(--button-radius-chip); }
+.app[data-theme] .skill-trigger { border-radius: inherit; }
+
+@media(max-width:960px) {
+  .app[data-theme] .new-conversation { border-radius: var(--button-radius-icon); }
+}
+@media(max-width:640px) {
+  .app[data-theme] :is(.api-btn, .memory-activity-pill) { border-radius: var(--button-radius-icon); }
+}

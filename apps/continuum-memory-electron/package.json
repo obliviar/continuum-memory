@@ -14,7 +14,8 @@
     "package": "electron-vite build && electron-builder --win dir && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-versioned.ps1",
     "typecheck": "pnpm run typecheck:renderer && pnpm run typecheck:node",
     "typecheck:renderer": "vue-tsc --noEmit -p tsconfig.web.json",
-    "typecheck:node": "tsc --noEmit -p tsconfig.node.json"
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "icons:generate": "electron scripts/generate-app-icons.cjs"
   },
   "build": {
     "appId": "com.continuum.memory",
@@ -51,7 +52,7 @@
     ],
     "win": {
       "target": "zip",
-      "icon": null,
+      "icon": "src/renderer/public/brand/icons/continuum-memory-v1.ico",
       "signAndEditExecutable": false
     }
   },

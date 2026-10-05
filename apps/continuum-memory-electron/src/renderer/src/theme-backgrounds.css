@@ -1,0 +1,86 @@
+/* Background artwork extracted from the six approved concepts with official imagegen.
+   Vite bundles each local URL into the renderer so packaged builds work offline. */
+.app[data-theme='thread-teal'] { --theme-artwork: url('./assets/theme-backgrounds/thread-teal.png'); }
+.app[data-theme='thread-copper'] { --theme-artwork: url('./assets/theme-backgrounds/thread-copper.png'); }
+.app[data-theme='thread-ink'] { --theme-artwork: url('./assets/theme-backgrounds/thread-ink.png'); }
+.app[data-theme='network-ice'] { --theme-artwork: url('./assets/theme-backgrounds/network-ice.png'); }
+.app[data-theme='network-violet'] { --theme-artwork: url('./assets/theme-backgrounds/network-violet.png'); }
+.app[data-theme='network-polar'] { --theme-artwork: url('./assets/theme-backgrounds/network-polar.png'); }
+
+.app:is([data-theme='thread-teal'], [data-theme='thread-copper'], [data-theme='thread-ink'], [data-theme='network-ice'], [data-theme='network-violet'], [data-theme='network-polar'])::before {
+  inset: 0 0 0 var(--rail-width);
+  background-color: var(--bg);
+  background-image: var(--theme-artwork);
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  opacity: 1;
+  pointer-events: none;
+}
+.app:is([data-theme='thread-teal'], [data-theme='thread-copper'], [data-theme='thread-ink'], [data-theme='network-ice'], [data-theme='network-violet'], [data-theme='network-polar'])::after { display: none; }
+
+/* Keep small text legible where the artwork reaches the workspace edges. */
+.app[data-theme] .input-help {
+  align-self: center;
+  width: fit-content;
+  max-width: calc(100% - 28px);
+  margin: 5px auto 8px;
+  padding: 5px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+}
+.empty-features > span { background: color-mix(in srgb, var(--surface) 94%, transparent); }
+.message-author { width: fit-content; padding: 2px 6px; border-radius: 5px; background: color-mix(in srgb, var(--bg) 94%, transparent); }
+.message.user .message-author { align-self: flex-end; }
+
+@media(max-width:640px) {
+  .app:is([data-theme='thread-teal'], [data-theme='thread-copper'], [data-theme='thread-ink'], [data-theme='network-ice'], [data-theme='network-violet'], [data-theme='network-polar'])::before { background-position: 56% center; }
+  .app[data-theme] .input-help { margin-block: 5px 6px; padding: 4px 8px; }
+}
+
+/* Theme-specific ambient light, layered behind the live interface. */
+.app[data-theme='thread-teal'] {
+  --theme-light: radial-gradient(ellipse 62% 57% at 29% 16%, rgb(255 254 238 / .5), transparent 75%),
+    radial-gradient(ellipse 37% 58% at 100% 25%, rgb(231 186 96 / .17), transparent 77%),
+    radial-gradient(ellipse 55% 25% at 63% 100%, rgb(178 218 203 / .12), transparent 82%);
+}
+.app[data-theme='thread-copper'] {
+  --theme-light: radial-gradient(ellipse 58% 58% at 79% 16%, rgb(255 220 153 / .3), transparent 76%),
+    radial-gradient(ellipse 62% 48% at 26% 14%, rgb(255 252 236 / .44), transparent 82%),
+    radial-gradient(ellipse 37% 42% at 100% 93%, rgb(210 132 73 / .12), transparent 78%);
+}
+.app[data-theme='thread-ink'] {
+  --theme-light: linear-gradient(122deg, transparent 8%, rgb(240 248 255 / .29) 29%, rgb(230 243 255 / .1) 39%, transparent 55%),
+    radial-gradient(ellipse 59% 49% at 37% 12%, rgb(255 255 255 / .48), transparent 82%),
+    radial-gradient(ellipse 38% 53% at 100% 51%, rgb(163 190 224 / .15), transparent 80%);
+}
+.app[data-theme='network-ice'] {
+  --theme-light: radial-gradient(ellipse 41% 64% at 101% 24%, rgb(104 196 255 / .19), transparent 78%),
+    radial-gradient(ellipse 68% 29% at 76% 105%, rgb(81 186 243 / .12), transparent 79%),
+    linear-gradient(133deg, transparent 43%, rgb(186 226 255 / .035) 66%, transparent 79%);
+}
+.app[data-theme='network-violet'] {
+  --theme-light: radial-gradient(ellipse 46% 51% at 95% 16%, rgb(155 104 255 / .22), transparent 79%),
+    radial-gradient(ellipse 54% 36% at 101% 89%, rgb(108 78 225 / .19), transparent 79%),
+    radial-gradient(ellipse 43% 25% at 5% 98%, rgb(110 132 245 / .08), transparent 81%);
+}
+.app[data-theme='network-polar'] {
+  --theme-light: radial-gradient(ellipse 64% 48% at 34% 8%, rgb(255 255 255 / .62), transparent 83%),
+    radial-gradient(ellipse 45% 56% at 97% 29%, rgb(136 250 255 / .22), transparent 79%),
+    linear-gradient(128deg, transparent 39%, rgb(255 255 255 / .2) 60%, transparent 75%);
+}
+.app:is([data-theme='thread-teal'], [data-theme='thread-copper'], [data-theme='thread-ink'], [data-theme='network-ice'], [data-theme='network-violet'], [data-theme='network-polar'])::after {
+  display: block;
+  content: '';
+  inset: 0 0 0 var(--rail-width);
+  z-index: -1;
+  background: var(--theme-light);
+  background-size: 100% 100%;
+  mask-image: none;
+  opacity: 1;
+  mix-blend-mode: normal;
+  pointer-events: none;
+}
+@media(max-width:640px) {
+  .app:is([data-theme='thread-teal'], [data-theme='thread-copper'], [data-theme='thread-ink'], [data-theme='network-ice'], [data-theme='network-violet'], [data-theme='network-polar'])::after { opacity: .72; }
+}

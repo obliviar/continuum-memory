@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "sourceSha256": "824afce478f6975b298c9826bf925f5c31ae0785c4af56c5dc4e098d41a1c085",
+  "sizes": [
+    16,
+    20,
+    24,
+    32,
+    40,
+    48,
+    64,
+    128,
+    256
+  ],
+  "tiles": [
+    {
+      "id": "thread-teal",
+      "x": 130,
+      "y": 142,
+      "width": 275,
+      "height": 266
+    },
+    {
+      "id": "thread-copper",
+      "x": 629,
+      "y": 142,
+      "width": 276,
+      "height": 266
+    },
+    {
+      "id": "thread-ink",
+      "x": 1131,
+      "y": 142,
+      "width": 276,
+      "height": 267
+    },
+    {
+      "id": "network-ice",
+      "x": 130,
+      "y": 604,
+      "width": 277,
+      "height": 264
+    },
+    {
+      "id": "network-violet",
+      "x": 631,
+      "y": 604,
+      "width": 277,
+      "height": 264
+    },
+    {
+      "id": "network-polar",
+      "x": 1132,
+      "y": 605,
+      "width": 276,
+      "height": 264
+    }
+  ]
+}

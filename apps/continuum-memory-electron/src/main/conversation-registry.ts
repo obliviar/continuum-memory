@@ -9,6 +9,7 @@ export interface DesktopConversation {
   legacyRoot?: boolean
   pinned?: boolean
   archived?: boolean
+  deletedAt?: number
 }
 export function createConversationRegistry(options: {
   persistence: { load(): string | undefined; save(payload: string): void }
@@ -23,11 +24,12 @@ export function createConversationRegistry(options: {
     if (state.version !== 1 || !Array.isArray(state.conversations) || !state.conversations.length
       || new Set(state.conversations.map(c => c.id)).size !== state.conversations.length
       || new Set(state.conversations.map(c => c.memorySpaceId)).size !== state.conversations.length
-      || !state.conversations.some(c => c.id === state.activeId)
+      || !state.conversations.some(c => c.id === state.activeId && c.deletedAt === undefined)
       || state.conversations.filter(c => c.legacyRoot).length > 1
       || state.conversations.some(c => typeof c.id !== 'string' || !c.id || c.id.length > 200
         || typeof c.title !== 'string' || !c.title.trim() || c.title.length > 100
         || !Number.isSafeInteger(c.createdAt) || c.createdAt < 0
+        || (c.deletedAt !== undefined && (!Number.isSafeInteger(c.deletedAt) || c.deletedAt < 0))
         || (c.archived !== undefined && typeof c.archived !== 'boolean')
         || (c.pinned !== undefined && typeof c.pinned !== 'boolean')
         || (c.legacyRoot !== undefined && c.legacyRoot !== true)
@@ -44,11 +46,12 @@ export function createConversationRegistry(options: {
   const commit = (next: typeof state) => { options.persistence.save(JSON.stringify(next)); state = next }
   const get = (id: string) => {
     const entry = state.conversations.find(c => c.id === id)
-    if (!entry) throw new Error('Conversation does not exist')
+    if (!entry || entry.deletedAt !== undefined) throw new Error('Conversation does not exist')
     return structuredClone(entry)
   }
   return {
-    list: () => structuredClone(state.conversations),
+    list: () => structuredClone(state.conversations.filter(c => c.deletedAt === undefined)),
+    deleted: () => structuredClone(state.conversations.filter(c => c.deletedAt !== undefined)),
     active: () => get(state.activeId), get,
     create(title = '新对话') {
       if (typeof title !== 'string' || !title.trim() || title.length > 100) throw new Error('Invalid conversation title')
@@ -71,6 +74,17 @@ export function createConversationRegistry(options: {
       get(id)
       if (typeof archived !== 'boolean') throw new Error('Invalid archived state')
       commit({ ...state, conversations: state.conversations.map(c => c.id === id ? { ...c, archived } : c) })
+    },
+    remove(id: string) {
+      get(id)
+      const remaining = state.conversations.filter(c => c.id !== id && c.deletedAt === undefined)
+      const replacement = remaining.length ? undefined : { id: randomUUID(), memorySpaceId: randomUUID(), title: '新对话', createdAt: now() }
+      const activeId = state.activeId === id
+        ? (remaining.find(c => !c.archived) ?? remaining[0] ?? replacement)!.id : state.activeId
+      const conversations = state.conversations.map(c => c.id === id ? { ...c, deletedAt: now() } : c)
+      if (replacement) conversations.push(replacement)
+      commit({ ...state, activeId, conversations })
+      return get(activeId)
     },
     directory(id: string, root: string) {
       const entry = get(id)

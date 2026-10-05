@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 const props = defineProps<{ name: string }>()
 const paths: Record<string, string[]> = {
+  trash: ['M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15','M10 10v7M14 10v7'],
   bookmark: ['M6 3h12v19l-6-4-6 4V3Z'],
   archive: ['M3 3h18v5H3Z','M5 8v13h14V8M9 12h6'],
   expand: ['M4 10V4h6M14 4h6v6M20 14v6h-6M10 20H4v-6','M4 4l5 5M20 4l-5 5M20 20l-5-5M4 20l5-5'],
